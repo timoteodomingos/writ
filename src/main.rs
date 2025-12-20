@@ -1,54 +1,56 @@
+mod args;
+mod editor;
 mod theme;
+mod window;
 
-use gpui::*;
-use gpui_component::{
-    Root, Theme, TitleBar,
-    button::{Button, ButtonVariants},
-    h_flex, v_flex,
+use std::fs::File;
+
+use anyhow::Result;
+use clap::Parser;
+use gpui::{
+    Application, Bounds, Entity, Point, Size, Window, WindowBounds, WindowDecorations,
+    WindowOptions, div, prelude::*, rems,
 };
+use ropey::Rope;
 
-use crate::theme::dracula_theme;
+use crate::{args::Args, editor::Editor, window::window_shadow};
 
-pub struct Example;
-impl Render for Example {
-    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        v_flex()
-            .size_full()
-            .child(
-                TitleBar::new().child(
-                    h_flex()
-                        .w_full()
-                        .pr_2()
-                        .justify_between()
-                        .child("App with Custom title bar")
-                        .child("Right Item"),
-                ),
-            )
-            .child(
-                div()
-                    .id("window-body")
-                    .p_5()
-                    .size_full()
-                    .items_center()
-                    .justify_center()
-                    .child("Hello, World!")
-                    .child(
-                        Button::new("ok")
-                            .primary()
-                            .label("Let's Go!")
-                            .on_click(|_, _, _| println!("Clicked!")),
-                    ),
-            )
+pub struct Container {
+    editor: Entity<Editor>,
+}
+
+impl Render for Container {
+    fn render(&mut self, _window: &mut Window, _ct: &mut Context<Self>) -> impl IntoElement {
+        window_shadow().child(
+            div()
+                .id("container")
+                .overflow_scroll()
+                .px(rems(2.0))
+                .py(rems(1.6))
+                .flex()
+                .flex_col()
+                .size_full()
+                .child(self.editor.clone()),
+        )
     }
 }
 
+fn load_file(file: &std::path::Path) -> Result<Rope> {
+    Ok(Rope::from_reader(File::open(file)?)?)
+}
+
 fn main() {
-    let app = Application::new().with_assets(gpui_component_assets::Assets);
+    let args = Args::parse()
+        .validate()
+        .expect("Failed to validate arguments");
+    let rope = load_file(&args.file).expect("Failed to load file");
+    // for line in rope.lines() {
+    //     println!("{:#?}", line);
+    // }
+    let app = Application::new();
 
     app.run(move |cx| {
-        gpui_component::init(cx);
-        Theme::global_mut(cx).apply_config(&dracula_theme());
-
+        cx.set_global(theme::dracula());
         cx.spawn(async move |cx| {
             let window_options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds {
@@ -56,16 +58,14 @@ fn main() {
                     size: Size::new(800.0.into(), 800.0.into()),
                 })),
                 window_decorations: Some(WindowDecorations::Client),
-                titlebar: Some(TitleBar::title_bar_options()),
                 ..Default::default()
             };
 
-            cx.open_window(window_options, |window, cx| {
-                let view = cx.new(|_| Example);
-                cx.new(|cx| Root::new(view, window, cx))
-            })?;
-
-            Ok::<_, anyhow::Error>(())
+            cx.open_window(window_options, |_window, cx| {
+                let editor = cx.new(|cx| Editor::new(cx, rope));
+                cx.new(|_| Container { editor })
+            })
+            .expect("Failed to open window");
         })
         .detach();
     });
