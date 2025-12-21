@@ -2,7 +2,7 @@ use gpui::{
     App, ClickEvent, ElementId, Fill, MouseButton, ReadGlobal, Window, div, prelude::*, rems,
 };
 
-use crate::theme::Theme;
+use crate::{FileInfo, theme::Theme};
 
 fn traffic_light(
     id: impl Into<ElementId>,
@@ -23,6 +23,12 @@ fn traffic_light(
 
 pub fn title_bar(cx: &mut App) -> impl IntoElement {
     let theme = Theme::global(cx);
+    let file_name = FileInfo::global(cx)
+        .path
+        .file_name()
+        .expect("file name")
+        .display()
+        .to_string();
     div()
         .id("title-bar")
         .w_full()
@@ -36,7 +42,7 @@ pub fn title_bar(cx: &mut App) -> impl IntoElement {
         .child(
             div()
                 .w_full()
-                .child("this is the custom titlebar")
+                .child(file_name)
                 .on_mouse_down(MouseButton::Left, |_e, window, _| {
                     window.start_window_move();
                 }),

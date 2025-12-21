@@ -9,8 +9,8 @@ use std::fs::File;
 use anyhow::Result;
 use clap::Parser;
 use gpui::{
-    Application, Bounds, Entity, FocusHandle, KeyBinding, Point, Size, Window, WindowBounds,
-    WindowDecorations, WindowOptions, div, prelude::*, rems,
+    Application, Bounds, Entity, FocusHandle, Global, KeyBinding, Point, Size, Window,
+    WindowBounds, WindowDecorations, WindowOptions, div, prelude::*, rems,
 };
 use ropey::Rope;
 
@@ -19,6 +19,12 @@ use crate::{
     editor::Editor,
     window::{CloseWindow, Quit, window_shadow},
 };
+
+struct FileInfo {
+    path: std::path::PathBuf,
+}
+
+impl Global for FileInfo {}
 
 pub struct Root {
     editor: Entity<Editor>,
@@ -32,7 +38,6 @@ impl Render for Root {
                 .id("root")
                 .track_focus(&self.focus_handle)
                 .on_action(|CloseWindow, window, _| {
-                    println!("Window close requested!");
                     window.remove_window();
                 })
                 .on_action(|Quit, _, cx| {
@@ -65,6 +70,7 @@ fn main() {
 
     app.run(move |cx| {
         cx.set_global(theme::dracula());
+        cx.set_global(FileInfo { path: args.file });
         cx.bind_keys([
             KeyBinding::new("ctrl-w", CloseWindow, None),
             KeyBinding::new("cmd-w", CloseWindow, None),
