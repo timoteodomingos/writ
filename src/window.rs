@@ -1,10 +1,12 @@
 use gpui::{
     AnyElement, App, Bounds, BoxShadow, CursorStyle, Decorations, HitboxBehavior, Hsla,
-    MouseButton, Pixels, Point, ReadGlobal, ResizeEdge, Size, Window, canvas, div, point,
+    MouseButton, Pixels, Point, ReadGlobal, ResizeEdge, Size, Window, actions, canvas, div, point,
     prelude::*, px,
 };
 
-use crate::theme::Theme;
+use crate::{theme::Theme, title_bar::title_bar};
+
+actions!(window, [CloseWindow, Quit]);
 
 #[derive(IntoElement, Default)]
 pub struct WindowShadow {
@@ -46,18 +48,15 @@ impl RenderOnce for WindowShadow {
                 Decorations::Client { tiling, .. } => div
                     .child(
                         canvas(
-                            |_bounds, window, _cx| {
+                            |bounds, window, _cx| {
                                 window.insert_hitbox(
-                                    Bounds::new(
-                                        point(px(0.0), px(0.0)),
-                                        window.window_bounds().get_bounds().size,
-                                    ),
+                                    Bounds::new(point(px(0.0), px(0.0)), bounds.size),
                                     HitboxBehavior::Normal,
                                 )
                             },
-                            move |_bounds, hitbox, window, _cx| {
+                            move |bounds, hitbox, window, _cx| {
                                 let mouse = window.mouse_position();
-                                let size = window.window_bounds().get_bounds().size;
+                                let size = bounds.size;
                                 let Some(edge) = resize_edge(mouse, shadow_size, size) else {
                                     return;
                                 };
@@ -99,7 +98,7 @@ impl RenderOnce for WindowShadow {
                     .when(!tiling.right, |div| div.pr(shadow_size))
                     .on_mouse_move(|_e, window, _cx| window.refresh())
                     .on_mouse_down(MouseButton::Left, move |e, window, _cx| {
-                        let size = window.window_bounds().get_bounds().size;
+                        let size = window.viewport_size();
                         let pos = e.position;
 
                         if let Some(edge) = resize_edge(pos, shadow_size, size) {
@@ -147,31 +146,7 @@ impl RenderOnce for WindowShadow {
                     .size_full()
                     .flex()
                     .flex_col()
-                    .child(
-                        div()
-                            .id("hello")
-                            .w_full()
-                            .border_color(theme.selection)
-                            .border_b_1()
-                            .flex()
-                            .flex_row()
-                            .child(
-                                div()
-                                    .w_full()
-                                    .child("this is the custom titlebar")
-                                    .on_mouse_down(MouseButton::Left, |_e, window, _| {
-                                        window.start_window_move();
-                                    }),
-                            )
-                            .child(
-                                div()
-                                    .id("close-button")
-                                    .on_click(|_, _, cx| {
-                                        cx.quit();
-                                    })
-                                    .child("x"),
-                            ),
-                    )
+                    .child(title_bar(cx))
                     .children(self.children),
             )
     }
