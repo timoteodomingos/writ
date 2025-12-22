@@ -1,8 +1,8 @@
 use anyhow::Result;
-use writ::document::Document;
+use writ::document::{Document, ToMarkdown};
 
 #[test]
-fn test_header() -> Result<()> {
+fn test_inlines() -> Result<()> {
     let cases = [
         "# Header 1",
         "## Header 2",

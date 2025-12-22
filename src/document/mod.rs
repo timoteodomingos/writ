@@ -1,0 +1,186 @@
+mod block;
+mod parser;
+mod rich_text;
+
+pub use block::*;
+pub use parser::*;
+pub use rich_text::*;
+
+use std::fs;
+
+use anyhow::Result;
+use fractional_index::FractionalIndex;
+use pulldown_cmark::Parser as MarkdownParser;
+use slotmap::SlotMap;
+
+pub trait ToMarkdown {
+    fn to_markdown(&self) -> String;
+}
+
+#[derive(Default, Debug, Clone)]
+pub struct Document {
+    pub blocks: SlotMap<BlockId, Block>,
+}
+
+impl Document {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Get children of a parent (None for root), sorted by order
+    pub fn children(&self, parent: Option<BlockId>) -> Vec<BlockId> {
+        let mut children: Vec<_> = self
+            .blocks
+            .iter()
+            .filter(|(_, b)| b.parent == parent)
+            .map(|(id, b)| (id, &b.order))
+            .collect();
+
+        children.sort_by(|(_, a), (_, b)| a.cmp(b));
+        children.into_iter().map(|(id, _)| id).collect()
+    }
+
+    /// Get the previous sibling of a block
+    pub fn previous_sibling(&self, block_id: BlockId) -> Option<BlockId> {
+        let block = &self.blocks[block_id];
+        let siblings = self.children(block.parent);
+        let pos = siblings.iter().position(|&id| id == block_id)?;
+        if pos > 0 {
+            Some(siblings[pos - 1])
+        } else {
+            None
+        }
+    }
+
+    /// Get the next sibling of a block
+    pub fn next_sibling(&self, block_id: BlockId) -> Option<BlockId> {
+        let block = &self.blocks[block_id];
+        let siblings = self.children(block.parent);
+        let pos = siblings.iter().position(|&id| id == block_id)?;
+        siblings.get(pos + 1).copied()
+    }
+
+    /// Insert a new block after the given block (as sibling)
+    pub fn insert_after(&mut self, after: BlockId, kind: BlockKind) -> BlockId {
+        let parent = self.blocks[after].parent;
+        let after_order = &self.blocks[after].order;
+
+        let order = match self.next_sibling(after) {
+            Some(next) => {
+                FractionalIndex::new_between(after_order, &self.blocks[next].order).unwrap()
+            }
+            None => FractionalIndex::new_after(after_order),
+        };
+
+        self.blocks.insert(Block {
+            parent,
+            order,
+            kind,
+            content: RichText::new(),
+        })
+    }
+
+    /// Insert a new block as the last child of a parent
+    pub fn insert_last_child(&mut self, parent: Option<BlockId>, kind: BlockKind) -> BlockId {
+        let children = self.children(parent);
+
+        let order = match children.last() {
+            Some(&last) => FractionalIndex::new_after(&self.blocks[last].order),
+            None => FractionalIndex::default(),
+        };
+
+        self.blocks.insert(Block {
+            parent,
+            order,
+            kind,
+            content: RichText::new(),
+        })
+    }
+
+    /// Indent: make block a child of its previous sibling
+    pub fn indent(&mut self, block_id: BlockId) -> bool {
+        let Some(prev) = self.previous_sibling(block_id) else {
+            return false;
+        };
+
+        let new_order = match self.children(Some(prev)).last() {
+            Some(&last) => FractionalIndex::new_after(&self.blocks[last].order),
+            None => FractionalIndex::default(),
+        };
+
+        let block = &mut self.blocks[block_id];
+        block.parent = Some(prev);
+        block.order = new_order;
+        true
+    }
+
+    /// Outdent: make block a sibling of its parent
+    pub fn outdent(&mut self, block_id: BlockId) -> bool {
+        let Some(parent_id) = self.blocks[block_id].parent else {
+            return false;
+        };
+
+        let grandparent = self.blocks[parent_id].parent;
+        let parent_order = &self.blocks[parent_id].order;
+
+        let new_order = match self.next_sibling(parent_id) {
+            Some(uncle) => {
+                FractionalIndex::new_between(parent_order, &self.blocks[uncle].order).unwrap()
+            }
+            None => FractionalIndex::new_after(parent_order),
+        };
+
+        let block = &mut self.blocks[block_id];
+        block.parent = grandparent;
+        block.order = new_order;
+        true
+    }
+
+    /// Delete a block
+    pub fn delete(&mut self, block_id: BlockId) -> Option<Block> {
+        self.blocks.remove(block_id)
+    }
+
+    pub fn from_file(path: &std::path::Path) -> Result<Self> {
+        let content = fs::read_to_string(path)?;
+        Self::from_markdown(&content)
+    }
+
+    pub fn from_markdown(markdown: &str) -> Result<Self> {
+        let parser = MarkdownParser::new(markdown);
+        let doc = Parser::new().parse(parser);
+        Ok(doc)
+    }
+
+    fn blocks_to_markdown(&self, parent: Option<BlockId>, depth: usize) -> String {
+        let children = self.children(parent);
+        let mut result = Vec::new();
+
+        for child_id in children {
+            let block = &self.blocks[child_id];
+            let block_md = block.to_markdown_with_depth(depth);
+
+            let children_md = self.blocks_to_markdown(Some(child_id), depth + 1);
+
+            if children_md.is_empty() {
+                result.push(block_md);
+            } else {
+                result.push(format!("{}\n{}", block_md, children_md));
+            }
+        }
+
+        result.join("\n\n")
+    }
+
+    pub fn save_to_file(&self, path: &std::path::Path) -> Result<()> {
+        let markdown = self.to_markdown();
+        fs::write(path, markdown)?;
+        Ok(())
+    }
+}
+
+impl ToMarkdown for Document {
+    fn to_markdown(&self) -> String {
+        self.blocks_to_markdown(None, 0)
+    }
+}
