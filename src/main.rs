@@ -1,30 +1,19 @@
-mod args;
-mod editor;
-mod theme;
-mod title_bar;
-mod window;
-
 use std::fs::File;
 
 use anyhow::Result;
 use clap::Parser;
 use gpui::{
-    Application, Bounds, Entity, FocusHandle, Global, KeyBinding, Point, Size, Window,
-    WindowBounds, WindowDecorations, WindowOptions, div, prelude::*, rems,
+    Application, Bounds, Entity, FocusHandle, KeyBinding, Point, Size, Window, WindowBounds,
+    WindowDecorations, WindowOptions, div, prelude::*, rems,
 };
 use ropey::Rope;
-
-use crate::{
+use writ::{
     args::Args,
     editor::Editor,
+    theme,
+    title_bar::FileInfo,
     window::{CloseWindow, Quit, window_shadow},
 };
-
-struct FileInfo {
-    path: std::path::PathBuf,
-}
-
-impl Global for FileInfo {}
 
 pub struct Root {
     editor: Entity<Editor>,

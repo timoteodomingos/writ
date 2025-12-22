@@ -6,9 +6,15 @@ authors = ["Wilfred Denton <wilfred@hey.com>"]
 license = "MIT"
 edition = "2024"
 
+[[bin]]
+name = "writ"
+path = "src/main.rs"
+
 [dependencies]
 anyhow = "1.0.100"
 clap = { version = "4.5.53", features = ["derive"] }
 gpui = "0.2.2"
+itertools = "0.14.0"
+pulldown-cmark = "0.13.0"
 ropey = "1.6.1"
 serde_json = "1.0.145"

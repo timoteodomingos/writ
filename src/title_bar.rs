@@ -1,8 +1,15 @@
 use gpui::{
-    App, ClickEvent, ElementId, Fill, MouseButton, ReadGlobal, Window, div, prelude::*, rems,
+    App, ClickEvent, ElementId, Fill, Global, MouseButton, ReadGlobal, Window, div, prelude::*,
+    rems,
 };
 
-use crate::{FileInfo, theme::Theme};
+use crate::theme::Theme;
+
+pub struct FileInfo {
+    pub path: std::path::PathBuf,
+}
+
+impl Global for FileInfo {}
 
 fn traffic_light(
     id: impl Into<ElementId>,
