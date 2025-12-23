@@ -7,9 +7,9 @@ fn test_lists() -> Result<()> {
         r#"- first item
 - second item
 - third item"#,
-        r#"1. first item\n
-1. second item
-1. third item"#,
+        r#"1. first item
+2. second item
+3. third item"#,
         r#"- first item
   - nested item
   - second item"#,

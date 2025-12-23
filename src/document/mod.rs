@@ -152,15 +152,15 @@ impl Document {
         Ok(doc)
     }
 
-    fn blocks_to_markdown(&self, parent: Option<BlockId>, depth: usize) -> String {
+    fn blocks_to_markdown(&self, parent: Option<BlockId>) -> String {
         let children = self.children(parent);
         let mut parts = Vec::new();
 
         for child_id in children {
             let block = &self.blocks[child_id];
-            let block_md = block.to_markdown_with_depth(depth);
+            let block_md = block.to_markdown(child_id, &self.blocks);
 
-            let children_md = self.blocks_to_markdown(Some(child_id), depth + 1);
+            let children_md = self.blocks_to_markdown(Some(child_id));
 
             let full_block = if children_md.is_empty() {
                 block_md
@@ -200,6 +200,6 @@ impl Document {
 
 impl ToMarkdown for Document {
     fn to_markdown(&self) -> String {
-        self.blocks_to_markdown(None, 0)
+        self.blocks_to_markdown(None)
     }
 }
