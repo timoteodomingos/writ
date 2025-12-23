@@ -1,7 +1,5 @@
 use strum::EnumDiscriminants;
 
-use crate::document::ToMarkdown;
-
 #[derive(EnumDiscriminants, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TextStyle {
     Bold,
@@ -165,10 +163,8 @@ impl RichText {
             self.chunks.push(chunk);
         }
     }
-}
 
-impl ToMarkdown for RichText {
-    fn to_markdown(&self) -> String {
+    pub fn to_markdown(&self) -> String {
         let mut result = String::new();
         let mut open_styles: Vec<TextStyle> = Vec::new();
 

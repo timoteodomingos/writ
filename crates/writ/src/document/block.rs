@@ -1,7 +1,7 @@
 use fractional_index::FractionalIndex;
 use slotmap::DefaultKey;
 
-use crate::document::{ToMarkdown, rich_text::RichText};
+use crate::document::rich_text::RichText;
 
 pub type BlockId = DefaultKey;
 

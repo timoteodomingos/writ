@@ -13,10 +13,6 @@ use fractional_index::FractionalIndex;
 use pulldown_cmark::Parser as MarkdownParser;
 use slotmap::SlotMap;
 
-pub trait ToMarkdown {
-    fn to_markdown(&self) -> String;
-}
-
 #[derive(Default, Debug, Clone)]
 pub struct Document {
     pub blocks: SlotMap<BlockId, Block>,
@@ -152,6 +148,13 @@ impl Document {
         Ok(doc)
     }
 
+    pub fn to_markdown(&self) -> String {
+        let mut result = self.blocks_to_markdown(None);
+        // add newline at the end of the document
+        result.push('\n');
+        result
+    }
+
     fn depth(&self, block_id: BlockId) -> usize {
         successors(self.blocks[block_id].parent, |&id| self.blocks[id].parent).count()
     }
@@ -210,14 +213,5 @@ impl Document {
         let markdown = self.to_markdown();
         fs::write(path, markdown)?;
         Ok(())
-    }
-}
-
-impl ToMarkdown for Document {
-    fn to_markdown(&self) -> String {
-        let mut result = self.blocks_to_markdown(None);
-        // add newline at the end of the document
-        result.push('\n');
-        result
     }
 }

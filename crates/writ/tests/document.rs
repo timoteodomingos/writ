@@ -1,5 +1,5 @@
 use anyhow::Result;
-use writ::document::{Document, ToMarkdown};
+use writ::document::Document;
 
 #[test]
 fn test_lists() -> Result<()> {

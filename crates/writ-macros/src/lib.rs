@@ -30,7 +30,7 @@ pub fn generate_markdown_tests(input: TokenStream) -> TokenStream {
                 fn #test_name() {
                     let input = include_str!(#file_path);
                     let doc = writ::document::Document::from_markdown(input).unwrap();
-                    let output = writ::document::ToMarkdown::to_markdown(&doc);
+                    let output = doc.to_markdown();
                     assert_eq!(input, output, "Roundtrip failed for {}", #file_path);
                 }
             }
