@@ -6,7 +6,7 @@ pub use block::*;
 pub use parser::*;
 pub use rich_text::*;
 
-use std::fs;
+use std::{fs, iter::successors};
 
 use anyhow::Result;
 use fractional_index::FractionalIndex;
@@ -152,20 +152,25 @@ impl Document {
         Ok(doc)
     }
 
+    fn depth(&self, block_id: BlockId) -> usize {
+        successors(self.blocks[block_id].parent, |&id| self.blocks[id].parent).count()
+    }
+
     fn blocks_to_markdown(&self, parent: Option<BlockId>) -> String {
         let children = self.children(parent);
         let mut parts = Vec::new();
 
-        for child_id in children {
-            let block = &self.blocks[child_id];
-            let block_md = block.to_markdown(child_id, &self.blocks);
+        for (index, child_id) in children.iter().enumerate() {
+            let block = &self.blocks[*child_id];
+            let depth = self.depth(*child_id);
+            let block_md = block.to_markdown(depth, index);
 
-            let children_md = self.blocks_to_markdown(Some(child_id));
+            let children_md = self.blocks_to_markdown(Some(*child_id));
 
             let full_block = if children_md.is_empty() {
                 block_md
             } else {
-                let block_children = self.children(Some(child_id));
+                let block_children = self.children(Some(*child_id));
                 let first_child_is_list_item = block_children
                     .first()
                     .is_some_and(|&id| self.blocks[id].kind.is_list_item());
@@ -178,7 +183,7 @@ impl Document {
                 format!("{}{}{}", block_md, separator, children_md)
             };
 
-            parts.push((child_id, full_block));
+            parts.push((*child_id, full_block));
         }
 
         // Join blocks: list items use single newline, others use double

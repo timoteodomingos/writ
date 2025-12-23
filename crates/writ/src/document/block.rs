@@ -1,5 +1,5 @@
 use fractional_index::FractionalIndex;
-use slotmap::{DefaultKey, SlotMap};
+use slotmap::DefaultKey;
 
 use crate::document::{ToMarkdown, rich_text::RichText};
 
@@ -45,38 +45,8 @@ impl Block {
         }
     }
 
-    /// Compute depth by walking up the parent chain
-    fn depth(&self, blocks: &SlotMap<BlockId, Block>) -> usize {
-        let mut depth = 0;
-        let mut current = self.parent;
-        while let Some(parent_id) = current {
-            depth += 1;
-            current = blocks[parent_id].parent;
-        }
-        depth
-    }
-
-    /// Get the 1-based position among siblings (for numbered lists)
-    fn sibling_position(&self, id: BlockId, blocks: &SlotMap<BlockId, Block>) -> usize {
-        let siblings = Self::children_of(self.parent, blocks);
-        siblings.iter().position(|&sid| sid == id).unwrap() + 1
-    }
-
-    /// Get children of a parent, sorted by order (duplicated from Document to avoid circular dep)
-    fn children_of(parent: Option<BlockId>, blocks: &SlotMap<BlockId, Block>) -> Vec<BlockId> {
-        let mut children: Vec<_> = blocks
-            .iter()
-            .filter(|(_, b)| b.parent == parent)
-            .map(|(id, b)| (id, &b.order))
-            .collect();
-
-        children.sort_by(|(_, a), (_, b)| a.cmp(b));
-        children.into_iter().map(|(id, _)| id).collect()
-    }
-
-    pub fn to_markdown(&self, id: BlockId, blocks: &SlotMap<BlockId, Block>) -> String {
+    pub fn to_markdown(&self, depth: usize, index: usize) -> String {
         let content = self.content.to_markdown();
-        let depth = self.depth(blocks);
 
         match &self.kind {
             BlockKind::Paragraph => {
@@ -92,8 +62,7 @@ impl Block {
             BlockKind::Quote => format!("> {}", content),
             BlockKind::BulletItem => format!("{}- {}", "  ".repeat(depth), content),
             BlockKind::NumberedItem => {
-                let num = self.sibling_position(id, blocks);
-                format!("{}{}. {}", "  ".repeat(depth), num, content)
+                format!("{}{}. {}", "  ".repeat(depth), index + 1, content)
             }
         }
     }
