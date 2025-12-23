@@ -200,6 +200,9 @@ impl Document {
 
 impl ToMarkdown for Document {
     fn to_markdown(&self) -> String {
-        self.blocks_to_markdown(None)
+        let mut result = self.blocks_to_markdown(None);
+        // add newline at the end of the document
+        result.push('\n');
+        result
     }
 }
