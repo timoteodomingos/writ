@@ -2,6 +2,27 @@ use anyhow::Result;
 use writ::document::{Document, ToMarkdown};
 
 #[test]
+fn test_lists() -> Result<()> {
+    let cases = [
+        r#"- first item
+- second item
+- third item"#,
+        r#"1. first item\n
+1. second item
+1. third item"#,
+        r#"- first item
+  - nested item
+  - second item"#,
+    ];
+    for case in cases {
+        let d = Document::from_markdown(case)?;
+        let md = d.to_markdown();
+        assert_eq!(case, md);
+    }
+    Ok(())
+}
+
+#[test]
 fn test_inlines() -> Result<()> {
     let cases = [
         "# Header 1",

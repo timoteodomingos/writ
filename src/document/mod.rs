@@ -154,7 +154,7 @@ impl Document {
 
     fn blocks_to_markdown(&self, parent: Option<BlockId>, depth: usize) -> String {
         let children = self.children(parent);
-        let mut result = Vec::new();
+        let mut parts = Vec::new();
 
         for child_id in children {
             let block = &self.blocks[child_id];
@@ -162,14 +162,33 @@ impl Document {
 
             let children_md = self.blocks_to_markdown(Some(child_id), depth + 1);
 
-            if children_md.is_empty() {
-                result.push(block_md);
+            let full_block = if children_md.is_empty() {
+                block_md
             } else {
-                result.push(format!("{}\n{}", block_md, children_md));
-            }
+                format!("{}\n{}", block_md, children_md)
+            };
+
+            parts.push((child_id, full_block));
         }
 
-        result.join("\n\n")
+        // Join blocks: list items use single newline, others use double
+        let mut result = String::new();
+        for (i, (id, md)) in parts.iter().enumerate() {
+            if i > 0 {
+                let prev_id = parts[i - 1].0;
+                let prev_is_list_item = self.blocks[prev_id].kind.is_list_item();
+                let curr_is_list_item = self.blocks[*id].kind.is_list_item();
+
+                if prev_is_list_item && curr_is_list_item {
+                    result.push('\n');
+                } else {
+                    result.push_str("\n\n");
+                }
+            }
+            result.push_str(md);
+        }
+
+        result
     }
 
     pub fn save_to_file(&self, path: &std::path::Path) -> Result<()> {

@@ -21,6 +21,12 @@ pub enum BlockKind {
     NumberedItem,
 }
 
+impl BlockKind {
+    pub fn is_list_item(&self) -> bool {
+        matches!(self, BlockKind::BulletItem | BlockKind::NumberedItem)
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Block {
     pub parent: Option<BlockId>,

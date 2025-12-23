@@ -14,6 +14,8 @@ pub struct Parser {
     style_stack: Vec<TextStyle>,
     /// Current block being built
     current_block: Option<BlockId>,
+    /// Stack of list types: true = ordered, false = unordered
+    list_stack: Vec<bool>,
 }
 
 impl Parser {
@@ -28,9 +30,15 @@ impl Parser {
     }
 
     fn push_block(&mut self, kind: BlockKind) -> BlockId {
-        let id = self.document.insert_last_child(None, kind);
+        let id = self.document.insert_last_child(self.current_block, kind);
         self.current_block = Some(id);
         id
+    }
+
+    fn pop_block(&mut self) {
+        if let Some(block_id) = self.current_block {
+            self.current_block = self.document.blocks[block_id].parent;
+        }
     }
 
     fn push_text(&mut self, text: &str) {
@@ -73,11 +81,15 @@ impl Parser {
                     Tag::CodeBlock(_code_block_kind) => {
                         todo!("CodeBlock")
                     }
-                    Tag::List(_) => {
-                        todo!("List")
+                    Tag::List(start) => {
+                        self.list_stack.push(start.is_some());
                     }
                     Tag::Item => {
-                        todo!("List Item")
+                        self.push_block(if *self.list_stack.last().expect("No list in stack") {
+                            BlockKind::NumberedItem
+                        } else {
+                            BlockKind::BulletItem
+                        });
                     }
                     Tag::Emphasis => {
                         self.push_style(TextStyle::Italic);
@@ -97,7 +109,13 @@ impl Parser {
                 },
                 Event::End(tag_end) => match tag_end {
                     TagEnd::Paragraph | TagEnd::Heading(_) => {
-                        self.current_block = None;
+                        self.pop_block();
+                    }
+                    TagEnd::List(_) => {
+                        self.list_stack.pop();
+                    }
+                    TagEnd::Item => {
+                        self.pop_block();
                     }
                     TagEnd::Emphasis => {
                         self.pop_style(TextStyleDiscriminants::Italic);
