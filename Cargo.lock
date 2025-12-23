@@ -6694,6 +6694,17 @@ dependencies = [
  "serde_json",
  "slotmap",
  "strum 0.27.2",
+ "writ-macros",
+]
+
+[[package]]
+name = "writ-macros"
+version = "0.1.0"
+dependencies = [
+ "glob",
+ "proc-macro2",
+ "quote",
+ "syn 2.0.111",
 ]
 
 [[package]]
