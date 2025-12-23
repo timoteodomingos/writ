@@ -2,7 +2,7 @@ use pulldown_cmark::{Event, Parser as MarkdownParser, Tag, TagEnd};
 use strum::IntoDiscriminant;
 
 use crate::document::{
-    Document, TextStyleDiscriminants,
+    Block, Document, TextStyleDiscriminants,
     block::{BlockId, BlockKind},
     rich_text::{StyleSet, TextStyle},
 };
@@ -41,6 +41,11 @@ impl Parser {
         }
     }
 
+    fn peek_block(&mut self) -> Option<&Block> {
+        self.current_block
+            .and_then(|block_id| self.document.blocks.get(block_id))
+    }
+
     fn push_text(&mut self, text: &str) {
         if let Some(block_id) = self.current_block {
             let styles = self.current_styles();
@@ -64,10 +69,16 @@ impl Parser {
 
     pub fn parse(mut self, parser: MarkdownParser) -> Document {
         for event in parser {
+            println!("Event: {:#?}", event);
             match event {
                 Event::Start(tag) => match tag {
                     Tag::Paragraph => {
-                        self.push_block(BlockKind::Paragraph);
+                        if !self
+                            .peek_block()
+                            .is_some_and(|b| b.kind.is_list_item() && b.content.is_empty())
+                        {
+                            self.push_block(BlockKind::Paragraph);
+                        }
                     }
                     Tag::Heading { level, id, .. } => {
                         self.push_block(BlockKind::Heading {
@@ -108,7 +119,15 @@ impl Parser {
                     other => todo!("Start tag: {other:?}"),
                 },
                 Event::End(tag_end) => match tag_end {
-                    TagEnd::Paragraph | TagEnd::Heading(_) => {
+                    TagEnd::Paragraph => {
+                        if self
+                            .peek_block()
+                            .is_some_and(|b| b.kind == BlockKind::Paragraph)
+                        {
+                            self.pop_block();
+                        }
+                    }
+                    TagEnd::Heading(_) => {
                         self.pop_block();
                     }
                     TagEnd::List(_) => {

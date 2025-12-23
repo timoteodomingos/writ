@@ -165,7 +165,17 @@ impl Document {
             let full_block = if children_md.is_empty() {
                 block_md
             } else {
-                format!("{}\n{}", block_md, children_md)
+                let block_children = self.children(Some(child_id));
+                let first_child_is_list_item = block_children
+                    .first()
+                    .is_some_and(|&id| self.blocks[id].kind.is_list_item());
+
+                let separator = if block.kind.is_list_item() && first_child_is_list_item {
+                    "\n"
+                } else {
+                    "\n\n"
+                };
+                format!("{}{}{}", block_md, separator, children_md)
             };
 
             parts.push((child_id, full_block));

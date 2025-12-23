@@ -79,7 +79,9 @@ impl Block {
         let depth = self.depth(blocks);
 
         match &self.kind {
-            BlockKind::Paragraph => content,
+            BlockKind::Paragraph => {
+                format!("{}{}", "  ".repeat(depth), content)
+            }
             BlockKind::Heading { level, .. } => {
                 format!("{} {}", "#".repeat(*level as usize), content)
             }
