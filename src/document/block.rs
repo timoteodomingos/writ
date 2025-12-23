@@ -56,20 +56,10 @@ impl Block {
         depth
     }
 
-    /// Get the 1-based position among same-type siblings (for numbered lists)
+    /// Get the 1-based position among siblings (for numbered lists)
     fn sibling_position(&self, id: BlockId, blocks: &SlotMap<BlockId, Block>) -> usize {
         let siblings = Self::children_of(self.parent, blocks);
-        let mut position = 0;
-        for sibling_id in siblings {
-            let sibling = &blocks[sibling_id];
-            if sibling.kind == self.kind {
-                position += 1;
-            }
-            if sibling_id == id {
-                break;
-            }
-        }
-        position
+        siblings.iter().position(|&sid| sid == id).unwrap() + 1
     }
 
     /// Get children of a parent, sorted by order (duplicated from Document to avoid circular dep)
