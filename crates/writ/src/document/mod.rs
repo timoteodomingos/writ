@@ -196,8 +196,12 @@ impl Document {
                 let prev_id = parts[i - 1].0;
                 let prev_is_list_item = self.blocks[prev_id].kind.is_list_item();
                 let curr_is_list_item = self.blocks[*id].kind.is_list_item();
+                let prev_ends_with_list_item = self
+                    .children(Some(prev_id))
+                    .last()
+                    .is_none_or(|&id| self.blocks[id].kind.is_list_item());
 
-                if prev_is_list_item && curr_is_list_item {
+                if prev_is_list_item && curr_is_list_item && prev_ends_with_list_item {
                     result.push('\n');
                 } else {
                     result.push_str("\n\n");

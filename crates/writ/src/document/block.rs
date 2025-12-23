@@ -57,7 +57,12 @@ impl Block {
             }
             BlockKind::CodeBlock { language } => {
                 let lang = language.as_deref().unwrap_or("");
-                format!("```{}\n{}\n```", lang, content)
+                let indent = "  ".repeat(depth);
+                let indented_content = content
+                    .lines()
+                    .map(|line| format!("{}{}\n", indent, line))
+                    .collect::<String>();
+                format!("{}```{}\n{}{}```", indent, lang, indented_content, indent)
             }
             BlockKind::Quote => format!("> {}", content),
             BlockKind::BulletItem => format!("{}- {}", "  ".repeat(depth), content),

@@ -1,4 +1,4 @@
-use pulldown_cmark::{Event, Parser as MarkdownParser, Tag, TagEnd};
+use pulldown_cmark::{CodeBlockKind, Event, Parser as MarkdownParser, Tag, TagEnd};
 use strum::IntoDiscriminant;
 
 use crate::document::{
@@ -89,8 +89,13 @@ impl Parser {
                     Tag::BlockQuote(_) => {
                         todo!("BlockQuote")
                     }
-                    Tag::CodeBlock(_code_block_kind) => {
-                        todo!("CodeBlock")
+                    Tag::CodeBlock(CodeBlockKind::Fenced(language)) => {
+                        self.push_block(BlockKind::CodeBlock {
+                            language: Some(language.to_string()),
+                        });
+                    }
+                    Tag::CodeBlock(CodeBlockKind::Indented) => {
+                        self.push_block(BlockKind::CodeBlock { language: None });
                     }
                     Tag::List(start) => {
                         self.list_stack.push(start.is_some());
@@ -128,6 +133,9 @@ impl Parser {
                         }
                     }
                     TagEnd::Heading(_) => {
+                        self.pop_block();
+                    }
+                    TagEnd::CodeBlock => {
                         self.pop_block();
                     }
                     TagEnd::List(_) => {
