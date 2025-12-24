@@ -5,15 +5,16 @@ mod rich_text;
 
 pub use block::*;
 pub use container::*;
-use itertools::Itertools;
+use fractional_index::FractionalIndex;
 pub use parser::*;
 use pulldown_cmark::Parser as MarkdownParser;
 pub use rich_text::*;
 use slotmap::{DefaultKey, SlotMap};
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 pub struct Document {
     pub blocks: SlotMap<DefaultKey, Block>,
+    pub block_order: BTreeMap<FractionalIndex, DefaultKey>,
     pub containers: SlotMap<DefaultKey, Container>,
 }
 
@@ -24,18 +25,12 @@ impl Document {
     }
 
     pub fn to_markdown(&self) -> String {
-        let sorted_blocks: Vec<_> = self
-            .blocks
-            .iter()
-            .sorted_by_key(|(_, block)| block.index.clone())
-            .map(|(key, _)| key)
-            .collect();
-
         let mut result = String::new();
         let mut container_counts: HashMap<DefaultKey, usize> = HashMap::new();
         let mut prev_block_key: Option<DefaultKey> = None;
 
-        for key in sorted_blocks {
+        for k in self.block_order.values() {
+            let key = *k;
             let sibling_idx = self.sibling_index(key);
 
             // Add separator between blocks
@@ -199,11 +194,10 @@ impl Document {
         let block = &self.blocks[block_key];
         let parent = block.parent();
 
-        self.blocks
+        self.block_order
             .iter()
-            .filter(|(_, b)| b.parent() == parent)
-            .sorted_by_key(|(_, b)| b.index.clone())
-            .position(|(k, _)| k == block_key)
+            .filter(|(_, k)| self.blocks[**k].parent() == parent)
+            .position(|(_, k)| k == &block_key)
             .unwrap()
     }
 }

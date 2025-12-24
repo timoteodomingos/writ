@@ -1,4 +1,3 @@
-use fractional_index::FractionalIndex;
 use slotmap::DefaultKey;
 use strum::EnumDiscriminants;
 
@@ -22,7 +21,6 @@ pub enum BlockKind {
 #[derive(Debug, Clone)]
 pub struct Block {
     pub kind: BlockKind,
-    pub index: FractionalIndex,
     pub text: RichText,
 }
 

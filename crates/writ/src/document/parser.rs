@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use fractional_index::FractionalIndex;
 use pulldown_cmark::{CodeBlockKind, Event, Parser as MarkdownParser, Tag, TagEnd};
 use slotmap::{DefaultKey, SlotMap};
@@ -11,11 +13,11 @@ use crate::document::{
 #[derive(Default)]
 pub struct Parser {
     blocks: SlotMap<DefaultKey, Block>,
+    block_order: BTreeMap<FractionalIndex, DefaultKey>,
     containers: SlotMap<DefaultKey, Container>,
 
     style_stack: Vec<TextStyle>,
     container_stack: Vec<DefaultKey>,
-    prev_index: Option<FractionalIndex>,
     current_block: Option<DefaultKey>,
 }
 
@@ -79,17 +81,16 @@ impl Parser {
 
     fn push_block(&mut self, kind: BlockKind) {
         let index = self
-            .prev_index
-            .as_ref()
-            .map_or(FractionalIndex::default(), |i| {
-                FractionalIndex::new_after(i)
+            .block_order
+            .last_key_value()
+            .map_or(FractionalIndex::default(), |(last_index, _)| {
+                FractionalIndex::new_after(last_index)
             });
         let key = self.blocks.insert(Block {
             kind,
-            index: index.clone(),
             text: RichText::default(),
         });
-        self.prev_index = Some(index);
+        self.block_order.insert(index, key);
         self.current_block = Some(key);
     }
 
@@ -224,6 +225,7 @@ impl Parser {
 
         Document {
             blocks: self.blocks.clone(),
+            block_order: self.block_order.clone(),
             containers: self.containers.clone(),
         }
     }
