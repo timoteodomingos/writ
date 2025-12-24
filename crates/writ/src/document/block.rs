@@ -1,74 +1,37 @@
 use fractional_index::FractionalIndex;
 use slotmap::DefaultKey;
+use strum::EnumDiscriminants;
 
-use crate::document::rich_text::RichText;
+use crate::document::RichText;
 
-pub type BlockId = DefaultKey;
-
-#[derive(Default, Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, EnumDiscriminants)]
 pub enum BlockKind {
-    #[default]
-    Paragraph,
     Heading {
-        level: u8,
+        level: usize,
         id: Option<String>,
     },
-    CodeBlock {
+    Paragraph {
+        parent: Option<DefaultKey>,
+    },
+    Code {
+        parent: Option<DefaultKey>,
         language: Option<String>,
     },
-    Quote,
-    BulletItem,
-    NumberedItem,
-}
-
-impl BlockKind {
-    pub fn is_list_item(&self) -> bool {
-        matches!(self, BlockKind::BulletItem | BlockKind::NumberedItem)
-    }
 }
 
 #[derive(Debug, Clone)]
 pub struct Block {
-    pub parent: Option<BlockId>,
-    pub order: FractionalIndex,
     pub kind: BlockKind,
-    pub content: RichText,
+    pub index: FractionalIndex,
+    pub text: RichText,
 }
 
 impl Block {
-    pub fn new(kind: BlockKind, order: FractionalIndex) -> Self {
-        Self {
-            parent: None,
-            order,
-            kind,
-            content: RichText::new(),
-        }
-    }
-
-    pub fn to_markdown(&self, depth: usize, index: usize) -> String {
-        let content = self.content.to_markdown();
-
+    pub fn parent(&self) -> Option<DefaultKey> {
         match &self.kind {
-            BlockKind::Paragraph => {
-                format!("{}{}", "  ".repeat(depth), content)
-            }
-            BlockKind::Heading { level, .. } => {
-                format!("{} {}", "#".repeat(*level as usize), content)
-            }
-            BlockKind::CodeBlock { language } => {
-                let lang = language.as_deref().unwrap_or("");
-                let indent = "  ".repeat(depth);
-                let indented_content = content
-                    .lines()
-                    .map(|line| format!("{}{}\n", indent, line))
-                    .collect::<String>();
-                format!("{}```{}\n{}{}```", indent, lang, indented_content, indent)
-            }
-            BlockKind::Quote => format!("> {}", content),
-            BlockKind::BulletItem => format!("{}- {}", "  ".repeat(depth), content),
-            BlockKind::NumberedItem => {
-                format!("{}{}. {}", "  ".repeat(depth), index + 1, content)
-            }
+            BlockKind::Heading { .. } => None,
+            BlockKind::Paragraph { parent } => *parent,
+            BlockKind::Code { parent, .. } => *parent,
         }
     }
 }

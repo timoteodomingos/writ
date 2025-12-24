@@ -29,7 +29,7 @@ pub fn generate_markdown_tests(input: TokenStream) -> TokenStream {
                 #[test]
                 fn #test_name() {
                     let input = include_str!(#file_path);
-                    let doc = writ::document_next::Document::from_markdown(input);
+                    let doc = writ::document::Document::from_markdown(input);
                     let output = doc.to_markdown();
                     assert_eq!(input, output, "Roundtrip failed for {}", #file_path);
                 }

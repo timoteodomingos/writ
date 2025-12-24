@@ -1,8 +1,7 @@
-use anyhow::Result;
 use writ::document::Document;
 
 #[test]
-fn test_lists() -> Result<()> {
+fn test_lists() {
     let cases = [
         r#"- first item
 - second item
@@ -18,15 +17,14 @@ fn test_lists() -> Result<()> {
 "#,
     ];
     for case in cases {
-        let d = Document::from_markdown(case)?;
+        let d = Document::from_markdown(case);
         let md = d.to_markdown();
         assert_eq!(case, md);
     }
-    Ok(())
 }
 
 #[test]
-fn test_inlines() -> Result<()> {
+fn test_inlines() {
     let cases = [
         "# Header 1\n",
         "## Header 2\n",
@@ -47,9 +45,8 @@ fn test_inlines() -> Result<()> {
         "This paragragh has all examples *with italic* and **with bold** and ***with both*** and *italic* **bold** and *italic **bold** and* and **bold *italic*** and `with code` foo\n",
     ];
     for case in cases {
-        let d = Document::from_markdown(case)?;
+        let d = Document::from_markdown(case);
         let md = d.to_markdown();
         assert_eq!(case, md);
     }
-    Ok(())
 }

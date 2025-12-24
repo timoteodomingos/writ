@@ -1,221 +1,193 @@
 mod block;
+mod container;
 mod parser;
 mod rich_text;
 
 pub use block::*;
+pub use container::*;
+use itertools::Itertools;
 pub use parser::*;
-pub use rich_text::*;
-
-use std::{fs, iter::successors};
-
-use anyhow::Result;
-use fractional_index::FractionalIndex;
 use pulldown_cmark::Parser as MarkdownParser;
-use slotmap::SlotMap;
+pub use rich_text::*;
+use slotmap::{DefaultKey, SlotMap};
+use std::collections::HashMap;
 
-#[derive(Default, Debug, Clone)]
 pub struct Document {
-    pub blocks: SlotMap<BlockId, Block>,
+    pub blocks: SlotMap<DefaultKey, Block>,
+    pub containers: SlotMap<DefaultKey, Container>,
 }
 
 impl Document {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Get children of a parent (None for root), sorted by order
-    pub fn children(&self, parent: Option<BlockId>) -> Vec<BlockId> {
-        let mut children: Vec<_> = self
-            .blocks
-            .iter()
-            .filter(|(_, b)| b.parent == parent)
-            .map(|(id, b)| (id, &b.order))
-            .collect();
-
-        children.sort_by(|(_, a), (_, b)| a.cmp(b));
-        children.into_iter().map(|(id, _)| id).collect()
-    }
-
-    /// Get the previous sibling of a block
-    pub fn previous_sibling(&self, block_id: BlockId) -> Option<BlockId> {
-        let block = &self.blocks[block_id];
-        let siblings = self.children(block.parent);
-        let pos = siblings.iter().position(|&id| id == block_id)?;
-        if pos > 0 {
-            Some(siblings[pos - 1])
-        } else {
-            None
-        }
-    }
-
-    /// Get the next sibling of a block
-    pub fn next_sibling(&self, block_id: BlockId) -> Option<BlockId> {
-        let block = &self.blocks[block_id];
-        let siblings = self.children(block.parent);
-        let pos = siblings.iter().position(|&id| id == block_id)?;
-        siblings.get(pos + 1).copied()
-    }
-
-    /// Insert a new block after the given block (as sibling)
-    pub fn insert_after(&mut self, after: BlockId, kind: BlockKind) -> BlockId {
-        let parent = self.blocks[after].parent;
-        let after_order = &self.blocks[after].order;
-
-        let order = match self.next_sibling(after) {
-            Some(next) => {
-                FractionalIndex::new_between(after_order, &self.blocks[next].order).unwrap()
-            }
-            None => FractionalIndex::new_after(after_order),
-        };
-
-        self.blocks.insert(Block {
-            parent,
-            order,
-            kind,
-            content: RichText::new(),
-        })
-    }
-
-    /// Insert a new block as the last child of a parent
-    pub fn insert_last_child(&mut self, parent: Option<BlockId>, kind: BlockKind) -> BlockId {
-        let children = self.children(parent);
-
-        let order = match children.last() {
-            Some(&last) => FractionalIndex::new_after(&self.blocks[last].order),
-            None => FractionalIndex::default(),
-        };
-
-        self.blocks.insert(Block {
-            parent,
-            order,
-            kind,
-            content: RichText::new(),
-        })
-    }
-
-    /// Indent: make block a child of its previous sibling
-    pub fn indent(&mut self, block_id: BlockId) -> bool {
-        let Some(prev) = self.previous_sibling(block_id) else {
-            return false;
-        };
-
-        let new_order = match self.children(Some(prev)).last() {
-            Some(&last) => FractionalIndex::new_after(&self.blocks[last].order),
-            None => FractionalIndex::default(),
-        };
-
-        let block = &mut self.blocks[block_id];
-        block.parent = Some(prev);
-        block.order = new_order;
-        true
-    }
-
-    /// Outdent: make block a sibling of its parent
-    pub fn outdent(&mut self, block_id: BlockId) -> bool {
-        let Some(parent_id) = self.blocks[block_id].parent else {
-            return false;
-        };
-
-        let grandparent = self.blocks[parent_id].parent;
-        let parent_order = &self.blocks[parent_id].order;
-
-        let new_order = match self.next_sibling(parent_id) {
-            Some(uncle) => {
-                FractionalIndex::new_between(parent_order, &self.blocks[uncle].order).unwrap()
-            }
-            None => FractionalIndex::new_after(parent_order),
-        };
-
-        let block = &mut self.blocks[block_id];
-        block.parent = grandparent;
-        block.order = new_order;
-        true
-    }
-
-    /// Delete a block
-    pub fn delete(&mut self, block_id: BlockId) -> Option<Block> {
-        self.blocks.remove(block_id)
-    }
-
-    pub fn from_file(path: &std::path::Path) -> Result<Self> {
-        let content = fs::read_to_string(path)?;
-        Self::from_markdown(&content)
-    }
-
-    pub fn from_markdown(markdown: &str) -> Result<Self> {
+    pub fn from_markdown(markdown: &str) -> Document {
         let parser = MarkdownParser::new(markdown);
-        let doc = Parser::new().parse(parser);
-        Ok(doc)
+        Parser::default().parse(parser)
     }
 
     pub fn to_markdown(&self) -> String {
-        let mut result = self.blocks_to_markdown(None);
-        // add newline at the end of the document
+        let sorted_blocks: Vec<_> = self
+            .blocks
+            .iter()
+            .sorted_by_key(|(_, block)| block.index.clone())
+            .map(|(key, _)| key)
+            .collect();
+
+        let mut result = String::new();
+        let mut container_counts: HashMap<DefaultKey, usize> = HashMap::new();
+        let mut prev_block_key: Option<DefaultKey> = None;
+
+        for key in sorted_blocks {
+            let sibling_idx = self.sibling_index(key);
+
+            // Add separator between blocks
+            if let Some(prev_key) = prev_block_key {
+                result.push_str(self.block_separator(prev_key, key));
+            }
+
+            let prefix = match self.blocks[key].parent() {
+                Some(parent_key) => {
+                    self.container_prefix(parent_key, Some(sibling_idx), 0, &mut container_counts)
+                }
+                None => String::new(),
+            };
+
+            result.push_str(&self.block_to_markdown(key, &prefix));
+            prev_block_key = Some(key);
+        }
+
         result.push('\n');
         result
     }
 
-    fn depth(&self, block_id: BlockId) -> usize {
-        successors(self.blocks[block_id].parent, |&id| self.blocks[id].parent).count()
-    }
+    fn container_prefix(
+        &self,
+        container_key: DefaultKey,
+        index: Option<usize>,
+        indent_level: usize,
+        container_counts: &mut HashMap<DefaultKey, usize>,
+    ) -> String {
+        let container = &self.containers[container_key];
 
-    fn blocks_to_markdown(&self, parent: Option<BlockId>) -> String {
-        let children = self.children(parent);
-        let mut parts = Vec::new();
+        // Only ListItems contribute to indentation when we traverse through them
+        let indent_increment = match container.kind {
+            ContainerKind::ListItem if index.is_none() => 1,
+            _ => 0,
+        };
 
-        for (index, child_id) in children.iter().enumerate() {
-            let block = &self.blocks[*child_id];
-            let depth = self.depth(*child_id);
-            let block_md = block.to_markdown(depth, index);
+        let parent_prefix = match container.parent {
+            Some(parent_key) => self.container_prefix(
+                parent_key,
+                None,
+                indent_level + indent_increment,
+                container_counts,
+            ),
+            None => "  ".repeat(indent_level),
+        };
 
-            let children_md = self.blocks_to_markdown(Some(*child_id));
+        match container.kind {
+            ContainerKind::ListItem => {
+                match index {
+                    Some(0) => {
+                        // First block in this list item - emit marker
+                        let list_key = container.parent.expect("ListItem must have a parent list");
+                        let list = &self.containers[list_key];
 
-            let full_block = if children_md.is_empty() {
-                block_md
-            } else {
-                let block_children = self.children(Some(*child_id));
-                let first_child_is_list_item = block_children
-                    .first()
-                    .is_some_and(|&id| self.blocks[id].kind.is_list_item());
+                        // Get and increment the count for this list
+                        let count = container_counts.get(&list_key).copied().unwrap_or(0);
+                        container_counts.insert(list_key, count + 1);
 
-                let separator = if block.kind.is_list_item() && first_child_is_list_item {
-                    "\n"
-                } else {
-                    "\n\n"
-                };
-                format!("{}{}{}", block_md, separator, children_md)
-            };
-
-            parts.push((*child_id, full_block));
-        }
-
-        // Join blocks: list items use single newline, others use double
-        let mut result = String::new();
-        for (i, (id, md)) in parts.iter().enumerate() {
-            if i > 0 {
-                let prev_id = parts[i - 1].0;
-                let prev_is_list_item = self.blocks[prev_id].kind.is_list_item();
-                let curr_is_list_item = self.blocks[*id].kind.is_list_item();
-                let prev_ends_with_list_item = self
-                    .children(Some(prev_id))
-                    .last()
-                    .is_none_or(|&id| self.blocks[id].kind.is_list_item());
-
-                if prev_is_list_item && curr_is_list_item && prev_ends_with_list_item {
-                    result.push('\n');
-                } else {
-                    result.push_str("\n\n");
+                        match list.kind {
+                            ContainerKind::BulletedList => format!("{}- ", parent_prefix),
+                            ContainerKind::NumberedList => {
+                                format!("{}{}. ", parent_prefix, count + 1)
+                            }
+                            _ => panic!("ListItem parent must be a list"),
+                        }
+                    }
+                    Some(_) => {
+                        // Continuation block (not first in list item) - needs indentation
+                        format!("{}  ", parent_prefix)
+                    }
+                    None => {
+                        // Traversing through - indentation handled via indent_level
+                        parent_prefix
+                    }
                 }
             }
-            result.push_str(md);
+            ContainerKind::BulletedList | ContainerKind::NumberedList => parent_prefix,
+            ContainerKind::Quote => {
+                format!("{}> ", parent_prefix)
+            }
         }
-
-        result
     }
 
-    pub fn save_to_file(&self, path: &std::path::Path) -> Result<()> {
-        let markdown = self.to_markdown();
-        fs::write(path, markdown)?;
-        Ok(())
+    fn block_to_markdown(&self, key: DefaultKey, prefix: &str) -> String {
+        let block = &self.blocks[key];
+        let text = block.text.to_markdown();
+
+        match &block.kind {
+            BlockKind::Heading { level, .. } => {
+                format!("{} {}", "#".repeat(*level), text)
+            }
+            BlockKind::Paragraph { .. } => {
+                format!("{}{}", prefix, text)
+            }
+            BlockKind::Code { language, .. } => {
+                let lang = language.as_deref().unwrap_or("");
+                if prefix.is_empty() {
+                    format!("```{}\n{}```", lang, text)
+                } else {
+                    // In a list - indent matches the prefix
+                    let indented_content = text
+                        .lines()
+                        .map(|line| format!("{}{}", prefix, line))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    format!("{}```{}\n{}\n{}```", prefix, lang, indented_content, prefix)
+                }
+            }
+        }
+    }
+
+    /// Determine the separator between two consecutive blocks
+    fn block_separator(&self, prev_key: DefaultKey, curr_key: DefaultKey) -> &'static str {
+        let prev_block = &self.blocks[prev_key];
+        let curr_block = &self.blocks[curr_key];
+        let prev_parent = prev_block.parent();
+        let curr_parent = curr_block.parent();
+
+        // Single newline only when:
+        // - Both blocks are in list items
+        // - Current block is the first in its list item (gets a marker)
+        // - Previous block was also the first (and only) in its list item
+        let prev_in_list =
+            prev_parent.is_some_and(|p| self.containers[p].kind == ContainerKind::ListItem);
+        let curr_in_list =
+            curr_parent.is_some_and(|p| self.containers[p].kind == ContainerKind::ListItem);
+
+        if prev_in_list
+            && curr_in_list
+            && self.sibling_index(prev_key) == 0
+            && self.sibling_index(curr_key) == 0
+            && prev_parent != curr_parent
+        {
+            return "\n";
+        }
+
+        // Default: double newline between blocks
+        "\n\n"
+    }
+
+    /// Returns the 0-based index of a block among its siblings.
+    /// Siblings are blocks that share the same immediate parent container.
+    fn sibling_index(&self, block_key: DefaultKey) -> usize {
+        let block = &self.blocks[block_key];
+        let parent = block.parent();
+
+        self.blocks
+            .iter()
+            .filter(|(_, b)| b.parent() == parent)
+            .sorted_by_key(|(_, b)| b.index.clone())
+            .position(|(k, _)| k == block_key)
+            .unwrap()
     }
 }
