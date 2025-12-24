@@ -1,4 +1,4 @@
-use writ::editor_state::{Direction, EditorAction, EditorState};
+use writ::editor::{Direction, EditorAction, EditorState};
 
 #[test]
 fn test_cursor_at_start() {

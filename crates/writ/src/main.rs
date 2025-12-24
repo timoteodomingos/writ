@@ -6,15 +6,14 @@ use gpui::{
 };
 use writ::{
     args::Args,
-    editor_state::EditorState,
-    editor_view::EditorView,
+    editor::{Editor, EditorState},
     theme,
     title_bar::FileInfo,
     window::{CloseWindow, Quit, window_shadow},
 };
 
 pub struct Root {
-    editor: Entity<EditorView>,
+    editor: Entity<Editor>,
     focus_handle: FocusHandle,
 }
 
@@ -50,9 +49,7 @@ fn main() {
         .validate()
         .expect("Failed to validate arguments");
     let content = load_file(&args.file).expect("Failed to load file");
-    // for line in rope.lines() {
-    //     println!("{:#?}", line);
-    // }
+
     let app = Application::new();
 
     app.run(move |cx| {
@@ -82,7 +79,7 @@ fn main() {
 
             cx.open_window(window_options, |window, cx| {
                 let state = EditorState::from_markdown(&content);
-                let editor = cx.new(|cx| EditorView::new(state, cx));
+                let editor = cx.new(|cx| Editor::new(state, cx));
                 let focus_handle = cx.focus_handle();
                 focus_handle.focus(window);
                 cx.new(|_| Root {
