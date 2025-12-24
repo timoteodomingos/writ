@@ -1,5 +1,5 @@
 use gpui::{
-    App, Context, FocusHandle, Focusable, HighlightStyle, InteractiveText, IntoElement,
+    App, Context, Entity, FocusHandle, Focusable, HighlightStyle, InteractiveText, IntoElement,
     KeyDownEvent, ReadGlobal, Render, StyledText, Window, div, prelude::*, px, rems,
 };
 use slotmap::DefaultKey;
@@ -11,6 +11,8 @@ use crate::theme::Theme;
 pub struct EditorView {
     pub state: EditorState,
     focus_handle: FocusHandle,
+    /// Tracks which character is currently being hovered (block_key, char_index)
+    hover_position: Option<(DefaultKey, usize)>,
 }
 
 impl EditorView {
@@ -18,6 +20,7 @@ impl EditorView {
         Self {
             state,
             focus_handle: cx.focus_handle(),
+            hover_position: None,
         }
     }
 
@@ -63,6 +66,7 @@ impl Render for EditorView {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::global(cx);
         let theme_foreground = theme.foreground;
+        let entity = cx.entity().clone();
 
         // Collect block data first to avoid borrow issues
         let blocks_iter =
@@ -98,6 +102,7 @@ impl Render for EditorView {
                 highlights,
                 cursor_offset,
                 theme,
+                entity.clone(),
             );
             block_elements.push(element);
         }
@@ -115,19 +120,44 @@ impl Render for EditorView {
 
 fn render_block(
     block_idx: usize,
-    _block_key: DefaultKey,
+    block_key: DefaultKey,
     plain_text: String,
     highlights: Vec<(std::ops::Range<usize>, HighlightStyle)>,
     cursor_offset: Option<usize>,
     theme: &Theme,
+    entity: Entity<EditorView>,
 ) -> impl IntoElement {
     let styled_text = StyledText::new(plain_text.clone()).with_highlights(highlights);
 
-    // For now, render without click handling - we'll add it later using a different approach
-    let text_element = InteractiveText::new(("block", block_idx), styled_text);
+    let hover_entity = entity.clone();
+    let click_entity = entity;
+    let text_element = InteractiveText::new(("block", block_idx), styled_text).on_hover(
+        move |char_index, _event, _window, cx: &mut App| {
+            hover_entity.update(cx, |view, _cx| {
+                view.hover_position = char_index.map(|idx| (block_key, idx));
+            });
+        },
+    );
 
-    // Container with cursor overlay
-    let container = div().line_height(rems(1.4)).relative();
+    // Container with cursor overlay and click handling
+    let container = div()
+        .id(("block-container", block_idx))
+        .line_height(rems(1.4))
+        .relative()
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            move |_event, _window, cx: &mut App| {
+                click_entity.update(cx, |view, cx| {
+                    if let Some((block_key, char_index)) = view.hover_position {
+                        view.state.apply(EditorAction::SetCursor {
+                            block_key,
+                            offset: char_index,
+                        });
+                        cx.notify();
+                    }
+                });
+            },
+        );
 
     if let Some(offset) = cursor_offset {
         let before = plain_text[..offset.min(plain_text.len())].to_string();
