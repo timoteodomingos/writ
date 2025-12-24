@@ -1,22 +1,20 @@
-use std::fs::File;
-
 use anyhow::Result;
 use clap::Parser;
 use gpui::{
     Application, Bounds, Entity, FocusHandle, KeyBinding, Point, Size, Window, WindowBounds,
     WindowDecorations, WindowOptions, div, prelude::*, rems,
 };
-use ropey::Rope;
 use writ::{
     args::Args,
-    editor::Editor,
+    editor_state::EditorState,
+    editor_view::EditorView,
     theme,
     title_bar::FileInfo,
     window::{CloseWindow, Quit, window_shadow},
 };
 
 pub struct Root {
-    editor: Entity<Editor>,
+    editor: Entity<EditorView>,
     focus_handle: FocusHandle,
 }
 
@@ -43,15 +41,15 @@ impl Render for Root {
     }
 }
 
-fn load_file(file: &std::path::Path) -> Result<Rope> {
-    Ok(Rope::from_reader(File::open(file)?)?)
+fn load_file(file: &std::path::Path) -> Result<String> {
+    Ok(std::fs::read_to_string(file)?)
 }
 
 fn main() {
     let args = Args::parse()
         .validate()
         .expect("Failed to validate arguments");
-    let rope = load_file(&args.file).expect("Failed to load file");
+    let content = load_file(&args.file).expect("Failed to load file");
     // for line in rope.lines() {
     //     println!("{:#?}", line);
     // }
@@ -83,7 +81,8 @@ fn main() {
             };
 
             cx.open_window(window_options, |window, cx| {
-                let editor = cx.new(|cx| Editor::new(cx, rope));
+                let state = EditorState::from_markdown(&content);
+                let editor = cx.new(|cx| EditorView::new(state, cx));
                 let focus_handle = cx.focus_handle();
                 focus_handle.focus(window);
                 cx.new(|_| Root {

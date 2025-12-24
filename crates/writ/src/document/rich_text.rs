@@ -1,4 +1,9 @@
+use std::ops::Range;
+
+use gpui::{FontStyle, FontWeight, HighlightStyle, px};
 use strum::EnumDiscriminants;
+
+use crate::theme::Theme;
 
 #[derive(EnumDiscriminants, Debug, Clone, PartialEq, Eq, Hash)]
 pub enum TextStyle {
@@ -164,6 +169,48 @@ impl RichText {
         }
     }
 
+    /// Insert text at the given offset, inheriting styles from surrounding text
+    pub fn insert_at(&mut self, offset: usize, new_text: &str) {
+        if new_text.is_empty() {
+            return;
+        }
+
+        if self.chunks.is_empty() {
+            self.chunks.push(TextChunk::plain(new_text));
+            return;
+        }
+
+        let mut pos = 0;
+        for chunk in &mut self.chunks {
+            let chunk_end = pos + chunk.text.len();
+            if offset >= pos && offset <= chunk_end {
+                // Insert within this chunk
+                let insert_pos = offset - pos;
+                chunk.text.insert_str(insert_pos, new_text);
+                return;
+            }
+            pos = chunk_end;
+        }
+
+        // Offset is at end - append to last chunk
+        if let Some(last) = self.chunks.last_mut() {
+            last.text.push_str(new_text);
+        }
+    }
+
+    /// Delete characters in range [start, end)
+    pub fn delete_range(&mut self, start: usize, end: usize) {
+        if start >= end {
+            return;
+        }
+
+        let (before, _) = self.split_at(start);
+        let (_, after) = self.split_at(end);
+
+        self.chunks = before.chunks;
+        self.append(after);
+    }
+
     pub fn to_markdown(&self) -> String {
         let mut result = String::new();
         let mut open_styles: Vec<TextStyle> = Vec::new();
@@ -204,5 +251,49 @@ impl RichText {
         }
 
         result
+    }
+
+    pub fn to_highlights(&self, theme: &Theme) -> Vec<(Range<usize>, HighlightStyle)> {
+        let mut highlights = Vec::new();
+        let mut byte_offset = 0;
+
+        for chunk in &self.chunks {
+            let chunk_len = chunk.text.len();
+            let range = byte_offset..(byte_offset + chunk_len);
+
+            if !chunk.styles.is_empty() {
+                let mut style = HighlightStyle::default();
+
+                for text_style in &chunk.styles.styles {
+                    match text_style {
+                        TextStyle::Bold => {
+                            style.font_weight = Some(FontWeight::BOLD);
+                        }
+                        TextStyle::Italic => {
+                            style.font_style = Some(FontStyle::Italic);
+                        }
+                        TextStyle::Code => {
+                            // TODO: Use monospace font
+                            style.background_color = Some(theme.selection.into());
+                        }
+                        TextStyle::Strikethrough => {
+                            style.strikethrough = Some(gpui::StrikethroughStyle {
+                                thickness: px(1.0),
+                                color: Some(theme.foreground.into()),
+                            });
+                        }
+                        TextStyle::Link { .. } => {
+                            style.color = Some(theme.cyan.into());
+                        }
+                    }
+                }
+
+                highlights.push((range, style));
+            }
+
+            byte_offset += chunk_len;
+        }
+
+        highlights
     }
 }
