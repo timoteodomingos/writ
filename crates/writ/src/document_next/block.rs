@@ -25,3 +25,13 @@ pub struct Block {
     pub index: FractionalIndex,
     pub text: RichText,
 }
+
+impl Block {
+    pub fn parent(&self) -> Option<DefaultKey> {
+        match &self.kind {
+            BlockKind::Heading { .. } => None,
+            BlockKind::Paragraph { parent } => *parent,
+            BlockKind::Code { parent, .. } => *parent,
+        }
+    }
+}
