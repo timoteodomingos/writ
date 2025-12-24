@@ -45,7 +45,7 @@ impl Document {
 
             let prefix = match self.blocks[key].parent() {
                 Some(parent_key) => {
-                    self.container_prefix(parent_key, Some(sibling_idx), 0, &mut container_counts)
+                    self.container_prefix(parent_key, Some(sibling_idx), &mut container_counts)
                 }
                 None => String::new(),
             };
@@ -62,35 +62,23 @@ impl Document {
         &self,
         container_key: DefaultKey,
         index: Option<usize>,
-        indent_level: usize,
         container_counts: &mut HashMap<DefaultKey, usize>,
     ) -> String {
         let container = &self.containers[container_key];
 
-        // Only ListItems contribute to indentation when we traverse through them
-        let indent_increment = match container.kind {
-            ContainerKind::ListItem if index.is_none() => 1,
-            _ => 0,
-        };
-
         let parent_prefix = match container.parent {
-            Some(parent_key) => self.container_prefix(
-                parent_key,
-                None,
-                indent_level + indent_increment,
-                container_counts,
-            ),
-            None => "  ".repeat(indent_level),
+            Some(parent_key) => self.container_prefix(parent_key, None, container_counts),
+            None => String::new(),
         };
 
         match container.kind {
             ContainerKind::ListItem => {
+                let list_key = container.parent.expect("ListItem must have a parent list");
+                let list = &self.containers[list_key];
+
                 match index {
                     Some(0) => {
                         // First block in this list item - emit marker
-                        let list_key = container.parent.expect("ListItem must have a parent list");
-                        let list = &self.containers[list_key];
-
                         // Get and increment the count for this list
                         let count = container_counts.get(&list_key).copied().unwrap_or(0);
                         container_counts.insert(list_key, count + 1);
@@ -105,11 +93,31 @@ impl Document {
                     }
                     Some(_) => {
                         // Continuation block (not first in list item) - needs indentation
-                        format!("{}  ", parent_prefix)
+                        // Indent by the width of the marker that was used for this list item
+                        let count = container_counts.get(&list_key).copied().unwrap_or(1);
+                        let marker_width = match list.kind {
+                            ContainerKind::BulletedList => 2, // "- "
+                            ContainerKind::NumberedList => {
+                                // "N. " where N is the item number
+                                let digits = count.to_string().len();
+                                digits + 2 // digits + ". "
+                            }
+                            _ => panic!("ListItem parent must be a list"),
+                        };
+                        format!("{}{}", parent_prefix, " ".repeat(marker_width))
                     }
                     None => {
-                        // Traversing through - indentation handled via indent_level
-                        parent_prefix
+                        // Traversing through - indent by the marker width
+                        let count = container_counts.get(&list_key).copied().unwrap_or(1);
+                        let marker_width = match list.kind {
+                            ContainerKind::BulletedList => 2, // "- "
+                            ContainerKind::NumberedList => {
+                                let digits = count.to_string().len();
+                                digits + 2
+                            }
+                            _ => panic!("ListItem parent must be a list"),
+                        };
+                        format!("{}{}", parent_prefix, " ".repeat(marker_width))
                     }
                 }
             }
