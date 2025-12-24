@@ -1,6 +1,6 @@
 use slotmap::DefaultKey;
 
-#[derive(PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ContainerKind {
     NumberedList,
     BulletedList,
@@ -8,6 +8,7 @@ pub enum ContainerKind {
     Quote,
 }
 
+#[derive(Debug, Clone)]
 pub struct Container {
     pub kind: ContainerKind,
     pub parent: Option<DefaultKey>,

@@ -1,5 +1,6 @@
+use fractional_index::FractionalIndex;
 use pulldown_cmark::{CodeBlockKind, Event, Parser as MarkdownParser, Tag, TagEnd};
-use slotmap::DefaultKey;
+use slotmap::{DefaultKey, SlotMap};
 use strum::IntoDiscriminant;
 
 use crate::document_next::{
@@ -8,9 +9,12 @@ use crate::document_next::{
 };
 
 pub struct Parser {
-    document: Document,
+    blocks: SlotMap<DefaultKey, Block>,
+    containers: SlotMap<DefaultKey, Container>,
+
     style_stack: Vec<TextStyle>,
     container_stack: Vec<DefaultKey>,
+    prev_index: Option<FractionalIndex>,
     current_block: Option<DefaultKey>,
 }
 
@@ -39,7 +43,7 @@ impl Parser {
         match self.current_block {
             Some(key) => {
                 let styles = self.current_styles();
-                self.document.blocks[key].text.push(text, styles);
+                self.blocks[key].text.push(text, styles);
             }
             None => panic!("No current block"),
         }
@@ -50,7 +54,7 @@ impl Parser {
     }
 
     fn push_container(&mut self, kind: ContainerKind) {
-        let key = self.document.containers.insert(Container {
+        let key = self.containers.insert(Container {
             kind,
             parent: self.get_parent(),
         });
@@ -62,7 +66,7 @@ impl Parser {
     fn pop_container(&mut self, expected_kind: ContainerKind) {
         match self.container_stack.pop() {
             Some(key) => {
-                if self.document.containers[key].kind != expected_kind {
+                if self.containers[key].kind != expected_kind {
                     panic!("Unexpected container kind");
                 }
             }
@@ -73,17 +77,25 @@ impl Parser {
     }
 
     fn push_block(&mut self, kind: BlockKind) {
-        let key = self.document.blocks.insert(Block {
+        let index = self
+            .prev_index
+            .as_ref()
+            .map_or(FractionalIndex::default(), |i| {
+                FractionalIndex::new_after(i)
+            });
+        let key = self.blocks.insert(Block {
             kind,
+            index: index.clone(),
             text: RichText::default(),
         });
+        self.prev_index = Some(index);
         self.current_block = Some(key);
     }
 
     fn clear_current_block(&mut self, expected_kind: BlockKindDiscriminants) {
         match self.current_block {
             Some(key) => {
-                if self.document.blocks[key].kind.discriminant() != expected_kind {
+                if self.blocks[key].kind.discriminant() != expected_kind {
                     panic!("Unexpected block kind");
                 }
             }
@@ -92,7 +104,7 @@ impl Parser {
         self.current_block = None;
     }
 
-    pub fn parse(&mut self, parser: MarkdownParser) {
+    pub fn parse(&mut self, parser: MarkdownParser) -> Document {
         for event in parser {
             println!("Event: {:#?}", event);
             match event {
@@ -207,6 +219,11 @@ impl Parser {
                 }
                 other => todo!("Event: {other:?}"),
             }
+        }
+
+        Document {
+            blocks: self.blocks.clone(),
+            containers: self.containers.clone(),
         }
     }
 }
