@@ -1,6 +1,15 @@
 use writ::document::Document;
 
 #[test]
+fn test_comprehensive() {
+    let input = include_str!("fixtures_old/test.md");
+    let doc = Document::from_markdown(input);
+    let output = doc.to_markdown();
+    println!("{}", output);
+    // For now just print, we'll compare manually
+}
+
+#[test]
 fn test_lists() {
     let cases = [
         r#"- first item
