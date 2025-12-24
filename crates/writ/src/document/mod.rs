@@ -10,7 +10,7 @@ pub use parser::*;
 use pulldown_cmark::Parser as MarkdownParser;
 pub use rich_text::*;
 use slotmap::{DefaultKey, SlotMap};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 pub struct Document {
     pub blocks: SlotMap<DefaultKey, Block>,
@@ -156,6 +156,16 @@ impl Document {
         }
     }
 
+    fn get_path(&self, key: DefaultKey) -> HashSet<DefaultKey> {
+        let mut path = HashSet::new();
+        let mut parent = self.containers[key].parent;
+        while let Some(p) = parent {
+            path.insert(p);
+            parent = self.containers[p].parent;
+        }
+        path
+    }
+
     /// Determine the separator between two consecutive blocks
     fn block_separator(&self, prev_key: DefaultKey, curr_key: DefaultKey) -> &'static str {
         let prev_block = &self.blocks[prev_key];
@@ -167,20 +177,21 @@ impl Document {
         // - Both blocks are in list items
         // - Current block is the first in its list item (gets a marker)
         // - Previous block was also the first (and only) in its list item
-        let prev_in_list =
-            prev_parent.is_some_and(|p| self.containers[p].kind == ContainerKind::ListItem);
-        let curr_in_list =
-            curr_parent.is_some_and(|p| self.containers[p].kind == ContainerKind::ListItem);
-
-        if prev_in_list
-            && curr_in_list
+        // - List items container paths intersect
+        if let Some(pp) = prev_parent
+            && self.containers[pp].kind == ContainerKind::ListItem
+            && let Some(cp) = curr_parent
+            && self.containers[cp].kind == ContainerKind::ListItem
             && self.sibling_index(prev_key) == 0
             && self.sibling_index(curr_key) == 0
             && prev_parent != curr_parent
         {
-            return "\n";
+            let prev_path = self.get_path(pp);
+            let curr_path = self.get_path(cp);
+            if !prev_path.is_disjoint(&curr_path) {
+                return "\n";
+            }
         }
-
         // Default: double newline between blocks
         "\n\n"
     }
