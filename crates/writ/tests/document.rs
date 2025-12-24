@@ -1,14 +1,6 @@
 use writ::document::Document;
 
 #[test]
-fn test_comprehensive() {
-    let input = include_str!("fixtures_old/test.md");
-    let doc = Document::from_markdown(input);
-    let output = doc.to_markdown();
-    std::fs::write("tests/fixtures_old/test-run-new.md", &output).unwrap();
-}
-
-#[test]
 fn test_nested_numbered_list_indentation() {
     // Original uses 3-space indentation
     let input = "1. Numbered item 1
