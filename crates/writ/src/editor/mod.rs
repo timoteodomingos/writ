@@ -4,10 +4,10 @@ mod state;
 pub use state::{Cursor, Direction, EditorAction, EditorState};
 
 use gpui::{
-    App, Context, FocusHandle, Focusable, IntoElement, KeyDownEvent, ReadGlobal, Render, Window,
-    div, prelude::*, rems,
+    App, Context, FocusHandle, Focusable, IntoElement, KeyDownEvent, ReadGlobal, Render,
+    TextLayout, Window, div, prelude::*, rems,
 };
-use slotmap::DefaultKey;
+use slotmap::{DefaultKey, SecondaryMap};
 
 use crate::theme::Theme;
 use block::Block;
@@ -16,8 +16,8 @@ use block::Block;
 pub struct Editor {
     pub state: EditorState,
     focus_handle: FocusHandle,
-    /// Tracks which character is currently being hovered (block_key, char_index)
-    pub(crate) hover_position: Option<(DefaultKey, usize)>,
+    /// Text layouts for each block, used for click-to-position calculations
+    pub(crate) block_layouts: SecondaryMap<DefaultKey, TextLayout>,
 }
 
 impl Editor {
@@ -25,7 +25,7 @@ impl Editor {
         Self {
             state,
             focus_handle: cx.focus_handle(),
-            hover_position: None,
+            block_layouts: SecondaryMap::new(),
         }
     }
 
