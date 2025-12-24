@@ -35,7 +35,10 @@ impl Editor {
         _window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        let action = match event.keystroke.key.as_str() {
+        let keystroke = &event.keystroke;
+
+        // First check for special keys
+        let action = match keystroke.key.as_str() {
             "left" => Some(EditorAction::MoveCursor(Direction::Left)),
             "right" => Some(EditorAction::MoveCursor(Direction::Right)),
             "up" => Some(EditorAction::MoveCursor(Direction::Up)),
@@ -44,14 +47,23 @@ impl Editor {
             "end" => Some(EditorAction::MoveCursor(Direction::End)),
             "backspace" => Some(EditorAction::Backspace),
             "delete" => Some(EditorAction::Delete),
-            key if key.len() == 1
-                && !event.keystroke.modifiers.control
-                && !event.keystroke.modifiers.alt
-                && !event.keystroke.modifiers.platform =>
-            {
-                Some(EditorAction::InsertText(key.to_string()))
+            "space" if !keystroke.modifiers.control && !keystroke.modifiers.platform => {
+                Some(EditorAction::InsertText(" ".to_string()))
             }
-            _ => None,
+            _ => {
+                // For text input, use key_char (handles shift for capitals, etc.)
+                if !keystroke.modifiers.control
+                    && !keystroke.modifiers.alt
+                    && !keystroke.modifiers.platform
+                {
+                    keystroke
+                        .key_char
+                        .as_ref()
+                        .map(|c| EditorAction::InsertText(c.clone()))
+                } else {
+                    None
+                }
+            }
         };
 
         if let Some(action) = action {
