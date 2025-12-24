@@ -7,7 +7,7 @@ use crate::document_next::RichText;
 #[derive(Debug, Clone, PartialEq, EnumDiscriminants)]
 pub enum BlockKind {
     Heading {
-        level: u8,
+        level: usize,
         id: Option<String>,
     },
     Paragraph {

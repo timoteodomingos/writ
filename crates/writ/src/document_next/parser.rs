@@ -8,6 +8,7 @@ use crate::document_next::{
     StyleSet, TextStyle, TextStyleDiscriminants,
 };
 
+#[derive(Default)]
 pub struct Parser {
     blocks: SlotMap<DefaultKey, Block>,
     containers: SlotMap<DefaultKey, Container>,
@@ -124,7 +125,7 @@ impl Parser {
                     }
                     Tag::Heading { level, id, .. } => {
                         self.push_block(BlockKind::Heading {
-                            level: level as u8,
+                            level: level as usize,
                             id: id.map(|id| id.to_string()),
                         });
                     }
