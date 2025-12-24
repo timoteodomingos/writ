@@ -182,15 +182,12 @@ impl Document {
             && self.containers[pp].kind == ContainerKind::ListItem
             && let Some(cp) = curr_parent
             && self.containers[cp].kind == ContainerKind::ListItem
+            && !self.get_path(pp).is_disjoint(&self.get_path(cp))
             && self.sibling_index(prev_key) == 0
             && self.sibling_index(curr_key) == 0
             && prev_parent != curr_parent
         {
-            let prev_path = self.get_path(pp);
-            let curr_path = self.get_path(cp);
-            if !prev_path.is_disjoint(&curr_path) {
-                return "\n";
-            }
+            return "\n";
         }
         // Default: double newline between blocks
         "\n\n"
