@@ -1,6 +1,6 @@
 use gpui::{
-    App, Bounds, Entity, HighlightStyle, IntoElement, MouseButton, MouseDownEvent, SharedString,
-    StyledText, TextRun, canvas, fill, prelude::*, px, rems, size,
+    App, Bounds, Entity, FontWeight, HighlightStyle, IntoElement, MouseButton, MouseDownEvent,
+    SharedString, StyledText, TextRun, canvas, fill, prelude::*, px, rems, size,
 };
 use slotmap::DefaultKey;
 
@@ -45,7 +45,7 @@ impl IntoElement for Block {
         // Apply heading font size if this is a heading block
         let base_div = gpui::div().id(("block", self.block_idx)).relative();
 
-        let sized_div = match heading_level {
+        let mut sized_div = match heading_level {
             Some(1) => base_div.text_size(rems(2.0)),
             Some(2) => base_div.text_size(rems(1.75)),
             Some(3) => base_div.text_size(rems(1.5)),
@@ -54,6 +54,9 @@ impl IntoElement for Block {
             Some(6) => base_div.text_size(rems(1.0)),
             _ => base_div,
         };
+        if heading_level.is_some() {
+            sized_div = sized_div.font_weight(FontWeight::BOLD);
+        }
 
         sized_div
             .child(styled_text)
