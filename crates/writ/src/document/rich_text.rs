@@ -211,6 +211,114 @@ impl RichText {
         self.append(after);
     }
 
+    /// Insert text at the given offset with specific styles
+    pub fn insert_styled_at(&mut self, offset: usize, new_text: &str, styles: StyleSet) {
+        if new_text.is_empty() {
+            return;
+        }
+
+        if self.chunks.is_empty() {
+            self.chunks.push(TextChunk::styled(new_text, styles));
+            return;
+        }
+
+        // Find the chunk containing this offset
+        let mut pos = 0;
+        for i in 0..self.chunks.len() {
+            let chunk_end = pos + self.chunks[i].text.len();
+
+            if offset >= pos && offset <= chunk_end {
+                let insert_pos = offset - pos;
+
+                // If styles match, just insert into this chunk
+                if self.chunks[i].styles == styles {
+                    self.chunks[i].text.insert_str(insert_pos, new_text);
+                    return;
+                }
+
+                // Need to split the chunk and insert new styled chunk
+                if insert_pos == 0 {
+                    // Insert before this chunk
+                    self.chunks.insert(i, TextChunk::styled(new_text, styles));
+                    self.merge_adjacent_chunks();
+                    return;
+                } else if insert_pos == self.chunks[i].text.len() {
+                    // Insert after this chunk
+                    self.chunks
+                        .insert(i + 1, TextChunk::styled(new_text, styles));
+                    self.merge_adjacent_chunks();
+                    return;
+                } else {
+                    // Split chunk: [before][new][after]
+                    let after_text = self.chunks[i].text.split_off(insert_pos);
+                    let after_styles = self.chunks[i].styles.clone();
+
+                    // Insert new chunk and remainder
+                    self.chunks
+                        .insert(i + 1, TextChunk::styled(new_text, styles));
+                    self.chunks
+                        .insert(i + 2, TextChunk::styled(after_text, after_styles));
+                    self.merge_adjacent_chunks();
+                    return;
+                }
+            }
+            pos = chunk_end;
+        }
+
+        // Offset at end - append new chunk
+        self.chunks.push(TextChunk::styled(new_text, styles));
+        self.merge_adjacent_chunks();
+    }
+
+    /// Merge adjacent chunks with identical styles
+    fn merge_adjacent_chunks(&mut self) {
+        let mut i = 0;
+        while i + 1 < self.chunks.len() {
+            if self.chunks[i].styles == self.chunks[i + 1].styles {
+                let next_text = self.chunks.remove(i + 1).text;
+                self.chunks[i].text.push_str(&next_text);
+            } else {
+                i += 1;
+            }
+        }
+        // Remove empty chunks
+        self.chunks.retain(|c| !c.text.is_empty());
+    }
+
+    /// Debug representation showing styled chunks
+    /// Format: "<i>hello</i><b>world</b>"
+    pub fn to_debug_string(&self) -> String {
+        let mut result = String::new();
+        for chunk in &self.chunks {
+            if chunk.styles.is_empty() {
+                result.push_str(&chunk.text);
+            } else {
+                // Open tags
+                for style in &chunk.styles.styles {
+                    result.push_str(match style {
+                        TextStyle::Bold => "<b>",
+                        TextStyle::Italic => "<i>",
+                        TextStyle::Code => "<code>",
+                        TextStyle::Strikethrough => "<s>",
+                        TextStyle::Link { .. } => "<a>",
+                    });
+                }
+                result.push_str(&chunk.text);
+                // Close tags in reverse order
+                for style in chunk.styles.styles.iter().rev() {
+                    result.push_str(match style {
+                        TextStyle::Bold => "</b>",
+                        TextStyle::Italic => "</i>",
+                        TextStyle::Code => "</code>",
+                        TextStyle::Strikethrough => "</s>",
+                        TextStyle::Link { .. } => "</a>",
+                    });
+                }
+            }
+        }
+        result
+    }
+
     pub fn to_markdown(&self) -> String {
         let mut result = String::new();
         let mut open_styles: Vec<TextStyle> = Vec::new();

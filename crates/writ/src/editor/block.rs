@@ -14,6 +14,8 @@ pub struct Block {
     pub plain_text: String,
     pub highlights: Vec<(std::ops::Range<usize>, HighlightStyle)>,
     pub cursor_offset: Option<usize>,
+    /// Pending marker text to show at cursor (e.g., "*" or "**")
+    pub pending_marker: Option<String>,
     pub foreground_color: gpui::Rgba,
     pub editor: Entity<Editor>,
 }
@@ -64,17 +66,24 @@ impl RenderOnce for Block {
         if let Some(offset) = self.cursor_offset {
             let before = self.plain_text[..offset.min(self.plain_text.len())].to_string();
 
-            container.child(text_element).child(
-                // Cursor overlay
-                div()
-                    .absolute()
-                    .top_0()
-                    .left_0()
-                    .flex()
-                    .flex_row()
-                    .child(div().invisible().child(before))
-                    .child(div().w(px(2.0)).h(rems(1.2)).bg(self.foreground_color)),
-            )
+            // Build cursor overlay with optional pending marker
+            let mut cursor_row = div()
+                .absolute()
+                .top_0()
+                .left_0()
+                .flex()
+                .flex_row()
+                .child(div().invisible().child(before));
+
+            // Add pending marker text (dimmed) before cursor
+            if let Some(ref marker) = self.pending_marker {
+                cursor_row = cursor_row.child(div().opacity(0.5).child(marker.clone()));
+            }
+
+            // Add cursor bar
+            cursor_row = cursor_row.child(div().w(px(2.0)).h(rems(1.2)).bg(self.foreground_color));
+
+            container.child(text_element).child(cursor_row)
         } else {
             container.child(text_element)
         }

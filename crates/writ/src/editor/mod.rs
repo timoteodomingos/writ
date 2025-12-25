@@ -101,6 +101,18 @@ impl Render for Editor {
                     None
                 };
 
+                // Get pending marker text for cursor block
+                let pending_marker = if is_cursor_block {
+                    let marker_text = self.state.pending_marker_text();
+                    if marker_text.is_empty() {
+                        None
+                    } else {
+                        Some(marker_text.to_string())
+                    }
+                } else {
+                    None
+                };
+
                 let plain_text: String =
                     block.text.chunks.iter().map(|c| c.text.as_str()).collect();
                 let highlights = block.text.to_highlights(theme);
@@ -111,6 +123,7 @@ impl Render for Editor {
                     plain_text,
                     highlights,
                     cursor_offset,
+                    pending_marker,
                     foreground_color: theme.foreground,
                     editor: entity.clone(),
                 }
@@ -123,6 +136,7 @@ impl Render for Editor {
             .flex()
             .flex_col()
             .gap(rems(0.5))
+            .font_family("Iosevka Aile")
             .text_color(theme.foreground)
             .children(block_views)
     }

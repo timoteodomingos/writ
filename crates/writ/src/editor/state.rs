@@ -1,6 +1,6 @@
 use slotmap::DefaultKey;
 
-use crate::document::{Block, Document};
+use crate::document::{Block, Document, StyleSet, TextStyle};
 
 /// Cursor position within the document
 #[derive(Debug, Clone, PartialEq)]
@@ -22,6 +22,117 @@ pub enum Direction {
     End,
 }
 
+/// Represents a pending style marker that hasn't been committed yet
+#[derive(Debug, Clone, PartialEq)]
+pub enum PendingMarker {
+    /// Single `*` - could become italic or upgrade to bold/bold-italic
+    SingleAsterisk,
+    /// Double `**` - bold mode, or upgrade to bold-italic
+    DoubleAsterisk,
+    /// Triple `***` - bold+italic mode
+    TripleAsterisk,
+    /// Single backtick - code mode
+    Backtick,
+    /// Single `~` - could upgrade to strikethrough
+    SingleTilde,
+    /// Double `~~` - strikethrough mode
+    DoubleTilde,
+}
+
+impl PendingMarker {
+    /// Get the display text for this pending marker
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            PendingMarker::SingleAsterisk => "*",
+            PendingMarker::DoubleAsterisk => "**",
+            PendingMarker::TripleAsterisk => "***",
+            PendingMarker::Backtick => "`",
+            PendingMarker::SingleTilde => "~",
+            PendingMarker::DoubleTilde => "~~",
+        }
+    }
+
+    /// Convert a marker character to a pending marker
+    fn from_char(c: char) -> Option<PendingMarker> {
+        match c {
+            '*' => Some(PendingMarker::SingleAsterisk),
+            '`' => Some(PendingMarker::Backtick),
+            '~' => Some(PendingMarker::SingleTilde),
+            _ => None,
+        }
+    }
+
+    /// Try to upgrade this marker (e.g., * -> ** -> ***)
+    fn try_upgrade(&self, c: char) -> Option<PendingMarker> {
+        match (self, c) {
+            (PendingMarker::SingleAsterisk, '*') => Some(PendingMarker::DoubleAsterisk),
+            (PendingMarker::DoubleAsterisk, '*') => Some(PendingMarker::TripleAsterisk),
+            (PendingMarker::SingleTilde, '~') => Some(PendingMarker::DoubleTilde),
+            _ => None,
+        }
+    }
+
+    /// Downgrade marker by one character (for backspace)
+    fn downgrade(&self) -> Option<PendingMarker> {
+        match self {
+            PendingMarker::TripleAsterisk => Some(PendingMarker::DoubleAsterisk),
+            PendingMarker::DoubleAsterisk => Some(PendingMarker::SingleAsterisk),
+            PendingMarker::DoubleTilde => Some(PendingMarker::SingleTilde),
+            _ => None,
+        }
+    }
+
+    /// Convert to open styles (if this is a valid style marker)
+    /// Returns None for invalid markers, or Some with a list of styles to open
+    fn to_open_styles(&self) -> Option<Vec<OpenStyle>> {
+        match self {
+            PendingMarker::SingleAsterisk => Some(vec![OpenStyle {
+                style: TextStyle::Italic,
+                marker: "*".to_string(),
+            }]),
+            PendingMarker::DoubleAsterisk => Some(vec![OpenStyle {
+                style: TextStyle::Bold,
+                marker: "**".to_string(),
+            }]),
+            PendingMarker::TripleAsterisk => Some(vec![
+                OpenStyle {
+                    style: TextStyle::Bold,
+                    marker: "**".to_string(),
+                },
+                OpenStyle {
+                    style: TextStyle::Italic,
+                    marker: "*".to_string(),
+                },
+            ]),
+            PendingMarker::Backtick => Some(vec![OpenStyle {
+                style: TextStyle::Code,
+                marker: "`".to_string(),
+            }]),
+            PendingMarker::DoubleTilde => Some(vec![OpenStyle {
+                style: TextStyle::Strikethrough,
+                marker: "~~".to_string(),
+            }]),
+            PendingMarker::SingleTilde => None, // Single ~ is not a valid style
+        }
+    }
+}
+
+/// Tracks an open style with its marker for matching on close
+#[derive(Debug, Clone, PartialEq)]
+pub struct OpenStyle {
+    pub style: TextStyle,
+    pub marker: String,
+}
+
+/// Inline styling state for the editor
+#[derive(Debug, Clone, Default)]
+pub struct InlineStyleState {
+    /// Pending marker characters that haven't been committed to a chunk yet
+    pub pending_marker: Option<PendingMarker>,
+    /// Stack of currently open styles (outermost first)
+    pub open_styles: Vec<OpenStyle>,
+}
+
 /// All editing operations as commands
 #[derive(Debug, Clone, PartialEq)]
 pub enum EditorAction {
@@ -40,6 +151,8 @@ pub enum EditorAction {
 pub struct EditorState {
     pub document: Document,
     pub cursor: Cursor,
+    /// Inline styling state (pending markers, open styles)
+    pub inline_style: InlineStyleState,
 }
 
 impl EditorState {
@@ -58,6 +171,28 @@ impl EditorState {
                 block_key: first_block_key,
                 offset: 0,
             },
+            inline_style: InlineStyleState::default(),
+        }
+    }
+
+    /// Get the pending marker text for display
+    pub fn pending_marker_text(&self) -> &str {
+        self.inline_style
+            .pending_marker
+            .as_ref()
+            .map(|m| m.as_str())
+            .unwrap_or("")
+    }
+
+    /// Get current active styles from the open_styles stack
+    fn current_styles(&self) -> StyleSet {
+        StyleSet {
+            styles: self
+                .inline_style
+                .open_styles
+                .iter()
+                .map(|os| os.style.clone())
+                .collect(),
         }
     }
 
@@ -79,6 +214,9 @@ impl EditorState {
     }
 
     fn set_cursor(&mut self, block_key: DefaultKey, offset: usize) {
+        // Clear inline style state on cursor set (click)
+        self.inline_style = InlineStyleState::default();
+
         if let Some(block) = self.document.blocks.get(block_key) {
             let max_offset = block.text.len();
             self.cursor.block_key = block_key;
@@ -86,8 +224,8 @@ impl EditorState {
         }
     }
 
-    /// Debug representation showing cursor position
-    /// Format: "Hello [|]world" for cursor between "Hello " and "world"
+    /// Debug representation showing cursor position and pending markers
+    /// Format: "Hello *[|]" for cursor with pending italic marker
     pub fn to_debug_string(&self) -> String {
         let mut result = String::new();
 
@@ -100,10 +238,11 @@ impl EditorState {
             let text = self.block_plain_text(block);
 
             if *block_key == self.cursor.block_key {
-                // Insert cursor marker at offset
+                // Insert cursor marker at offset, with pending marker before cursor
                 let offset = self.cursor.offset.min(text.len());
                 let (before, after) = text.split_at(offset);
                 result.push_str(before);
+                result.push_str(self.pending_marker_text());
                 result.push_str("[|]");
                 result.push_str(after);
             } else {
@@ -112,6 +251,13 @@ impl EditorState {
         }
 
         result
+    }
+
+    /// Debug representation showing styled chunks
+    /// Format: "<i>hello</i><b>world</b>"
+    pub fn to_styled_debug_string(&self) -> String {
+        let block = &self.document.blocks[self.cursor.block_key];
+        block.text.to_debug_string()
     }
 
     /// Extract plain text from a block (ignoring styles)
@@ -128,6 +274,9 @@ impl EditorState {
     }
 
     fn move_cursor(&mut self, direction: Direction) {
+        // Clear inline style state on cursor movement
+        self.inline_style = InlineStyleState::default();
+
         match direction {
             Direction::Left => self.move_left(),
             Direction::Right => self.move_right(),
@@ -215,14 +364,136 @@ impl EditorState {
     }
 
     fn insert_text(&mut self, text: &str) {
+        for c in text.chars() {
+            self.insert_char(c);
+        }
+    }
+
+    /// Check if a character is a potential style marker
+    fn is_marker_char(c: char) -> bool {
+        matches!(c, '*' | '`' | '~')
+    }
+
+    fn insert_char(&mut self, c: char) {
+        if Self::is_marker_char(c) {
+            self.handle_marker_char(c);
+        } else {
+            self.handle_regular_char(c);
+        }
+    }
+
+    fn handle_marker_char(&mut self, c: char) {
+        // Check if we can upgrade the pending marker
+        if let Some(ref pending) = self.inline_style.pending_marker {
+            if let Some(upgraded) = pending.try_upgrade(c) {
+                self.inline_style.pending_marker = Some(upgraded);
+                return;
+            }
+
+            // Can't upgrade - the pending marker is complete, need to resolve it
+            // before starting a new pending marker
+            self.resolve_pending_marker();
+        }
+
+        // Start a new pending marker
+        self.inline_style.pending_marker = PendingMarker::from_char(c);
+    }
+
+    /// Resolve a pending marker - either close matching open styles or open new styles
+    fn resolve_pending_marker(&mut self) {
+        if let Some(pending) = self.inline_style.pending_marker.take() {
+            // For TripleAsterisk, we need to close both ** and * (or open both)
+            // For others, just close/open the single marker
+            if matches!(pending, PendingMarker::TripleAsterisk) {
+                // Try to close both ** and *
+                let closed_bold = self.try_close_style("**");
+                let closed_italic = self.try_close_style("*");
+
+                if closed_bold || closed_italic {
+                    // We closed at least one - if we didn't close the other, open it
+                    if !closed_bold {
+                        self.inline_style.open_styles.push(OpenStyle {
+                            style: TextStyle::Bold,
+                            marker: "**".to_string(),
+                        });
+                    }
+                    if !closed_italic {
+                        self.inline_style.open_styles.push(OpenStyle {
+                            style: TextStyle::Italic,
+                            marker: "*".to_string(),
+                        });
+                    }
+                    return;
+                }
+
+                // Nothing to close - open both styles
+                if let Some(open_styles) = pending.to_open_styles() {
+                    for style in open_styles {
+                        self.inline_style.open_styles.push(style);
+                    }
+                }
+                return;
+            }
+
+            let marker = pending.as_str();
+
+            // Check if this closes an open style
+            if self.try_close_style(marker) {
+                return;
+            }
+
+            // Doesn't close anything - open new styles (or insert literal for invalid markers)
+            if let Some(open_styles) = pending.to_open_styles() {
+                for style in open_styles {
+                    self.inline_style.open_styles.push(style);
+                }
+            } else {
+                // Invalid pending marker (e.g., single ~) - insert as literal text
+                let block = &mut self.document.blocks[self.cursor.block_key];
+                block.text.insert_at(self.cursor.offset, marker);
+                self.cursor.offset += marker.len();
+            }
+        }
+    }
+
+    /// Try to close an open style with the given marker
+    fn try_close_style(&mut self, marker: &str) -> bool {
+        // Find the most recently opened style with matching marker
+        for i in (0..self.inline_style.open_styles.len()).rev() {
+            if self.inline_style.open_styles[i].marker == marker {
+                self.inline_style.open_styles.remove(i);
+                return true;
+            }
+        }
+        false
+    }
+
+    fn handle_regular_char(&mut self, c: char) {
+        // Resolve pending marker (close or open style)
+        self.resolve_pending_marker();
+
+        // Insert character with current styles
+        let styles = self.current_styles();
         let block = &mut self.document.blocks[self.cursor.block_key];
-        block.text.insert_at(self.cursor.offset, text);
-        self.cursor.offset += text.len();
+        block
+            .text
+            .insert_styled_at(self.cursor.offset, &c.to_string(), styles);
+        self.cursor.offset += c.len_utf8();
     }
 
     fn backspace(&mut self) {
+        // First, consume pending marker character by character
+        if let Some(pending) = &self.inline_style.pending_marker {
+            if let Some(downgraded) = pending.downgrade() {
+                self.inline_style.pending_marker = Some(downgraded);
+            } else {
+                self.inline_style.pending_marker = None;
+            }
+            return;
+        }
+
+        // Then delete actual text
         if self.cursor.offset > 0 {
-            // Delete character before cursor
             let block = &mut self.document.blocks[self.cursor.block_key];
             block
                 .text

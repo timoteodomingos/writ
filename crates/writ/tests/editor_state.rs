@@ -167,3 +167,183 @@ fn test_move_left_across_blocks() {
     state.apply(EditorAction::MoveCursor(Direction::Left));
     assert_eq!(state.to_debug_string(), "Hi[|]\nBye");
 }
+
+// ============================================================================
+// Inline Style Marker Tests
+// ============================================================================
+
+#[test]
+fn test_italic_marker_pending() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete); // Clear the placeholder
+    state.apply(EditorAction::InsertText("*".to_string()));
+    assert_eq!(state.to_debug_string(), "*[|]");
+}
+
+#[test]
+fn test_bold_marker_upgrade() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText("*".to_string()));
+    assert_eq!(state.to_debug_string(), "*[|]");
+    state.apply(EditorAction::InsertText("*".to_string()));
+    assert_eq!(state.to_debug_string(), "**[|]");
+}
+
+#[test]
+fn test_italic_text_insertion() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText("*".to_string()));
+    state.apply(EditorAction::InsertText("hello".to_string()));
+    state.apply(EditorAction::InsertText("*".to_string()));
+
+    assert_eq!(state.to_styled_debug_string(), "<i>hello</i>");
+
+    // Verify highlights are generated
+    let block = &state.document.blocks[state.cursor.block_key];
+    let theme = writ::theme::dracula();
+    let highlights = block.text.to_highlights(&theme);
+    assert!(!highlights.is_empty(), "Highlights should not be empty");
+}
+
+#[test]
+fn test_bold_text_insertion() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText("**".to_string()));
+    state.apply(EditorAction::InsertText("bold".to_string()));
+    state.apply(EditorAction::InsertText("**".to_string()));
+    assert_eq!(state.to_styled_debug_string(), "<b>bold</b>");
+}
+
+#[test]
+fn test_code_style() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText("`".to_string()));
+    state.apply(EditorAction::InsertText("code".to_string()));
+    state.apply(EditorAction::InsertText("`".to_string()));
+    assert_eq!(state.to_styled_debug_string(), "<code>code</code>");
+}
+
+#[test]
+fn test_strikethrough_style() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText("~~".to_string()));
+    state.apply(EditorAction::InsertText("deleted".to_string()));
+    state.apply(EditorAction::InsertText("~~".to_string()));
+    assert_eq!(state.to_styled_debug_string(), "<s>deleted</s>");
+}
+
+#[test]
+fn test_nested_styles() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    // *italic **bold-italic** italic*
+    state.apply(EditorAction::InsertText("*".to_string()));
+    state.apply(EditorAction::InsertText("italic ".to_string()));
+    state.apply(EditorAction::InsertText("**".to_string()));
+    state.apply(EditorAction::InsertText("bold-italic".to_string()));
+    state.apply(EditorAction::InsertText("**".to_string()));
+    state.apply(EditorAction::InsertText(" italic".to_string()));
+    state.apply(EditorAction::InsertText("*".to_string()));
+
+    assert_eq!(
+        state.to_styled_debug_string(),
+        "<i>italic </i><i><b>bold-italic</b></i><i> italic</i>"
+    );
+}
+
+#[test]
+fn test_triple_asterisk_bold_italic() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    // ***bold-italic***
+    state.apply(EditorAction::InsertText("***".to_string()));
+    assert_eq!(state.to_debug_string(), "***[|]"); // All 3 asterisks visible as pending
+    state.apply(EditorAction::InsertText("text".to_string()));
+    state.apply(EditorAction::InsertText("***".to_string()));
+    // Should be both bold and italic
+    assert_eq!(state.to_styled_debug_string(), "<b><i>text</i></b>");
+}
+
+#[test]
+fn test_triple_asterisk_marker_upgrade() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText("*".to_string()));
+    assert_eq!(state.to_debug_string(), "*[|]");
+    state.apply(EditorAction::InsertText("*".to_string()));
+    assert_eq!(state.to_debug_string(), "**[|]");
+    state.apply(EditorAction::InsertText("*".to_string()));
+    assert_eq!(state.to_debug_string(), "***[|]");
+}
+
+#[test]
+fn test_backspace_removes_pending_marker() {
+    let mut state = EditorState::from_markdown("Hello");
+    state.apply(EditorAction::MoveCursor(Direction::End));
+    state.apply(EditorAction::InsertText("*".to_string()));
+    assert_eq!(state.to_debug_string(), "Hello*[|]");
+    state.apply(EditorAction::Backspace);
+    assert_eq!(state.to_debug_string(), "Hello[|]");
+}
+
+#[test]
+fn test_backspace_double_marker() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText("**".to_string()));
+    assert_eq!(state.to_debug_string(), "**[|]");
+    state.apply(EditorAction::Backspace);
+    assert_eq!(state.to_debug_string(), "*[|]");
+    state.apply(EditorAction::Backspace);
+    assert_eq!(state.to_debug_string(), "[|]");
+}
+
+#[test]
+fn test_cursor_movement_clears_pending() {
+    let mut state = EditorState::from_markdown("Hello");
+    state.apply(EditorAction::InsertText("*".to_string()));
+    assert_eq!(state.to_debug_string(), "*[|]Hello");
+    state.apply(EditorAction::MoveCursor(Direction::Right));
+    // Moving should clear pending marker
+    assert_eq!(state.to_debug_string(), "H[|]ello");
+    assert!(state.inline_style.pending_marker.is_none());
+}
+
+#[test]
+fn test_cursor_movement_clears_open_styles() {
+    let mut state = EditorState::from_markdown("Hello");
+    state.apply(EditorAction::InsertText("*".to_string()));
+    state.apply(EditorAction::InsertText("test".to_string()));
+    // Now we have open italic style
+    assert!(!state.inline_style.open_styles.is_empty());
+    state.apply(EditorAction::MoveCursor(Direction::Right));
+    // Moving should clear open styles
+    assert!(state.inline_style.open_styles.is_empty());
+}
+
+#[test]
+fn test_single_tilde_is_literal() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText("~".to_string()));
+    state.apply(EditorAction::InsertText("hello".to_string()));
+    // Single ~ is not a valid style marker, should be inserted as literal
+    assert_eq!(state.to_styled_debug_string(), "~hello");
+}
+
+#[test]
+fn test_mixed_plain_and_styled() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText("plain ".to_string()));
+    state.apply(EditorAction::InsertText("*".to_string()));
+    state.apply(EditorAction::InsertText("italic".to_string()));
+    state.apply(EditorAction::InsertText("*".to_string()));
+    state.apply(EditorAction::InsertText(" plain".to_string()));
+    assert_eq!(state.to_styled_debug_string(), "plain <i>italic</i> plain");
+}
