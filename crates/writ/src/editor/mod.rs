@@ -82,6 +82,7 @@ impl Focusable for Editor {
 impl Render for Editor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = Theme::global(cx);
+
         let entity = cx.entity().clone();
 
         // Collect block views
