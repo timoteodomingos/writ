@@ -347,3 +347,87 @@ fn test_mixed_plain_and_styled() {
     state.apply(EditorAction::InsertText(" plain".to_string()));
     assert_eq!(state.to_styled_debug_string(), "plain <i>italic</i> plain");
 }
+
+#[test]
+fn test_backspace_clears_open_style_at_start() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    // Open italic style
+    state.apply(EditorAction::InsertText("*".to_string()));
+    state.apply(EditorAction::InsertText("a".to_string()));
+    assert!(!state.inline_style.open_styles.is_empty());
+    // Delete the 'a'
+    state.apply(EditorAction::Backspace);
+    assert_eq!(state.to_debug_string(), "[|]");
+    // Now at start of line with open style - backspace should clear it
+    assert!(!state.inline_style.open_styles.is_empty());
+    state.apply(EditorAction::Backspace);
+    assert!(state.inline_style.open_styles.is_empty());
+}
+
+#[test]
+fn test_backspace_clears_nested_open_styles_one_at_a_time() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    // Open bold then italic: **bold *italic
+    state.apply(EditorAction::InsertText("**".to_string()));
+    state.apply(EditorAction::InsertText("*".to_string()));
+    state.apply(EditorAction::InsertText("a".to_string()));
+    assert_eq!(state.inline_style.open_styles.len(), 2);
+    // Delete the 'a'
+    state.apply(EditorAction::Backspace);
+    // Backspace should pop styles one at a time (most recent first)
+    state.apply(EditorAction::Backspace);
+    assert_eq!(state.inline_style.open_styles.len(), 1);
+    state.apply(EditorAction::Backspace);
+    assert_eq!(state.inline_style.open_styles.len(), 0);
+}
+
+#[test]
+fn test_backspace_triple_asterisk_marker() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText("***".to_string()));
+    assert_eq!(state.to_debug_string(), "***[|]");
+    state.apply(EditorAction::Backspace);
+    assert_eq!(state.to_debug_string(), "**[|]");
+    state.apply(EditorAction::Backspace);
+    assert_eq!(state.to_debug_string(), "*[|]");
+    state.apply(EditorAction::Backspace);
+    assert_eq!(state.to_debug_string(), "[|]");
+}
+
+#[test]
+fn test_double_tilde_strikethrough_marker() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText("~".to_string()));
+    assert_eq!(state.to_debug_string(), "~[|]");
+    state.apply(EditorAction::InsertText("~".to_string()));
+    assert_eq!(state.to_debug_string(), "~~[|]");
+}
+
+#[test]
+fn test_backspace_double_tilde_marker() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText("~~".to_string()));
+    assert_eq!(state.to_debug_string(), "~~[|]");
+    state.apply(EditorAction::Backspace);
+    assert_eq!(state.to_debug_string(), "~[|]");
+    // Single tilde is invalid, next backspace clears it
+    state.apply(EditorAction::Backspace);
+    assert_eq!(state.to_debug_string(), "[|]");
+}
+
+#[test]
+fn test_marker_resolved_on_different_marker_type() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    // Type * then ` - the * should resolve (open italic) and ` becomes pending
+    state.apply(EditorAction::InsertText("*".to_string()));
+    state.apply(EditorAction::InsertText("`".to_string()));
+    assert_eq!(state.to_debug_string(), "`[|]");
+    assert_eq!(state.inline_style.open_styles.len(), 1);
+    assert_eq!(state.inline_style.open_styles[0].marker, "*");
+}

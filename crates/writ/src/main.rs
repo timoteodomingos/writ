@@ -71,7 +71,7 @@ fn main() {
             let window_options = WindowOptions {
                 window_bounds: Some(WindowBounds::Windowed(Bounds {
                     origin: Point::new(0.0.into(), 0.0.into()),
-                    size: Size::new(800.0.into(), 800.0.into()),
+                    size: Size::new(600.0.into(), 600.0.into()),
                 })),
                 window_decorations: Some(WindowDecorations::Client),
                 ..Default::default()

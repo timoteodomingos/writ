@@ -23,51 +23,42 @@ impl IntoElement for Block {
     type Element = gpui::Stateful<gpui::Div>;
 
     fn into_element(self) -> Self::Element {
-        let block_idx = self.block_idx;
-        let block_key = self.block_key;
-        let plain_text = self.plain_text.clone();
-        let highlights = self.highlights.clone();
-        let cursor_offset = self.cursor_offset;
-        let pending_marker = self.pending_marker.clone();
-        let foreground_color = self.foreground_color;
-        let editor = self.editor.clone();
-        let text_len = plain_text.len();
+        let text_len = self.plain_text.len();
 
-        // Create styled text element - keep ownership for layout access
-        let styled_text = StyledText::new(plain_text.clone()).with_highlights(highlights.clone());
+        // Create styled text element and get its layout handle
+        let styled_text = StyledText::new(self.plain_text).with_highlights(self.highlights);
         let text_layout = styled_text.layout().clone();
+        let layout_for_prepaint = text_layout.clone();
 
-        // Store layout immediately for use after prepaint
-        let layout_for_click = text_layout.clone();
-        let layout_for_cursor = text_layout.clone();
-        let editor_for_click = editor.clone();
+        let editor_for_click = self.editor.clone();
+        let block_key = self.block_key;
+        let cursor_offset = self.cursor_offset;
+        let pending_marker = self.pending_marker;
+        let foreground_color = self.foreground_color;
 
         gpui::div()
-            .id(("block", block_idx))
+            .id(("block", self.block_idx))
             .relative()
             .child(styled_text)
             .child(
                 canvas(
-                    // Prepaint: store the layout in editor after StyledText has been prepainted
-                    move |bounds, _window, cx| {
-                        // At this point the parent StyledText should have been prepainted
+                    // Prepaint: store layout and calculate cursor position
+                    move |_bounds, _window, cx| {
                         // Store layout for click handling
-                        editor.update(cx, |ed, _| {
-                            ed.block_layouts.insert(block_key, layout_for_click.clone());
+                        self.editor.update(cx, |ed, _| {
+                            ed.block_layouts
+                                .insert(block_key, layout_for_prepaint.clone());
                         });
 
                         // Calculate cursor position if this block has the cursor
-                        let cursor_pos = cursor_offset
-                            .and_then(|offset| layout_for_cursor.position_for_index(offset));
+                        let cursor_pos =
+                            cursor_offset.and_then(|offset| text_layout.position_for_index(offset));
 
                         // Return data for paint phase
-                        (bounds, cursor_pos, pending_marker.clone())
+                        (cursor_pos, pending_marker.clone())
                     },
                     // Paint: draw the cursor and pending marker
-                    move |_bounds,
-                          (_, cursor_pos, pending_marker),
-                          window: &mut gpui::Window,
-                          cx| {
+                    move |_bounds, (cursor_pos, pending_marker), window: &mut gpui::Window, cx| {
                         if let Some(pos) = cursor_pos {
                             // Get line height from window
                             let text_style = window.text_style();

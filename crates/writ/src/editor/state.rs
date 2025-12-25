@@ -492,6 +492,12 @@ impl EditorState {
             return;
         }
 
+        // If no pending marker but there are open styles, pop the most recent one
+        if !self.inline_style.open_styles.is_empty() && self.cursor.offset == 0 {
+            self.inline_style.open_styles.pop();
+            return;
+        }
+
         // Then delete actual text
         if self.cursor.offset > 0 {
             let block = &mut self.document.blocks[self.cursor.block_key];
