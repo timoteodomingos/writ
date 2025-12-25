@@ -200,4 +200,35 @@ impl Document {
             .position(|(_, k)| k == &block_key)
             .unwrap()
     }
+
+    /// Insert a new block after the given block, returns the new block's key
+    pub fn insert_block_after(&mut self, after_key: DefaultKey, block: Block) -> DefaultKey {
+        // Find the FractionalIndex of after_key
+        let after_index = self
+            .block_order
+            .iter()
+            .find(|(_, k)| **k == after_key)
+            .map(|(idx, _)| idx.clone())
+            .expect("Block not found in block_order");
+
+        // Find the next block's index (if any)
+        let next_index = self
+            .block_order
+            .range(&after_index..)
+            .nth(1)
+            .map(|(idx, _)| idx.clone());
+
+        // Generate new FractionalIndex between after_key and next block
+        let new_index = match next_index {
+            Some(ref next) => FractionalIndex::new_between(&after_index, next)
+                .expect("Failed to create FractionalIndex between blocks"),
+            None => FractionalIndex::new_after(&after_index),
+        };
+
+        // Insert into blocks SlotMap and block_order BTreeMap
+        let new_key = self.blocks.insert(block);
+        self.block_order.insert(new_index, new_key);
+
+        new_key
+    }
 }

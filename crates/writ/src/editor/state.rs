@@ -1,6 +1,6 @@
 use slotmap::DefaultKey;
 
-use crate::document::{Block, Document, StyleSet, TextStyle};
+use crate::document::{Block, BlockKind, Document, RichText, StyleSet, TextStyle};
 
 /// Cursor position within the document
 #[derive(Debug, Clone, PartialEq)]
@@ -133,12 +133,88 @@ pub struct InlineStyleState {
     pub open_styles: Vec<OpenStyle>,
 }
 
+/// Represents a pending block marker (e.g., `#` for headings)
+#[derive(Debug, Clone, PartialEq)]
+pub enum PendingBlockMarker {
+    /// Heading marker with level (1-6) and whether space has been typed
+    Heading { level: usize, has_space: bool },
+}
+
+impl PendingBlockMarker {
+    /// Get the display text for this pending block marker
+    pub fn as_str(&self) -> String {
+        match self {
+            PendingBlockMarker::Heading { level, has_space } => {
+                let hashes = "#".repeat(*level);
+                if *has_space {
+                    format!("{} ", hashes)
+                } else {
+                    hashes
+                }
+            }
+        }
+    }
+
+    /// Try to upgrade this marker (e.g., # -> ## -> ###)
+    fn try_upgrade(&self, c: char) -> Option<PendingBlockMarker> {
+        match (self, c) {
+            (PendingBlockMarker::Heading { level, has_space }, '#')
+                if !*has_space && *level < 6 =>
+            {
+                Some(PendingBlockMarker::Heading {
+                    level: level + 1,
+                    has_space: false,
+                })
+            }
+            (PendingBlockMarker::Heading { level, has_space }, ' ') if !*has_space => {
+                Some(PendingBlockMarker::Heading {
+                    level: *level,
+                    has_space: true,
+                })
+            }
+            _ => None,
+        }
+    }
+
+    /// Downgrade marker by one step (for backspace)
+    fn downgrade(&self) -> Option<PendingBlockMarker> {
+        match self {
+            PendingBlockMarker::Heading { level, has_space } => {
+                if *has_space {
+                    // Remove space first
+                    Some(PendingBlockMarker::Heading {
+                        level: *level,
+                        has_space: false,
+                    })
+                } else if *level > 1 {
+                    // Downgrade level
+                    Some(PendingBlockMarker::Heading {
+                        level: level - 1,
+                        has_space: false,
+                    })
+                } else {
+                    // Level 1 with no space - remove entirely
+                    None
+                }
+            }
+        }
+    }
+}
+
+/// Block styling state for the editor
+#[derive(Debug, Clone, Default)]
+pub struct BlockStyleState {
+    /// Pending block marker that hasn't been committed yet
+    pub pending_marker: Option<PendingBlockMarker>,
+}
+
 /// All editing operations as commands
 #[derive(Debug, Clone, PartialEq)]
 pub enum EditorAction {
     InsertText(String),
     Backspace,
     Delete,
+    Enter,
     MoveCursor(Direction),
     /// Set cursor to specific block and offset (e.g., from a click)
     SetCursor {
@@ -153,6 +229,8 @@ pub struct EditorState {
     pub cursor: Cursor,
     /// Inline styling state (pending markers, open styles)
     pub inline_style: InlineStyleState,
+    /// Block styling state (pending block markers like #)
+    pub block_style: BlockStyleState,
 }
 
 impl EditorState {
@@ -172,16 +250,22 @@ impl EditorState {
                 offset: 0,
             },
             inline_style: InlineStyleState::default(),
+            block_style: BlockStyleState::default(),
         }
     }
 
-    /// Get the pending marker text for display
+    /// Get the pending inline marker text for display
     pub fn pending_marker_text(&self) -> &str {
         self.inline_style
             .pending_marker
             .as_ref()
             .map(|m| m.as_str())
             .unwrap_or("")
+    }
+
+    /// Get the pending block marker text for display
+    pub fn pending_block_marker_text(&self) -> Option<String> {
+        self.block_style.pending_marker.as_ref().map(|m| m.as_str())
     }
 
     /// Get current active styles from the open_styles stack
@@ -209,13 +293,15 @@ impl EditorState {
             EditorAction::InsertText(text) => self.insert_text(&text),
             EditorAction::Backspace => self.backspace(),
             EditorAction::Delete => self.delete(),
+            EditorAction::Enter => self.enter(),
             EditorAction::SetCursor { block_key, offset } => self.set_cursor(block_key, offset),
         }
     }
 
     fn set_cursor(&mut self, block_key: DefaultKey, offset: usize) {
-        // Clear inline style state on cursor set (click)
+        // Clear style state on cursor set (click)
         self.inline_style = InlineStyleState::default();
+        self.block_style = BlockStyleState::default();
 
         if let Some(block) = self.document.blocks.get(block_key) {
             let max_offset = block.text.len();
@@ -274,8 +360,9 @@ impl EditorState {
     }
 
     fn move_cursor(&mut self, direction: Direction) {
-        // Clear inline style state on cursor movement
+        // Clear style state on cursor movement
         self.inline_style = InlineStyleState::default();
+        self.block_style = BlockStyleState::default();
 
         match direction {
             Direction::Left => self.move_left(),
@@ -369,17 +456,67 @@ impl EditorState {
         }
     }
 
-    /// Check if a character is a potential style marker
+    /// Check if a character is a potential inline style marker
     fn is_marker_char(c: char) -> bool {
         matches!(c, '*' | '`' | '~')
     }
 
+    /// Check if we're at a position where block markers are valid
+    /// (cursor at offset 0 with no text in the block, or we already have a pending block marker)
+    fn can_use_block_marker(&self) -> bool {
+        self.block_style.pending_marker.is_some()
+            || (self.cursor.offset == 0 && self.current_block_len() == 0)
+    }
+
     fn insert_char(&mut self, c: char) {
+        // Check for block marker handling first
+        if self.can_use_block_marker() {
+            if let Some(ref pending) = self.block_style.pending_marker {
+                // Try to upgrade existing block marker
+                if let Some(upgraded) = pending.try_upgrade(c) {
+                    self.block_style.pending_marker = Some(upgraded);
+                    return;
+                }
+                // Block marker with space and text input - convert to heading
+                let PendingBlockMarker::Heading { level, has_space } = pending;
+                if *has_space {
+                    // Convert block to heading and insert the character
+                    let block = &mut self.document.blocks[self.cursor.block_key];
+                    block.kind = BlockKind::Heading {
+                        level: *level,
+                        id: None,
+                    };
+                    self.block_style.pending_marker = None;
+                    // Now insert the character as regular text
+                    self.insert_char_as_text(c);
+                    return;
+                }
+            } else if c == '#' {
+                // Start a new heading marker
+                self.block_style.pending_marker = Some(PendingBlockMarker::Heading {
+                    level: 1,
+                    has_space: false,
+                });
+                return;
+            }
+        }
+
+        // Regular character handling (inline styles or plain text)
         if Self::is_marker_char(c) {
             self.handle_marker_char(c);
         } else {
             self.handle_regular_char(c);
         }
+    }
+
+    /// Insert a character as plain text with current styles
+    fn insert_char_as_text(&mut self, c: char) {
+        let styles = self.current_styles();
+        let block = &mut self.document.blocks[self.cursor.block_key];
+        block
+            .text
+            .insert_styled_at(self.cursor.offset, &c.to_string(), styles);
+        self.cursor.offset += c.len_utf8();
     }
 
     fn handle_marker_char(&mut self, c: char) {
@@ -482,7 +619,17 @@ impl EditorState {
     }
 
     fn backspace(&mut self) {
-        // First, consume pending marker character by character
+        // First, consume pending block marker character by character
+        if let Some(pending) = &self.block_style.pending_marker {
+            if let Some(downgraded) = pending.downgrade() {
+                self.block_style.pending_marker = Some(downgraded);
+            } else {
+                self.block_style.pending_marker = None;
+            }
+            return;
+        }
+
+        // Next, consume pending inline marker character by character
         if let Some(pending) = &self.inline_style.pending_marker {
             if let Some(downgraded) = pending.downgrade() {
                 self.inline_style.pending_marker = Some(downgraded);
@@ -496,6 +643,15 @@ impl EditorState {
         if !self.inline_style.open_styles.is_empty() && self.cursor.offset == 0 {
             self.inline_style.open_styles.pop();
             return;
+        }
+
+        // At offset 0 with heading block, convert to paragraph
+        if self.cursor.offset == 0 {
+            let block = &mut self.document.blocks[self.cursor.block_key];
+            if let BlockKind::Heading { .. } = block.kind {
+                block.kind = BlockKind::Paragraph { parent: None };
+                return;
+            }
         }
 
         // Then delete actual text
@@ -519,5 +675,42 @@ impl EditorState {
                 .delete_range(self.cursor.offset, self.cursor.offset + 1);
         }
         // TODO: At end of block - merge with next block
+    }
+
+    fn enter(&mut self) {
+        // Clear any pending markers and open styles
+        self.inline_style = InlineStyleState::default();
+        self.block_style = BlockStyleState::default();
+
+        let current_key = self.cursor.block_key;
+        let offset = self.cursor.offset;
+        let block_len = self.current_block_len();
+
+        if offset == block_len {
+            // At end: create new empty paragraph after
+            let new_block = Block {
+                kind: BlockKind::Paragraph { parent: None },
+                text: RichText::new(),
+            };
+            let new_key = self.document.insert_block_after(current_key, new_block);
+            self.cursor.block_key = new_key;
+            self.cursor.offset = 0;
+        } else {
+            // In middle: split block
+            let block = &mut self.document.blocks[current_key];
+            let (before, after) = block.text.split_at(offset);
+
+            // Keep first part in current block
+            block.text = before;
+
+            // Create new paragraph with second part
+            let new_block = Block {
+                kind: BlockKind::Paragraph { parent: None },
+                text: after,
+            };
+            let new_key = self.document.insert_block_after(current_key, new_block);
+            self.cursor.block_key = new_key;
+            self.cursor.offset = 0;
+        }
     }
 }

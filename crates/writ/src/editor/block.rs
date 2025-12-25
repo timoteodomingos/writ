@@ -1,6 +1,6 @@
 use gpui::{
     App, Bounds, Entity, HighlightStyle, IntoElement, MouseButton, MouseDownEvent, SharedString,
-    StyledText, TextRun, canvas, fill, prelude::*, px, size,
+    StyledText, TextRun, canvas, fill, prelude::*, px, rems, size,
 };
 use slotmap::DefaultKey;
 
@@ -13,8 +13,12 @@ pub struct Block {
     pub plain_text: String,
     pub highlights: Vec<(std::ops::Range<usize>, HighlightStyle)>,
     pub cursor_offset: Option<usize>,
-    /// Pending marker text to show at cursor (e.g., "*" or "**")
+    /// Pending inline marker text to show at cursor (e.g., "*" or "**")
     pub pending_marker: Option<String>,
+    /// Pending block marker text to show at start of line (e.g., "# " or "## ")
+    pub pending_block_marker: Option<String>,
+    /// Heading level (1-6) if this is a heading block, None for paragraphs
+    pub heading_level: Option<usize>,
     pub foreground_color: gpui::Rgba,
     pub editor: Entity<Editor>,
 }
@@ -34,11 +38,24 @@ impl IntoElement for Block {
         let block_key = self.block_key;
         let cursor_offset = self.cursor_offset;
         let pending_marker = self.pending_marker;
+        let pending_block_marker = self.pending_block_marker;
+        let heading_level = self.heading_level;
         let foreground_color = self.foreground_color;
 
-        gpui::div()
-            .id(("block", self.block_idx))
-            .relative()
+        // Apply heading font size if this is a heading block
+        let base_div = gpui::div().id(("block", self.block_idx)).relative();
+
+        let sized_div = match heading_level {
+            Some(1) => base_div.text_size(rems(2.0)),
+            Some(2) => base_div.text_size(rems(1.75)),
+            Some(3) => base_div.text_size(rems(1.5)),
+            Some(4) => base_div.text_size(rems(1.25)),
+            Some(5) => base_div.text_size(rems(1.1)),
+            Some(6) => base_div.text_size(rems(1.0)),
+            _ => base_div,
+        };
+
+        sized_div
             .child(styled_text)
             .child(
                 canvas(
@@ -55,10 +72,17 @@ impl IntoElement for Block {
                             cursor_offset.and_then(|offset| text_layout.position_for_index(offset));
 
                         // Return data for paint phase
-                        (cursor_pos, pending_marker.clone())
+                        (
+                            cursor_pos,
+                            pending_marker.clone(),
+                            pending_block_marker.clone(),
+                        )
                     },
-                    // Paint: draw the cursor and pending marker
-                    move |_bounds, (cursor_pos, pending_marker), window: &mut gpui::Window, cx| {
+                    // Paint: draw the cursor and pending markers
+                    move |_bounds,
+                          (cursor_pos, pending_marker, pending_block_marker),
+                          window: &mut gpui::Window,
+                          cx| {
                         if let Some(pos) = cursor_pos {
                             // Get line height from window
                             let text_style = window.text_style();
@@ -67,8 +91,39 @@ impl IntoElement for Block {
                                 .line_height
                                 .to_pixels(font_size.into(), window.rem_size());
 
-                            // Paint pending marker (dimmed) if present
                             let mut cursor_x = pos.x;
+
+                            // Paint pending block marker (dimmed) at start of line if present
+                            if let Some(ref block_marker) = pending_block_marker {
+                                let marker_text: SharedString = block_marker.clone().into();
+                                let run = TextRun {
+                                    len: block_marker.len(),
+                                    font: text_style.font(),
+                                    color: gpui::Hsla {
+                                        h: 0.0,
+                                        s: 0.0,
+                                        l: 0.5,
+                                        a: 0.7,
+                                    },
+                                    background_color: None,
+                                    underline: None,
+                                    strikethrough: None,
+                                };
+                                let shaped_marker = window.text_system().shape_line(
+                                    marker_text,
+                                    font_size,
+                                    &[run],
+                                    None,
+                                );
+
+                                // Paint at start of line
+                                let _ = shaped_marker.paint(pos, line_height, window, cx);
+
+                                // Move cursor position after the block marker
+                                cursor_x = pos.x + shaped_marker.width;
+                            }
+
+                            // Paint pending inline marker (dimmed) if present
                             if let Some(ref marker) = pending_marker {
                                 // Shape the marker text
                                 let marker_text: SharedString = marker.clone().into();

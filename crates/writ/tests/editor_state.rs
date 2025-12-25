@@ -431,3 +431,274 @@ fn test_marker_resolved_on_different_marker_type() {
     assert_eq!(state.inline_style.open_styles.len(), 1);
     assert_eq!(state.inline_style.open_styles[0].marker, "*");
 }
+
+// ============================================================================
+// Enter Key Tests
+// ============================================================================
+
+#[test]
+fn test_enter_at_end_creates_new_block() {
+    let mut state = EditorState::from_markdown("Hello");
+    state.apply(EditorAction::MoveCursor(Direction::End));
+    assert_eq!(state.to_debug_string(), "Hello[|]");
+
+    state.apply(EditorAction::Enter);
+    assert_eq!(state.to_debug_string(), "Hello\n[|]");
+
+    // Cursor should be at start of new block
+    assert_eq!(state.cursor.offset, 0);
+}
+
+#[test]
+fn test_enter_in_middle_splits_block() {
+    let mut state = EditorState::from_markdown("HelloWorld");
+    // Move cursor to position 5 (between "Hello" and "World")
+    for _ in 0..5 {
+        state.apply(EditorAction::MoveCursor(Direction::Right));
+    }
+    assert_eq!(state.to_debug_string(), "Hello[|]World");
+
+    state.apply(EditorAction::Enter);
+    assert_eq!(state.to_debug_string(), "Hello\n[|]World");
+
+    // Cursor should be at start of new block
+    assert_eq!(state.cursor.offset, 0);
+}
+
+#[test]
+fn test_enter_at_start_creates_empty_block_before_text() {
+    let mut state = EditorState::from_markdown("Hello");
+    assert_eq!(state.to_debug_string(), "[|]Hello");
+
+    state.apply(EditorAction::Enter);
+    // The original text stays in first block, cursor moves to new empty block
+    assert_eq!(state.to_debug_string(), "\n[|]Hello");
+}
+
+#[test]
+fn test_enter_clears_pending_markers() {
+    let mut state = EditorState::from_markdown("Hello");
+    state.apply(EditorAction::MoveCursor(Direction::End));
+    state.apply(EditorAction::InsertText("*".to_string()));
+    assert_eq!(state.to_debug_string(), "Hello*[|]");
+    assert!(state.inline_style.pending_marker.is_some());
+
+    state.apply(EditorAction::Enter);
+    assert!(state.inline_style.pending_marker.is_none());
+}
+
+#[test]
+fn test_enter_clears_open_styles() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText("*".to_string()));
+    state.apply(EditorAction::InsertText("italic".to_string()));
+    assert!(!state.inline_style.open_styles.is_empty());
+
+    state.apply(EditorAction::Enter);
+    assert!(state.inline_style.open_styles.is_empty());
+}
+
+#[test]
+fn test_enter_multiple_times() {
+    let mut state = EditorState::from_markdown("First");
+    state.apply(EditorAction::MoveCursor(Direction::End));
+
+    state.apply(EditorAction::Enter);
+    state.apply(EditorAction::InsertText("Second".to_string()));
+    state.apply(EditorAction::Enter);
+    state.apply(EditorAction::InsertText("Third".to_string()));
+
+    assert_eq!(state.to_debug_string(), "First\nSecond\nThird[|]");
+}
+
+#[test]
+fn test_enter_preserves_styled_text_when_splitting() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText("*".to_string()));
+    state.apply(EditorAction::InsertText("italic".to_string()));
+    state.apply(EditorAction::InsertText("*".to_string()));
+    assert_eq!(state.to_styled_debug_string(), "<i>italic</i>");
+
+    // Move to middle and press enter
+    state.apply(EditorAction::MoveCursor(Direction::Home));
+    for _ in 0..3 {
+        state.apply(EditorAction::MoveCursor(Direction::Right));
+    }
+
+    state.apply(EditorAction::Enter);
+
+    // Both blocks should preserve italic styling
+    let blocks: Vec<_> = state.document.block_order.values().collect();
+    assert_eq!(blocks.len(), 2);
+
+    let first_block = &state.document.blocks[*blocks[0]];
+    let second_block = &state.document.blocks[*blocks[1]];
+
+    assert_eq!(first_block.text.to_debug_string(), "<i>ita</i>");
+    assert_eq!(second_block.text.to_debug_string(), "<i>lic</i>");
+}
+
+// ============================================================================
+// Header Marker Tests
+// ============================================================================
+
+#[test]
+fn test_hash_at_start_shows_pending() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText("#".to_string()));
+
+    // Should have pending block marker
+    assert!(state.block_style.pending_marker.is_some());
+    assert_eq!(state.pending_block_marker_text(), Some("#".to_string()));
+}
+
+#[test]
+fn test_hash_upgrade_to_h2() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText("#".to_string()));
+    state.apply(EditorAction::InsertText("#".to_string()));
+
+    assert_eq!(state.pending_block_marker_text(), Some("##".to_string()));
+}
+
+#[test]
+fn test_hash_upgrade_to_h3() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText("###".to_string()));
+
+    assert_eq!(state.pending_block_marker_text(), Some("###".to_string()));
+}
+
+#[test]
+fn test_hash_space_text_creates_heading() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText("# ".to_string()));
+
+    // Should show pending marker with space
+    assert_eq!(state.pending_block_marker_text(), Some("# ".to_string()));
+
+    // Type text - should convert to heading
+    state.apply(EditorAction::InsertText("Hello".to_string()));
+
+    // Pending marker should be cleared
+    assert!(state.block_style.pending_marker.is_none());
+
+    // Block should now be a heading
+    let block = &state.document.blocks[state.cursor.block_key];
+    match &block.kind {
+        writ::document::BlockKind::Heading { level, .. } => {
+            assert_eq!(*level, 1);
+        }
+        _ => panic!("Expected heading block"),
+    }
+
+    // Text should be inserted
+    assert_eq!(state.to_debug_string(), "Hello[|]");
+}
+
+#[test]
+fn test_h2_space_text_creates_h2() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText("## Title".to_string()));
+
+    let block = &state.document.blocks[state.cursor.block_key];
+    match &block.kind {
+        writ::document::BlockKind::Heading { level, .. } => {
+            assert_eq!(*level, 2);
+        }
+        _ => panic!("Expected heading block"),
+    }
+
+    assert_eq!(state.to_debug_string(), "Title[|]");
+}
+
+#[test]
+fn test_backspace_heading_marker() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText("## ".to_string()));
+
+    assert_eq!(state.pending_block_marker_text(), Some("## ".to_string()));
+
+    // Backspace removes space first
+    state.apply(EditorAction::Backspace);
+    assert_eq!(state.pending_block_marker_text(), Some("##".to_string()));
+
+    // Backspace downgrades level
+    state.apply(EditorAction::Backspace);
+    assert_eq!(state.pending_block_marker_text(), Some("#".to_string()));
+
+    // Backspace removes marker entirely
+    state.apply(EditorAction::Backspace);
+    assert!(state.block_style.pending_marker.is_none());
+}
+
+#[test]
+fn test_backspace_removes_heading_style() {
+    let mut state = EditorState::from_markdown("# Hello");
+
+    // Block should be a heading
+    let block = &state.document.blocks[state.cursor.block_key];
+    match &block.kind {
+        writ::document::BlockKind::Heading { level, .. } => {
+            assert_eq!(*level, 1);
+        }
+        _ => panic!("Expected heading block"),
+    }
+
+    // Cursor is at start, backspace should convert to paragraph
+    state.apply(EditorAction::Backspace);
+
+    let block = &state.document.blocks[state.cursor.block_key];
+    match &block.kind {
+        writ::document::BlockKind::Paragraph { .. } => {}
+        _ => panic!("Expected paragraph block after backspace"),
+    }
+}
+
+#[test]
+fn test_max_heading_level_is_6() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    // Type 7 hashes
+    state.apply(EditorAction::InsertText("#######".to_string()));
+
+    // Should only upgrade to level 6, then stop
+    assert_eq!(
+        state.pending_block_marker_text(),
+        Some("######".to_string())
+    );
+}
+
+#[test]
+fn test_cursor_movement_clears_block_marker() {
+    let mut state = EditorState::from_markdown("Hello");
+    state.apply(EditorAction::MoveCursor(Direction::End));
+    state.apply(EditorAction::Enter);
+
+    // Now in new empty block
+    state.apply(EditorAction::InsertText("#".to_string()));
+    assert!(state.block_style.pending_marker.is_some());
+
+    // Move cursor - should clear block marker
+    state.apply(EditorAction::MoveCursor(Direction::Up));
+    assert!(state.block_style.pending_marker.is_none());
+}
+
+#[test]
+fn test_enter_clears_block_marker() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText("##".to_string()));
+    assert!(state.block_style.pending_marker.is_some());
+
+    state.apply(EditorAction::Enter);
+    assert!(state.block_style.pending_marker.is_none());
+}

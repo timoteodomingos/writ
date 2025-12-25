@@ -47,6 +47,7 @@ impl Editor {
             "end" => Some(EditorAction::MoveCursor(Direction::End)),
             "backspace" => Some(EditorAction::Backspace),
             "delete" => Some(EditorAction::Delete),
+            "enter" => Some(EditorAction::Enter),
             "space" if !keystroke.modifiers.control && !keystroke.modifiers.platform => {
                 Some(EditorAction::InsertText(" ".to_string()))
             }
@@ -114,6 +115,19 @@ impl Render for Editor {
                     None
                 };
 
+                // Get pending block marker text for cursor block
+                let pending_block_marker = if is_cursor_block {
+                    self.state.pending_block_marker_text()
+                } else {
+                    None
+                };
+
+                // Get heading level if this is a heading block
+                let heading_level = match &block.kind {
+                    crate::document::BlockKind::Heading { level, .. } => Some(*level),
+                    _ => None,
+                };
+
                 let plain_text: String =
                     block.text.chunks.iter().map(|c| c.text.as_str()).collect();
                 let highlights = block.text.to_highlights(theme);
@@ -125,6 +139,8 @@ impl Render for Editor {
                     highlights,
                     cursor_offset,
                     pending_marker,
+                    pending_block_marker,
+                    heading_level,
                     foreground_color: theme.foreground,
                     editor: entity.clone(),
                 }
