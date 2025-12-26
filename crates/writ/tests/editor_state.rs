@@ -991,6 +991,44 @@ fn test_strikethrough_closing_marker() {
 }
 
 #[test]
+fn test_closing_inherited_code_style() {
+    // Click into existing code text and type backtick to close it
+    let mut state = EditorState::from_markdown("`code`");
+
+    // Move to end of "code" (position 4, inside the code style)
+    state.apply(EditorAction::MoveCursor(Direction::End));
+
+    // Should have inherited the Code style
+    assert_eq!(state.inline_style.open_styles.len(), 1);
+
+    // Type backtick to close the inherited style
+    state.apply(EditorAction::InsertText("`".to_string()));
+
+    // Style should be closed
+    assert!(state.inline_style.open_styles.is_empty());
+    assert!(state.inline_style.pending_marker.is_none());
+}
+
+#[test]
+fn test_closing_inherited_bold_style() {
+    // Click into existing bold text and type ** to close it
+    let mut state = EditorState::from_markdown("**bold**");
+
+    // Move to end of "bold" (inside the bold style)
+    state.apply(EditorAction::MoveCursor(Direction::End));
+
+    // Should have inherited the Bold style
+    assert_eq!(state.inline_style.open_styles.len(), 1);
+
+    // Type ** to close the inherited style
+    state.apply(EditorAction::InsertText("**".to_string()));
+
+    // Style should be closed
+    assert!(state.inline_style.open_styles.is_empty());
+    assert!(state.inline_style.pending_marker.is_none());
+}
+
+#[test]
 fn test_empty_heading_converts_to_paragraph_on_backspace() {
     let mut state = EditorState::from_markdown("# Hello");
 

@@ -212,9 +212,26 @@ impl StyleStack {
         false
     }
 
+    /// Try to close a style by its type (for inherited styles without markers)
+    /// Returns true if a matching style was found and closed
+    pub fn close_by_style(&mut self, style: &TextStyle) -> bool {
+        for i in (0..self.styles.len()).rev() {
+            if &self.styles[i].style == style {
+                self.styles.remove(i);
+                return true;
+            }
+        }
+        false
+    }
+
     /// Check if there's an open style with the given marker
     pub fn has_matching(&self, marker: &str) -> bool {
         self.styles.iter().any(|os| os.marker == marker)
+    }
+
+    /// Check if there's an open style of the given type (explicit or inherited)
+    pub fn has_style(&self, style: &TextStyle) -> bool {
+        self.styles.iter().any(|os| &os.style == style)
     }
 
     /// Remove styles when cursor reaches their opened_at position
@@ -787,9 +804,29 @@ impl EditorState {
         false
     }
 
-    /// Check if there's an open style with the given marker
+    /// Check if there's an open style that matches the given marker
+    /// This checks both explicit markers AND inherited styles of the same type
     fn has_matching_open_style(&self, marker: &str) -> bool {
-        self.inline_style.open_styles.has_matching(marker)
+        // Check for explicit marker match
+        if self.inline_style.open_styles.has_matching(marker) {
+            return true;
+        }
+
+        // Check for inherited style of the same type
+        // Map marker to style type
+        let style = match marker {
+            "*" => Some(TextStyle::Italic),
+            "**" => Some(TextStyle::Bold),
+            "`" => Some(TextStyle::Code),
+            "~~" => Some(TextStyle::Strikethrough),
+            _ => None,
+        };
+
+        if let Some(style) = style {
+            return self.inline_style.open_styles.has_style(&style);
+        }
+
+        false
     }
 
     /// Resolve a pending marker - either close matching open styles or open new styles
@@ -817,8 +854,23 @@ impl EditorState {
                 // Closing marker - try to close matching open style
                 // For TripleAsterisk, we need to close both ** and *
                 if matches!(pending.kind, PendingMarkerKind::TripleAsterisk) {
-                    let closed_bold = self.inline_style.open_styles.close_matching("**");
-                    let closed_italic = self.inline_style.open_styles.close_matching("*");
+                    // Try explicit markers first
+                    let mut closed_bold = self.inline_style.open_styles.close_matching("**");
+                    let mut closed_italic = self.inline_style.open_styles.close_matching("*");
+
+                    // Fall back to closing by style type (for inherited styles)
+                    if !closed_bold {
+                        closed_bold = self
+                            .inline_style
+                            .open_styles
+                            .close_by_style(&TextStyle::Bold);
+                    }
+                    if !closed_italic {
+                        closed_italic = self
+                            .inline_style
+                            .open_styles
+                            .close_by_style(&TextStyle::Italic);
+                    }
 
                     if !closed_bold && !closed_italic {
                         // Nothing to close - insert as literal text
@@ -829,9 +881,18 @@ impl EditorState {
                     return;
                 }
 
-                // Try to close matching open style
+                // Try to close matching open style by marker
                 if self.inline_style.open_styles.close_matching(marker) {
                     return;
+                }
+
+                // Fall back to closing by style type (for inherited styles)
+                if let Some(styles) = pending.kind.to_styles() {
+                    for (style, _) in &styles {
+                        if self.inline_style.open_styles.close_by_style(style) {
+                            return;
+                        }
+                    }
                 }
 
                 // No matching open style - insert as literal text
