@@ -490,14 +490,35 @@ impl EditorState {
     }
 
     fn set_cursor(&mut self, block_key: DefaultKey, offset: usize) {
-        // Clear style state on cursor set (click)
-        self.inline_style = InlineStyleState::default();
+        // Clear pending markers and block style state
+        self.inline_style.pending_marker = None;
         self.block_style = BlockStyleState::default();
 
         if let Some(block) = self.document.blocks.get(block_key) {
             let max_offset = block.text.len();
             self.cursor.block_key = block_key;
             self.cursor.offset = offset.min(max_offset);
+
+            // Sync styles with text at the new position
+            self.sync_styles_with_text();
+        }
+    }
+
+    /// Sync open styles with the styled text at the current cursor position.
+    /// This inherits styles from the character to the left of cursor.
+    fn sync_styles_with_text(&mut self) {
+        // Clear existing styles first
+        self.inline_style.open_styles.clear();
+
+        // If cursor is not at the start, inherit styles from character to the left
+        if self.cursor.offset > 0 {
+            let block = &self.document.blocks[self.cursor.block_key];
+            let styles_at_cursor = block.text.styles_at(self.cursor.offset - 1);
+            for style in styles_at_cursor.styles {
+                self.inline_style
+                    .open_styles
+                    .push_inherited(style, self.cursor.offset);
+            }
         }
     }
 
@@ -546,8 +567,8 @@ impl EditorState {
     }
 
     fn move_cursor(&mut self, direction: Direction) {
-        // Clear style state on cursor movement
-        self.inline_style = InlineStyleState::default();
+        // Clear pending markers and block style state
+        self.inline_style.pending_marker = None;
         self.block_style = BlockStyleState::default();
 
         match direction {
@@ -558,6 +579,9 @@ impl EditorState {
             Direction::Up => self.move_up(),
             Direction::Down => self.move_down(),
         }
+
+        // Sync styles with text at the new position
+        self.sync_styles_with_text();
     }
 
     fn move_left(&mut self) {
