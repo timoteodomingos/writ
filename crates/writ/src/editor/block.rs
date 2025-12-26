@@ -1,35 +1,49 @@
+use std::rc::Rc;
+
 use gpui::{
-    App, Bounds, Entity, FontWeight, HighlightStyle, IntoElement, MouseButton, MouseDownEvent,
-    SharedString, StyledText, TextRun, canvas, fill, prelude::*, px, rems, size,
+    App, Bounds, FontWeight, HighlightStyle, IntoElement, MouseButton, MouseDownEvent,
+    SharedString, StyledText, TextLayout, TextRun, Window, canvas, fill, prelude::*, px, rems,
+    size,
 };
-use slotmap::DefaultKey;
 
 use crate::document::BlockKind;
 use crate::theme::Theme;
 
-use super::{Editor, EditorAction};
+/// Callback type for click events, receives character index
+pub type ClickCallback = Rc<dyn Fn(usize, &mut Window, &mut App)>;
+
+/// Callback type for layout reporting
+pub type LayoutCallback = Rc<dyn Fn(TextLayout, &mut Window, &mut App)>;
+
+/// Cursor information passed as props to Block
+#[derive(Clone)]
+pub struct CursorInfo {
+    pub offset: usize,
+    pub pending_marker: String,
+    pub pending_block_marker: Option<String>,
+}
 
 /// A view for rendering a single block of text with cursor
 pub struct Block {
     pub block_idx: usize,
-    pub block_key: DefaultKey,
     pub kind: BlockKind,
     pub plain_text: String,
     pub highlights: Vec<(std::ops::Range<usize>, HighlightStyle)>,
-    /// Whether this block contains the cursor (offset and pending markers read from editor state)
-    pub has_cursor: bool,
     pub foreground_color: gpui::Rgba,
-    pub editor: Entity<Editor>,
+    /// Cursor info if this block contains the cursor
+    pub cursor: Option<CursorInfo>,
+    /// Callback when block is clicked, receives character index
+    pub on_click: Option<ClickCallback>,
+    /// Callback to report layout after prepaint
+    pub on_layout: Option<LayoutCallback>,
 }
 
 impl Block {
     /// Create an editor Block from a document Block
     pub fn from_document_block(
         block_idx: usize,
-        block_key: DefaultKey,
         doc_block: &crate::document::Block,
         theme: &Theme,
-        editor: Entity<Editor>,
     ) -> Self {
         let plain_text: String = doc_block
             .text
@@ -41,19 +55,31 @@ impl Block {
 
         Self {
             block_idx,
-            block_key,
             kind: doc_block.kind.clone(),
             plain_text,
             highlights,
-            has_cursor: false,
             foreground_color: theme.foreground,
-            editor,
+            cursor: None,
+            on_click: None,
+            on_layout: None,
         }
     }
 
-    /// Mark this block as containing the cursor
-    pub fn with_cursor(mut self) -> Self {
-        self.has_cursor = true;
+    /// Set cursor info for this block
+    pub fn with_cursor(mut self, cursor: CursorInfo) -> Self {
+        self.cursor = Some(cursor);
+        self
+    }
+
+    /// Set click callback
+    pub fn on_click(mut self, callback: ClickCallback) -> Self {
+        self.on_click = Some(callback);
+        self
+    }
+
+    /// Set layout callback
+    pub fn on_layout(mut self, callback: LayoutCallback) -> Self {
+        self.on_layout = Some(callback);
         self
     }
 }
@@ -69,11 +95,11 @@ impl IntoElement for Block {
         let text_layout = styled_text.layout().clone();
         let layout_for_prepaint = text_layout.clone();
 
-        let editor_for_click = self.editor.clone();
-        let editor_for_prepaint = self.editor.clone();
-        let block_key = self.block_key;
-        let has_cursor = self.has_cursor;
+        let cursor = self.cursor.clone();
         let foreground_color = self.foreground_color;
+        let on_layout = self.on_layout.clone();
+        let on_click = self.on_click.clone();
+        let layout_for_click = layout_for_prepaint.clone();
 
         // Extract heading level from kind
         let heading_level = match &self.kind {
@@ -101,28 +127,23 @@ impl IntoElement for Block {
             .child(styled_text)
             .child(
                 canvas(
-                    // Prepaint: store layout and calculate cursor position
-                    move |_bounds, _window, cx| {
-                        // Store layout for click handling
-                        editor_for_prepaint.update(cx, |ed, _| {
-                            ed.block_layouts
-                                .insert(block_key, layout_for_prepaint.clone());
-                        });
+                    // Prepaint: report layout and calculate cursor position
+                    move |_bounds, window, cx| {
+                        // Report layout via callback
+                        if let Some(ref on_layout) = on_layout {
+                            on_layout(layout_for_prepaint.clone(), window, cx);
+                        }
 
-                        // Get cursor info from editor state if this block has the cursor
-                        if has_cursor {
-                            let editor = editor_for_prepaint.read(cx);
-                            let offset = editor.state.cursor.offset;
-                            let pending_marker = editor.state.pending_marker_text().to_string();
-                            let pending_block_marker = editor.state.pending_block_marker_text();
-                            let cursor_pos = text_layout.position_for_index(offset);
-                            (cursor_pos, Some((pending_marker, pending_block_marker)))
+                        // Calculate cursor position if this block has the cursor
+                        if let Some(ref cursor_info) = cursor {
+                            let cursor_pos = text_layout.position_for_index(cursor_info.offset);
+                            (cursor_pos, cursor.clone())
                         } else {
                             (None, None)
                         }
                     },
                     // Paint: draw the cursor and pending markers
-                    move |_bounds, (cursor_pos, pending_markers), window: &mut gpui::Window, cx| {
+                    move |_bounds, (cursor_pos, cursor_info), window: &mut gpui::Window, cx| {
                         if let Some(pos) = cursor_pos {
                             // Get line height from window
                             let text_style = window.text_style();
@@ -133,9 +154,9 @@ impl IntoElement for Block {
 
                             let mut cursor_x = pos.x;
 
-                            if let Some((pending_marker, pending_block_marker)) = pending_markers {
+                            if let Some(ref info) = cursor_info {
                                 // Paint pending block marker (dimmed) at start of line if present
-                                if let Some(block_marker) = pending_block_marker {
+                                if let Some(ref block_marker) = info.pending_block_marker {
                                     let marker_text: SharedString = block_marker.clone().into();
                                     let run = TextRun {
                                         len: block_marker.len(),
@@ -165,11 +186,12 @@ impl IntoElement for Block {
                                 }
 
                                 // Paint pending inline marker (dimmed) if present
-                                if !pending_marker.is_empty() {
+                                if !info.pending_marker.is_empty() {
                                     // Shape the marker text
-                                    let marker_text: SharedString = pending_marker.clone().into();
+                                    let marker_text: SharedString =
+                                        info.pending_marker.clone().into();
                                     let run = TextRun {
-                                        len: pending_marker.len(),
+                                        len: info.pending_marker.len(),
                                         font: text_style.font(),
                                         color: gpui::Hsla {
                                             h: 0.0,
@@ -210,20 +232,15 @@ impl IntoElement for Block {
             )
             .on_mouse_down(
                 MouseButton::Left,
-                move |event: &MouseDownEvent, _window, cx: &mut App| {
-                    editor_for_click.update(cx, |editor, cx| {
-                        if let Some(layout) = editor.block_layouts.get(block_key) {
-                            let char_index = match layout.index_for_position(event.position) {
-                                Ok(idx) => idx,
-                                Err(idx) => idx.min(text_len),
-                            };
-                            editor.state.apply(EditorAction::SetCursor {
-                                block_key,
-                                offset: char_index,
-                            });
-                            cx.notify();
-                        }
-                    });
+                move |event: &MouseDownEvent, window, cx: &mut App| {
+                    if let Some(ref on_click) = on_click {
+                        // Use the layout from the styled text to get character index
+                        let char_index = match layout_for_click.index_for_position(event.position) {
+                            Ok(idx) => idx,
+                            Err(idx) => idx.min(text_len),
+                        };
+                        on_click(char_index, window, cx);
+                    }
                 },
             )
     }

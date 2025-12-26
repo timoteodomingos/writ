@@ -3,6 +3,8 @@ mod state;
 
 pub use state::{Cursor, Direction, EditorAction, EditorState};
 
+use std::rc::Rc;
+
 use gpui::{
     App, Context, FocusHandle, Focusable, IntoElement, KeyDownEvent, ReadGlobal, Render,
     TextLayout, Window, div, prelude::*, rems,
@@ -10,7 +12,7 @@ use gpui::{
 use slotmap::{DefaultKey, SecondaryMap};
 
 use crate::theme::Theme;
-use block::Block;
+use block::{Block, CursorInfo};
 
 /// The main editor GPUI entity
 pub struct Editor {
@@ -98,18 +100,36 @@ impl Render for Editor {
                 let doc_block = &self.state.document.blocks[block_key];
                 let is_cursor_block = block_key == self.state.cursor.block_key;
 
-                let mut block = Block::from_document_block(
-                    block_idx,
-                    block_key,
-                    doc_block,
-                    theme,
-                    entity.clone(),
-                );
+                let mut block = Block::from_document_block(block_idx, doc_block, theme);
 
-                // Mark as cursor block if this is where the cursor is
+                // Add cursor info if this is the cursor block
                 if is_cursor_block {
-                    block = block.with_cursor();
+                    block = block.with_cursor(CursorInfo {
+                        offset: self.state.cursor.offset,
+                        pending_marker: self.state.pending_marker_text().to_string(),
+                        pending_block_marker: self.state.pending_block_marker_text(),
+                    });
                 }
+
+                // Create on_layout callback that stores layout in editor
+                let entity_for_layout = entity.clone();
+                block = block.on_layout(Rc::new(move |layout, _window, cx| {
+                    entity_for_layout.update(cx, |editor, _| {
+                        editor.block_layouts.insert(block_key, layout);
+                    });
+                }));
+
+                // Create on_click callback that sets cursor position
+                let entity_for_click = entity.clone();
+                block = block.on_click(Rc::new(move |char_index, _window, cx| {
+                    entity_for_click.update(cx, |editor, cx| {
+                        editor.state.apply(EditorAction::SetCursor {
+                            block_key,
+                            offset: char_index,
+                        });
+                        cx.notify();
+                    });
+                }));
 
                 block
             })
