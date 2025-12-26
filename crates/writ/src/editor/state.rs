@@ -27,7 +27,15 @@ pub enum Direction {
 
 /// Represents a pending style marker that hasn't been committed yet
 #[derive(Debug, Clone, PartialEq)]
-pub enum PendingMarker {
+pub struct PendingMarker {
+    pub kind: PendingMarkerKind,
+    /// True if this marker was preceded by whitespace (opening marker)
+    /// False if preceded by non-whitespace (closing marker)
+    pub is_opening: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum PendingMarkerKind {
     /// Single `*` - could become italic or upgrade to bold/bold-italic
     SingleAsterisk,
     /// Double `**` - bold mode, or upgrade to bold-italic
@@ -42,45 +50,45 @@ pub enum PendingMarker {
     DoubleTilde,
 }
 
-impl PendingMarker {
-    /// Get the display text for this pending marker
+impl PendingMarkerKind {
+    /// Get the display text for this pending marker kind
     pub fn as_str(&self) -> &'static str {
         match self {
-            PendingMarker::SingleAsterisk => "*",
-            PendingMarker::DoubleAsterisk => "**",
-            PendingMarker::TripleAsterisk => "***",
-            PendingMarker::Backtick => "`",
-            PendingMarker::SingleTilde => "~",
-            PendingMarker::DoubleTilde => "~~",
+            PendingMarkerKind::SingleAsterisk => "*",
+            PendingMarkerKind::DoubleAsterisk => "**",
+            PendingMarkerKind::TripleAsterisk => "***",
+            PendingMarkerKind::Backtick => "`",
+            PendingMarkerKind::SingleTilde => "~",
+            PendingMarkerKind::DoubleTilde => "~~",
         }
     }
 
-    /// Convert a marker character to a pending marker
-    fn from_char(c: char) -> Option<PendingMarker> {
+    /// Convert a marker character to a pending marker kind
+    fn from_char(c: char) -> Option<PendingMarkerKind> {
         match c {
-            '*' => Some(PendingMarker::SingleAsterisk),
-            '`' => Some(PendingMarker::Backtick),
-            '~' => Some(PendingMarker::SingleTilde),
+            '*' => Some(PendingMarkerKind::SingleAsterisk),
+            '`' => Some(PendingMarkerKind::Backtick),
+            '~' => Some(PendingMarkerKind::SingleTilde),
             _ => None,
         }
     }
 
     /// Try to upgrade this marker (e.g., * -> ** -> ***)
-    fn try_upgrade(&self, c: char) -> Option<PendingMarker> {
+    fn try_upgrade(&self, c: char) -> Option<PendingMarkerKind> {
         match (self, c) {
-            (PendingMarker::SingleAsterisk, '*') => Some(PendingMarker::DoubleAsterisk),
-            (PendingMarker::DoubleAsterisk, '*') => Some(PendingMarker::TripleAsterisk),
-            (PendingMarker::SingleTilde, '~') => Some(PendingMarker::DoubleTilde),
+            (PendingMarkerKind::SingleAsterisk, '*') => Some(PendingMarkerKind::DoubleAsterisk),
+            (PendingMarkerKind::DoubleAsterisk, '*') => Some(PendingMarkerKind::TripleAsterisk),
+            (PendingMarkerKind::SingleTilde, '~') => Some(PendingMarkerKind::DoubleTilde),
             _ => None,
         }
     }
 
     /// Downgrade marker by one character (for backspace)
-    fn downgrade(&self) -> Option<PendingMarker> {
+    fn downgrade(&self) -> Option<PendingMarkerKind> {
         match self {
-            PendingMarker::TripleAsterisk => Some(PendingMarker::DoubleAsterisk),
-            PendingMarker::DoubleAsterisk => Some(PendingMarker::SingleAsterisk),
-            PendingMarker::DoubleTilde => Some(PendingMarker::SingleTilde),
+            PendingMarkerKind::TripleAsterisk => Some(PendingMarkerKind::DoubleAsterisk),
+            PendingMarkerKind::DoubleAsterisk => Some(PendingMarkerKind::SingleAsterisk),
+            PendingMarkerKind::DoubleTilde => Some(PendingMarkerKind::SingleTilde),
             _ => None,
         }
     }
@@ -89,15 +97,15 @@ impl PendingMarker {
     /// Returns None for invalid markers, or Some with a list of styles to open
     fn to_open_styles(&self) -> Option<Vec<OpenStyle>> {
         match self {
-            PendingMarker::SingleAsterisk => Some(vec![OpenStyle {
+            PendingMarkerKind::SingleAsterisk => Some(vec![OpenStyle {
                 style: TextStyle::Italic,
                 marker: "*".to_string(),
             }]),
-            PendingMarker::DoubleAsterisk => Some(vec![OpenStyle {
+            PendingMarkerKind::DoubleAsterisk => Some(vec![OpenStyle {
                 style: TextStyle::Bold,
                 marker: "**".to_string(),
             }]),
-            PendingMarker::TripleAsterisk => Some(vec![
+            PendingMarkerKind::TripleAsterisk => Some(vec![
                 OpenStyle {
                     style: TextStyle::Bold,
                     marker: "**".to_string(),
@@ -107,16 +115,47 @@ impl PendingMarker {
                     marker: "*".to_string(),
                 },
             ]),
-            PendingMarker::Backtick => Some(vec![OpenStyle {
+            PendingMarkerKind::Backtick => Some(vec![OpenStyle {
                 style: TextStyle::Code,
                 marker: "`".to_string(),
             }]),
-            PendingMarker::DoubleTilde => Some(vec![OpenStyle {
+            PendingMarkerKind::DoubleTilde => Some(vec![OpenStyle {
                 style: TextStyle::Strikethrough,
                 marker: "~~".to_string(),
             }]),
-            PendingMarker::SingleTilde => None, // Single ~ is not a valid style
+            PendingMarkerKind::SingleTilde => None, // Single ~ is not a valid style
         }
+    }
+}
+
+impl PendingMarker {
+    /// Get the display text for this pending marker
+    pub fn as_str(&self) -> &'static str {
+        self.kind.as_str()
+    }
+
+    /// Create a new pending marker
+    fn new(kind: PendingMarkerKind, is_opening: bool) -> Self {
+        Self { kind, is_opening }
+    }
+
+    /// Convert a marker character to a pending marker
+    fn from_char(c: char, is_opening: bool) -> Option<PendingMarker> {
+        PendingMarkerKind::from_char(c).map(|kind| PendingMarker::new(kind, is_opening))
+    }
+
+    /// Try to upgrade this marker (e.g., * -> ** -> ***)
+    fn try_upgrade(&self, c: char) -> Option<PendingMarker> {
+        self.kind
+            .try_upgrade(c)
+            .map(|kind| PendingMarker::new(kind, self.is_opening))
+    }
+
+    /// Downgrade marker by one character (for backspace)
+    fn downgrade(&self) -> Option<PendingMarker> {
+        self.kind
+            .downgrade()
+            .map(|kind| PendingMarker::new(kind, self.is_opening))
     }
 }
 
@@ -464,6 +503,19 @@ impl EditorState {
         matches!(c, '*' | '`' | '~')
     }
 
+    /// Check if the character immediately before cursor is whitespace (or cursor is at start)
+    fn char_before_cursor_is_whitespace(&self) -> bool {
+        if self.cursor.offset == 0 {
+            return true;
+        }
+        let block = self.current_block();
+        let text = self.block_plain_text(block);
+        text.chars()
+            .nth(self.cursor.offset - 1)
+            .map(|c| c.is_whitespace())
+            .unwrap_or(true)
+    }
+
     /// Check if we're at a position where block markers are valid
     /// (cursor at offset 0 with no text in the block, or we already have a pending block marker)
     fn can_use_block_marker(&self) -> bool {
@@ -523,10 +575,17 @@ impl EditorState {
     }
 
     fn handle_marker_char(&mut self, c: char) {
+        let is_opening = self.char_before_cursor_is_whitespace();
+
         // Check if we can upgrade the pending marker
         if let Some(ref pending) = self.inline_style.pending_marker {
             if let Some(upgraded) = pending.try_upgrade(c) {
+                let is_closing = !upgraded.is_opening;
                 self.inline_style.pending_marker = Some(upgraded);
+                // For closing markers that were upgraded, try to resolve immediately
+                if is_closing {
+                    self.try_resolve_closing_marker();
+                }
                 return;
             }
 
@@ -535,60 +594,109 @@ impl EditorState {
             self.resolve_pending_marker();
         }
 
-        // Start a new pending marker
-        self.inline_style.pending_marker = PendingMarker::from_char(c);
+        // Start a pending marker (opening or closing based on context)
+        self.inline_style.pending_marker = PendingMarker::from_char(c, is_opening);
+
+        // For closing markers, immediately try to resolve if there's a matching open style
+        // This handles cases like *italic* where the second * should close immediately
+        if !is_opening {
+            self.try_resolve_closing_marker();
+        }
+    }
+
+    /// Try to resolve a closing marker - only resolves if there's a matching open style
+    /// and the marker can't be upgraded to something better
+    fn try_resolve_closing_marker(&mut self) {
+        if let Some(ref pending) = self.inline_style.pending_marker {
+            if pending.is_opening {
+                return; // Not a closing marker
+            }
+
+            let marker = pending.as_str();
+
+            // Check if we have a matching open style
+            let has_exact_match = self
+                .inline_style
+                .open_styles
+                .iter()
+                .any(|os| os.marker == marker);
+
+            if !has_exact_match {
+                return; // No match, keep as pending
+            }
+
+            // Check if upgrading would give a different match
+            // e.g., if we have both * and ** open, don't close * immediately
+            // because it might upgrade to **
+            let could_upgrade_to_different_match = match pending.kind {
+                PendingMarkerKind::SingleAsterisk => {
+                    // Could upgrade to ** - check if ** is also open
+                    self.inline_style
+                        .open_styles
+                        .iter()
+                        .any(|os| os.marker == "**")
+                }
+                PendingMarkerKind::SingleTilde => {
+                    // Could upgrade to ~~ - check if ~~ is also open
+                    self.inline_style
+                        .open_styles
+                        .iter()
+                        .any(|os| os.marker == "~~")
+                }
+                PendingMarkerKind::DoubleAsterisk => {
+                    // Could upgrade to *** - but we'd close both anyway
+                    false
+                }
+                _ => false,
+            };
+
+            if could_upgrade_to_different_match {
+                return; // Wait to see if it upgrades
+            }
+
+            self.resolve_pending_marker();
+        }
     }
 
     /// Resolve a pending marker - either close matching open styles or open new styles
     fn resolve_pending_marker(&mut self) {
         if let Some(pending) = self.inline_style.pending_marker.take() {
-            // For TripleAsterisk, we need to close both ** and * (or open both)
-            // For others, just close/open the single marker
-            if matches!(pending, PendingMarker::TripleAsterisk) {
-                // Try to close both ** and *
-                let closed_bold = self.try_close_style("**");
-                let closed_italic = self.try_close_style("*");
+            let marker = pending.as_str();
 
-                if closed_bold || closed_italic {
-                    // We closed at least one - if we didn't close the other, open it
-                    if !closed_bold {
-                        self.inline_style.open_styles.push(OpenStyle {
-                            style: TextStyle::Bold,
-                            marker: "**".to_string(),
-                        });
+            if pending.is_opening {
+                // Opening marker - always open new styles (never close)
+                if let Some(open_styles) = pending.kind.to_open_styles() {
+                    for style in open_styles {
+                        self.inline_style.open_styles.push(style);
                     }
-                    if !closed_italic {
-                        self.inline_style.open_styles.push(OpenStyle {
-                            style: TextStyle::Italic,
-                            marker: "*".to_string(),
-                        });
+                } else {
+                    // Invalid pending marker (e.g., single ~) - insert as literal text
+                    let block = &mut self.document.blocks[self.cursor.block_key];
+                    block.text.insert_at(self.cursor.offset, marker);
+                    self.cursor.offset += marker.len();
+                }
+            } else {
+                // Closing marker - try to close matching open style
+                // For TripleAsterisk, we need to close both ** and *
+                if matches!(pending.kind, PendingMarkerKind::TripleAsterisk) {
+                    let closed_bold = self.try_close_style("**");
+                    let closed_italic = self.try_close_style("*");
+
+                    if !closed_bold && !closed_italic {
+                        // Nothing to close - insert as literal text
+                        let block = &mut self.document.blocks[self.cursor.block_key];
+                        block.text.insert_at(self.cursor.offset, marker);
+                        self.cursor.offset += marker.len();
                     }
                     return;
                 }
 
-                // Nothing to close - open both styles
-                if let Some(open_styles) = pending.to_open_styles() {
-                    for style in open_styles {
-                        self.inline_style.open_styles.push(style);
-                    }
+                // Try to close matching open style
+                if self.try_close_style(marker) {
+                    return;
                 }
-                return;
-            }
 
-            let marker = pending.as_str();
-
-            // Check if this closes an open style
-            if self.try_close_style(marker) {
-                return;
-            }
-
-            // Doesn't close anything - open new styles (or insert literal for invalid markers)
-            if let Some(open_styles) = pending.to_open_styles() {
-                for style in open_styles {
-                    self.inline_style.open_styles.push(style);
-                }
-            } else {
-                // Invalid pending marker (e.g., single ~) - insert as literal text
+                // No matching open style - insert as literal text
                 let block = &mut self.document.blocks[self.cursor.block_key];
                 block.text.insert_at(self.cursor.offset, marker);
                 self.cursor.offset += marker.len();
@@ -664,6 +772,15 @@ impl EditorState {
                 .text
                 .delete_range(self.cursor.offset - 1, self.cursor.offset);
             self.cursor.offset -= 1;
+
+            // If we've deleted all text in the block, clear open styles and convert heading to paragraph
+            if block.text.is_empty() {
+                self.inline_style.open_styles.clear();
+                // Convert heading to paragraph when emptied
+                if block.kind.discriminant() != BlockKindDiscriminants::Paragraph {
+                    block.kind = BlockKind::Paragraph { parent: None };
+                }
+            }
         } else {
             // At start of block - merge with previous block
             if let Some(prev_key) = self.previous_block_key() {

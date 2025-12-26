@@ -349,36 +349,29 @@ fn test_mixed_plain_and_styled() {
 }
 
 #[test]
-fn test_backspace_clears_open_style_at_start() {
+fn test_backspace_clears_open_styles_when_block_empty() {
     let mut state = EditorState::from_markdown("x");
     state.apply(EditorAction::Delete);
     // Open italic style
     state.apply(EditorAction::InsertText("*".to_string()));
     state.apply(EditorAction::InsertText("a".to_string()));
     assert!(!state.inline_style.open_styles.is_empty());
-    // Delete the 'a'
+    // Delete the 'a' - block becomes empty, styles should be cleared
     state.apply(EditorAction::Backspace);
     assert_eq!(state.to_debug_string(), "[|]");
-    // Now at start of line with open style - backspace should clear it
-    assert!(!state.inline_style.open_styles.is_empty());
-    state.apply(EditorAction::Backspace);
     assert!(state.inline_style.open_styles.is_empty());
 }
 
 #[test]
-fn test_backspace_clears_nested_open_styles_one_at_a_time() {
+fn test_backspace_clears_all_open_styles_when_block_empty() {
     let mut state = EditorState::from_markdown("x");
     state.apply(EditorAction::Delete);
-    // Open bold then italic: **bold *italic
+    // Open bold then italic: ***
     state.apply(EditorAction::InsertText("**".to_string()));
     state.apply(EditorAction::InsertText("*".to_string()));
     state.apply(EditorAction::InsertText("a".to_string()));
     assert_eq!(state.inline_style.open_styles.len(), 2);
-    // Delete the 'a'
-    state.apply(EditorAction::Backspace);
-    // Backspace should pop styles one at a time (most recent first)
-    state.apply(EditorAction::Backspace);
-    assert_eq!(state.inline_style.open_styles.len(), 1);
+    // Delete the 'a' - block becomes empty, all styles should be cleared at once
     state.apply(EditorAction::Backspace);
     assert_eq!(state.inline_style.open_styles.len(), 0);
 }
@@ -824,4 +817,112 @@ fn test_enter_then_backspace_roundtrip() {
     state.apply(EditorAction::Backspace);
     assert_eq!(state.to_debug_string(), "Hello[|]World");
     assert_eq!(state.document.block_order.len(), 1);
+}
+
+// Tests for opening vs closing marker behavior
+
+#[test]
+fn test_closing_marker_after_text() {
+    // *italic* - second * closes the style (no space before it)
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText("*italic*".to_string()));
+
+    // Style should be closed
+    assert!(state.inline_style.open_styles.is_empty());
+    assert_eq!(state.to_styled_debug_string(), "<i>italic</i>");
+}
+
+#[test]
+fn test_opening_marker_after_space() {
+    // "text *" - the * after space is an opening marker
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText("text *".to_string()));
+
+    // Should have pending opening marker
+    assert!(state.inline_style.pending_marker.is_some());
+    assert!(
+        state
+            .inline_style
+            .pending_marker
+            .as_ref()
+            .unwrap()
+            .is_opening
+    );
+}
+
+#[test]
+fn test_marker_after_text_no_space_is_closing() {
+    // "italic*" with no matching open style - * should be inserted as literal
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText("italic".to_string()));
+    state.apply(EditorAction::InsertText("*".to_string()));
+    state.apply(EditorAction::InsertText(" more".to_string()));
+
+    // The * was a closing marker with nothing to close, so inserted as literal
+    assert_eq!(state.to_styled_debug_string(), "italic* more");
+}
+
+#[test]
+fn test_space_star_space_is_literal() {
+    // " * " - the * after space opens, but then space after means we're typing normal text
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText("a * b".to_string()));
+
+    // The * opened italic, then "b" was typed in italic
+    // Actually the space resolves the pending marker first
+    assert_eq!(state.to_styled_debug_string(), "a <i> b</i>");
+}
+
+#[test]
+fn test_bold_closing_marker() {
+    // **bold** - closing marker for bold
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText("**bold**".to_string()));
+
+    assert!(state.inline_style.open_styles.is_empty());
+    assert_eq!(state.to_styled_debug_string(), "<b>bold</b>");
+}
+
+#[test]
+fn test_code_closing_marker() {
+    // `code` - closing marker for code
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText("`code`".to_string()));
+
+    assert!(state.inline_style.open_styles.is_empty());
+    assert_eq!(state.to_styled_debug_string(), "<code>code</code>");
+}
+
+#[test]
+fn test_strikethrough_closing_marker() {
+    // ~~strikethrough~~ - closing marker for strikethrough
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText("~~strike~~".to_string()));
+
+    assert!(state.inline_style.open_styles.is_empty());
+    assert_eq!(state.to_styled_debug_string(), "<s>strike</s>");
+}
+
+#[test]
+fn test_empty_heading_converts_to_paragraph_on_backspace() {
+    let mut state = EditorState::from_markdown("# Hello");
+
+    // Delete all text
+    for _ in 0..5 {
+        state.apply(EditorAction::Backspace);
+    }
+
+    // Block should now be a paragraph (converted when emptied)
+    let block = &state.document.blocks[state.cursor.block_key];
+    assert!(matches!(
+        block.kind,
+        writ::document::BlockKind::Paragraph { .. }
+    ));
 }

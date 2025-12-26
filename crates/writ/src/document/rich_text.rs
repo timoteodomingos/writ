@@ -107,6 +107,21 @@ impl RichText {
         self.chunks.iter().map(|c| c.text.len()).sum()
     }
 
+    /// Get the styles at a specific character offset
+    /// Returns the styles of the chunk containing that offset, or empty if at end
+    pub fn styles_at(&self, offset: usize) -> StyleSet {
+        let mut pos = 0;
+        for chunk in &self.chunks {
+            let chunk_end = pos + chunk.text.len();
+            if offset < chunk_end {
+                return chunk.styles.clone();
+            }
+            pos = chunk_end;
+        }
+        // At end of text - return empty styles
+        StyleSet::new()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.chunks.is_empty() || self.chunks.iter().all(|c| c.text.is_empty())
     }
