@@ -12,7 +12,7 @@ use gpui::{
 use slotmap::{DefaultKey, SecondaryMap};
 
 use crate::theme::Theme;
-use block::{Block, CursorInfo};
+use block::Block;
 
 /// The main editor GPUI entity
 pub struct Editor {
@@ -104,11 +104,16 @@ impl Render for Editor {
 
                 // Add cursor info if this is the cursor block
                 if is_cursor_block {
-                    block = block.with_cursor(CursorInfo {
-                        offset: self.state.cursor.offset,
-                        pending_marker: self.state.pending_marker_text().to_string(),
-                        pending_block_marker: self.state.pending_block_marker_text(),
-                    });
+                    block = block.with_cursor_offset(self.state.cursor.offset);
+
+                    let pending_marker = self.state.pending_marker_text();
+                    if !pending_marker.is_empty() {
+                        block = block.with_pending_inline_marker(pending_marker.to_string());
+                    }
+
+                    if let Some(block_marker) = self.state.pending_block_marker_text() {
+                        block = block.with_pending_block_marker(block_marker);
+                    }
                 }
 
                 // Create on_layout callback that stores layout in editor
