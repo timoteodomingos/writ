@@ -580,12 +580,7 @@ impl EditorState {
         // Check if we can upgrade the pending marker
         if let Some(ref pending) = self.inline_style.pending_marker {
             if let Some(upgraded) = pending.try_upgrade(c) {
-                let is_closing = !upgraded.is_opening;
                 self.inline_style.pending_marker = Some(upgraded);
-                // For closing markers that were upgraded, try to resolve immediately
-                if is_closing {
-                    self.try_resolve_closing_marker();
-                }
                 return;
             }
 
@@ -595,67 +590,8 @@ impl EditorState {
         }
 
         // Start a pending marker (opening or closing based on context)
+        // The marker stays visible until the next character is typed
         self.inline_style.pending_marker = PendingMarker::from_char(c, is_opening);
-
-        // For closing markers, immediately try to resolve if there's a matching open style
-        // This handles cases like *italic* where the second * should close immediately
-        if !is_opening {
-            self.try_resolve_closing_marker();
-        }
-    }
-
-    /// Try to resolve a closing marker - only resolves if there's a matching open style
-    /// and the marker can't be upgraded to something better
-    fn try_resolve_closing_marker(&mut self) {
-        if let Some(ref pending) = self.inline_style.pending_marker {
-            if pending.is_opening {
-                return; // Not a closing marker
-            }
-
-            let marker = pending.as_str();
-
-            // Check if we have a matching open style
-            let has_exact_match = self
-                .inline_style
-                .open_styles
-                .iter()
-                .any(|os| os.marker == marker);
-
-            if !has_exact_match {
-                return; // No match, keep as pending
-            }
-
-            // Check if upgrading would give a different match
-            // e.g., if we have both * and ** open, don't close * immediately
-            // because it might upgrade to **
-            let could_upgrade_to_different_match = match pending.kind {
-                PendingMarkerKind::SingleAsterisk => {
-                    // Could upgrade to ** - check if ** is also open
-                    self.inline_style
-                        .open_styles
-                        .iter()
-                        .any(|os| os.marker == "**")
-                }
-                PendingMarkerKind::SingleTilde => {
-                    // Could upgrade to ~~ - check if ~~ is also open
-                    self.inline_style
-                        .open_styles
-                        .iter()
-                        .any(|os| os.marker == "~~")
-                }
-                PendingMarkerKind::DoubleAsterisk => {
-                    // Could upgrade to *** - but we'd close both anyway
-                    false
-                }
-                _ => false,
-            };
-
-            if could_upgrade_to_different_match {
-                return; // Wait to see if it upgrades
-            }
-
-            self.resolve_pending_marker();
-        }
     }
 
     /// Resolve a pending marker - either close matching open styles or open new styles
@@ -773,10 +709,12 @@ impl EditorState {
                 .delete_range(self.cursor.offset - 1, self.cursor.offset);
             self.cursor.offset -= 1;
 
-            // If we've deleted all text in the block, clear open styles and convert heading to paragraph
+            // Clear open styles - when deleting, we're editing not continuing to type
+            // The user can re-open styles by typing new markers
+            self.inline_style.open_styles.clear();
+
+            // If we've deleted all text in the block, convert heading to paragraph
             if block.text.is_empty() {
-                self.inline_style.open_styles.clear();
-                // Convert heading to paragraph when emptied
                 if block.kind.discriminant() != BlockKindDiscriminants::Paragraph {
                     block.kind = BlockKind::Paragraph { parent: None };
                 }

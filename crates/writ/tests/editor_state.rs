@@ -823,14 +823,28 @@ fn test_enter_then_backspace_roundtrip() {
 
 #[test]
 fn test_closing_marker_after_text() {
-    // *italic* - second * closes the style (no space before it)
+    // *italic* - second * is a closing marker, shown until next char
     let mut state = EditorState::from_markdown("x");
     state.apply(EditorAction::Delete);
     state.apply(EditorAction::InsertText("*italic*".to_string()));
 
-    // Style should be closed
+    // Closing marker is pending (visible feedback)
+    assert!(state.inline_style.pending_marker.is_some());
+    assert!(
+        !state
+            .inline_style
+            .pending_marker
+            .as_ref()
+            .unwrap()
+            .is_opening
+    );
+
+    // Type next character to resolve the closing marker
+    state.apply(EditorAction::InsertText(" ".to_string()));
+
+    // Now style should be closed
     assert!(state.inline_style.open_styles.is_empty());
-    assert_eq!(state.to_styled_debug_string(), "<i>italic</i>");
+    assert_eq!(state.to_styled_debug_string(), "<i>italic</i> ");
 }
 
 #[test]
@@ -879,35 +893,53 @@ fn test_space_star_space_is_literal() {
 
 #[test]
 fn test_bold_closing_marker() {
-    // **bold** - closing marker for bold
+    // **bold** - closing marker for bold, shown until next char
     let mut state = EditorState::from_markdown("x");
     state.apply(EditorAction::Delete);
     state.apply(EditorAction::InsertText("**bold**".to_string()));
 
+    // Closing marker is pending
+    assert!(state.inline_style.pending_marker.is_some());
+
+    // Type next character to resolve
+    state.apply(EditorAction::InsertText(" ".to_string()));
+
     assert!(state.inline_style.open_styles.is_empty());
-    assert_eq!(state.to_styled_debug_string(), "<b>bold</b>");
+    assert_eq!(state.to_styled_debug_string(), "<b>bold</b> ");
 }
 
 #[test]
 fn test_code_closing_marker() {
-    // `code` - closing marker for code
+    // `code` - closing marker for code, shown until next char
     let mut state = EditorState::from_markdown("x");
     state.apply(EditorAction::Delete);
     state.apply(EditorAction::InsertText("`code`".to_string()));
 
+    // Closing marker is pending
+    assert!(state.inline_style.pending_marker.is_some());
+
+    // Type next character to resolve
+    state.apply(EditorAction::InsertText(" ".to_string()));
+
     assert!(state.inline_style.open_styles.is_empty());
-    assert_eq!(state.to_styled_debug_string(), "<code>code</code>");
+    assert_eq!(state.to_styled_debug_string(), "<code>code</code> ");
 }
 
 #[test]
 fn test_strikethrough_closing_marker() {
-    // ~~strikethrough~~ - closing marker for strikethrough
+    // ~~strikethrough~~ - closing marker for strikethrough, shown until next char
     let mut state = EditorState::from_markdown("x");
     state.apply(EditorAction::Delete);
     state.apply(EditorAction::InsertText("~~strike~~".to_string()));
 
+    // Closing marker is pending
+    assert!(state.inline_style.pending_marker.is_some());
+
+    // Type next character to resolve
+    state.apply(EditorAction::InsertText(" ".to_string()));
+
     assert!(state.inline_style.open_styles.is_empty());
-    assert_eq!(state.to_styled_debug_string(), "<s>strike</s>");
+    assert_eq!(state.to_styled_debug_string(), "<s>strike</s> ");
 }
 
 #[test]
