@@ -714,10 +714,10 @@ impl EditorState {
             self.inline_style.open_styles.clear();
 
             // If we've deleted all text in the block, convert heading to paragraph
-            if block.text.is_empty() {
-                if block.kind.discriminant() != BlockKindDiscriminants::Paragraph {
-                    block.kind = BlockKind::Paragraph { parent: None };
-                }
+            if block.text.is_empty()
+                && block.kind.discriminant() != BlockKindDiscriminants::Paragraph
+            {
+                block.kind = BlockKind::Paragraph { parent: None };
             }
         } else {
             // At start of block - merge with previous block
