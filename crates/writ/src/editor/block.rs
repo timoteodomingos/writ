@@ -2,8 +2,8 @@ use std::rc::Rc;
 
 use gpui::{
     App, BorderStyle, Bounds, FontWeight, HighlightStyle, IntoElement, MouseButton, MouseDownEvent,
-    Pixels, Rgba, SharedString, StyledText, TextLayout, TextRun, Window, canvas, fill, prelude::*,
-    px, quad, rems, size,
+    Pixels, Rgba, SharedString, StyledText, TextLayout, TextRun, Window, canvas, prelude::*, px,
+    quad, rems, size,
 };
 
 use crate::document::BlockKind;
@@ -227,12 +227,37 @@ impl IntoElement for Block {
                                 cursor_x = pos.x + shaped_marker.width;
                             }
 
-                            // Paint cursor bar after any pending marker
-                            let cursor_bounds = Bounds::new(
-                                gpui::point(cursor_x, pos.y),
-                                size(px(2.0), line_height),
+                            // Paint cursor using a font glyph for consistent rendering
+                            let cursor_char: SharedString = "▏".into(); // U+258F LEFT ONE EIGHTH BLOCK
+                            let cursor_font_size = font_size * 1.4; // Larger to ensure full height
+                            let base_font = text_style.font();
+                            let cursor_font = gpui::Font {
+                                family: base_font.family.clone(),
+                                features: base_font.features.clone(),
+                                fallbacks: base_font.fallbacks.clone(),
+                                weight: FontWeight::BOLD,
+                                style: base_font.style,
+                            };
+                            let cursor_run = TextRun {
+                                len: cursor_char.len(),
+                                font: cursor_font,
+                                color: self.cursor_color.into(),
+                                background_color: None,
+                                underline: None,
+                                strikethrough: None,
+                            };
+                            let shaped_cursor = window.text_system().shape_line(
+                                cursor_char,
+                                cursor_font_size,
+                                &[cursor_run],
+                                None,
                             );
-                            window.paint_quad(fill(cursor_bounds, self.cursor_color));
+
+                            // Center the cursor vertically on the text line
+                            let cursor_height = cursor_font_size * 1.2; // Approximate line height
+                            let y_offset = (line_height - cursor_height) / 2.0;
+                            let cursor_pos = gpui::point(cursor_x, pos.y + y_offset);
+                            let _ = shaped_cursor.paint(cursor_pos, cursor_height, window, cx);
 
                             // Paint active styles indicator as floating tooltip above cursor
                             if let Some(ref indicator) = active_styles_indicator {
