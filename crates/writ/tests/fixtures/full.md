@@ -116,3 +116,25 @@ Here's everything together:
 > A quote with **all** the *formatting* `types` and a [link](https://example.com)
 
 Final paragraph with **bold *nested italic* bold** and *italic **nested bold** italic*.
+
+## Horizontal Rules
+
+Text before the rule.
+
+---
+
+Text after the rule.
+
+## Images
+
+Here is an inline image: ![alt text](https://example.com/image.png) in a sentence.
+
+A paragraph with ![logo](https://example.com/logo.svg) and **bold text** together.
+
+## Task Lists
+
+- [ ] Unchecked task item
+- [x] Checked task item
+- [ ] Another unchecked item with **bold**
+- [x] Checked item with *italic*
+- Regular list item (not a task)
