@@ -6,8 +6,8 @@ pub use state::{Cursor, Direction, EditorAction, EditorState};
 use std::rc::Rc;
 
 use gpui::{
-    App, Context, FocusHandle, Focusable, IntoElement, KeyDownEvent, ReadGlobal, Render,
-    TextLayout, Window, div, prelude::*, rems,
+    App, Context, FocusHandle, Focusable, IntoElement, KeyDownEvent, MouseButton, ReadGlobal,
+    Render, TextLayout, Window, div, prelude::*, rems,
 };
 use slotmap::{DefaultKey, SecondaryMap};
 
@@ -185,14 +185,41 @@ impl Render for Editor {
             })
             .collect();
 
+        // Get the last block key and its length for click-below handling
+        let last_block_key = self.state.document.block_order.values().last().copied();
+        let last_block_len = last_block_key
+            .map(|k| self.state.document.blocks[k].text.len())
+            .unwrap_or(0);
+
+        let entity_for_spacer_click = entity.clone();
+
+        // Spacer that fills remaining vertical space and handles clicks below blocks
+        let click_spacer = div().flex_grow().min_h(rems(2.0)).on_mouse_down(
+            MouseButton::Left,
+            move |_event, window, cx| {
+                if let Some(block_key) = last_block_key {
+                    entity_for_spacer_click.update(cx, |editor, cx| {
+                        editor.state.apply(EditorAction::SetCursor {
+                            block_key,
+                            offset: last_block_len,
+                        });
+                        editor.focus_handle.focus(window);
+                        cx.notify();
+                    });
+                }
+            },
+        );
+
         div()
             .track_focus(&self.focus_handle)
             .on_key_down(cx.listener(Self::handle_key_down))
             .flex()
             .flex_col()
+            .flex_grow()
             .gap(rems(0.5))
             .font_family("Iosevka Aile")
             .text_color(theme.foreground)
             .children(block_views)
+            .child(click_spacer)
     }
 }
