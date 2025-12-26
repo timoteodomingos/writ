@@ -285,7 +285,7 @@ impl IntoElement for Block {
                                         cx,
                                     );
 
-                                    current_x = current_x + shaped_char.width;
+                                    current_x += shaped_char.width;
                                 }
                             }
                         }
