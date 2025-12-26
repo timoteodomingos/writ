@@ -21,7 +21,18 @@ pub struct Document {
 impl Document {
     pub fn from_markdown(markdown: &str) -> Document {
         let parser = MarkdownParser::new(markdown);
-        Parser::default().parse(parser)
+        let mut doc = Parser::default().parse(parser);
+
+        // Ensure document always has at least one block
+        if doc.blocks.is_empty() {
+            let key = doc.blocks.insert(Block {
+                kind: BlockKind::Paragraph { parent: None },
+                text: RichText::default(),
+            });
+            doc.block_order.insert(FractionalIndex::default(), key);
+        }
+
+        doc
     }
 
     pub fn to_markdown(&self) -> String {

@@ -1,8 +1,7 @@
-use anyhow::Result;
 use clap::Parser;
 use gpui::{
-    Application, Bounds, Entity, FocusHandle, KeyBinding, Point, Size, Window, WindowBounds,
-    WindowDecorations, WindowOptions, div, prelude::*, rems,
+    Application, Bounds, Entity, FocusHandle, Focusable, KeyBinding, Point, Size, Window,
+    WindowBounds, WindowDecorations, WindowOptions, div, prelude::*, rems,
 };
 use writ::{
     args::Args,
@@ -40,21 +39,24 @@ impl Render for Root {
     }
 }
 
-fn load_file(file: &std::path::Path) -> Result<String> {
-    Ok(std::fs::read_to_string(file)?)
+fn load_file(file: &std::path::Path) -> String {
+    std::fs::read_to_string(file).unwrap_or_default()
 }
 
 fn main() {
     let args = Args::parse()
         .validate()
         .expect("Failed to validate arguments");
-    let content = load_file(&args.file).expect("Failed to load file");
+    let content = load_file(&args.file);
 
     let app = Application::new();
 
     app.run(move |cx| {
         cx.set_global(theme::dracula());
-        cx.set_global(FileInfo { path: args.file });
+        cx.set_global(FileInfo {
+            path: args.file,
+            dirty: false,
+        });
         cx.bind_keys([
             KeyBinding::new("ctrl-w", CloseWindow, None),
             KeyBinding::new("cmd-w", CloseWindow, None),
@@ -78,10 +80,12 @@ fn main() {
             };
 
             cx.open_window(window_options, |window, cx| {
-                let state = EditorState::from_markdown(&content);
+                let document = writ::document::Document::from_markdown(&content);
+                let state = EditorState::new_at_end(document);
                 let editor = cx.new(|cx| Editor::new(state, cx));
+                // Focus the editor so it receives keyboard input
+                editor.focus_handle(cx).focus(window);
                 let focus_handle = cx.focus_handle();
-                focus_handle.focus(window);
                 cx.new(|_| Root {
                     editor,
                     focus_handle,

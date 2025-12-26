@@ -293,6 +293,28 @@ impl EditorState {
         }
     }
 
+    /// Create editor state from a Document, placing cursor at end of last block
+    /// This is useful when opening an existing file for editing
+    pub fn new_at_end(document: Document) -> Self {
+        let last_block_key = document
+            .block_order
+            .values()
+            .last()
+            .copied()
+            .expect("Document must have at least one block");
+        let last_block_len = document.blocks[last_block_key].text.len();
+
+        Self {
+            document,
+            cursor: Cursor {
+                block_key: last_block_key,
+                offset: last_block_len,
+            },
+            inline_style: InlineStyleState::default(),
+            block_style: BlockStyleState::default(),
+        }
+    }
+
     /// Get the pending inline marker text for display
     pub fn pending_marker_text(&self) -> &str {
         self.inline_style
@@ -554,6 +576,7 @@ impl EditorState {
         // Check if we can upgrade the pending marker
         if let Some(ref pending) = self.inline_style.pending_marker {
             if let Some(upgraded) = pending.try_upgrade(c) {
+                // Upgraded - keep as pending
                 self.inline_style.pending_marker = Some(upgraded);
                 return;
             }
@@ -563,9 +586,13 @@ impl EditorState {
             self.resolve_pending_marker();
         }
 
-        // Start a pending marker (opening or closing based on context)
-        // The marker stays visible until the next character is typed
-        self.inline_style.pending_marker = PendingMarker::from_char(c, is_opening);
+        if is_opening {
+            // Opening marker - show as pending until next character
+            self.inline_style.pending_marker = PendingMarker::from_char(c, true);
+        } else {
+            // Closing marker - set as pending (will resolve on next non-marker char or different marker)
+            self.inline_style.pending_marker = PendingMarker::from_char(c, false);
+        }
     }
 
     /// Resolve a pending marker - either close matching open styles or open new styles

@@ -12,6 +12,7 @@ use gpui::{
 use slotmap::{DefaultKey, SecondaryMap};
 
 use crate::theme::Theme;
+use crate::title_bar::FileInfo;
 use block::Block;
 
 /// The main editor GPUI entity
@@ -31,6 +32,27 @@ impl Editor {
         }
     }
 
+    fn save_file(&self, cx: &mut Context<Self>) {
+        let file_info = FileInfo::global(cx);
+        let path = file_info.path.clone();
+        let markdown = self.state.document.to_markdown();
+        if let Err(e) = std::fs::write(&path, &markdown) {
+            eprintln!("Failed to save file: {}", e);
+        } else {
+            cx.set_global(FileInfo { path, dirty: false });
+            cx.notify();
+        }
+    }
+
+    fn mark_dirty(&self, cx: &mut Context<Self>) {
+        let file_info = FileInfo::global(cx);
+        if !file_info.dirty {
+            let path = file_info.path.clone();
+            cx.set_global(FileInfo { path, dirty: true });
+            cx.notify();
+        }
+    }
+
     fn handle_key_down(
         &mut self,
         event: &KeyDownEvent,
@@ -38,6 +60,14 @@ impl Editor {
         cx: &mut Context<Self>,
     ) {
         let keystroke = &event.keystroke;
+
+        // Handle save with Ctrl-S or Cmd-S
+        if keystroke.key.as_str() == "s"
+            && (keystroke.modifiers.control || keystroke.modifiers.platform)
+        {
+            self.save_file(cx);
+            return;
+        }
 
         // First check for special keys
         let action = match keystroke.key.as_str() {
@@ -70,7 +100,17 @@ impl Editor {
         };
 
         if let Some(action) = action {
+            // Mark dirty for actions that modify the document
+            let modifies_document = !matches!(
+                action,
+                EditorAction::MoveCursor(_) | EditorAction::SetCursor { .. }
+            );
+
             self.state.apply(action);
+
+            if modifies_document {
+                self.mark_dirty(cx);
+            }
             cx.notify();
         }
     }
@@ -124,14 +164,15 @@ impl Render for Editor {
                     });
                 }));
 
-                // Create on_click callback that sets cursor position
+                // Create on_click callback that sets cursor position and focuses editor
                 let entity_for_click = entity.clone();
-                block = block.on_click(Rc::new(move |char_index, _window, cx| {
+                block = block.on_click(Rc::new(move |char_index, window, cx| {
                     entity_for_click.update(cx, |editor, cx| {
                         editor.state.apply(EditorAction::SetCursor {
                             block_key,
                             offset: char_index,
                         });
+                        editor.focus_handle.focus(window);
                         cx.notify();
                     });
                 }));

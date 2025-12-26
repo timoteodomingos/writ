@@ -7,6 +7,7 @@ use crate::theme::Theme;
 
 pub struct FileInfo {
     pub path: std::path::PathBuf,
+    pub dirty: bool,
 }
 
 impl Global for FileInfo {}
@@ -30,12 +31,18 @@ fn traffic_light(
 
 pub fn title_bar(cx: &mut App) -> impl IntoElement {
     let theme = Theme::global(cx);
-    let file_name = FileInfo::global(cx)
+    let file_info = FileInfo::global(cx);
+    let file_name = file_info
         .path
         .file_name()
         .expect("file name")
         .display()
         .to_string();
+    let title = if file_info.dirty {
+        format!("* {}", file_name)
+    } else {
+        file_name
+    };
     div()
         .id("title-bar")
         .w_full()
@@ -49,7 +56,7 @@ pub fn title_bar(cx: &mut App) -> impl IntoElement {
         .child(
             div()
                 .w_full()
-                .child(file_name)
+                .child(title)
                 .on_mouse_down(MouseButton::Left, |_e, window, _| {
                     window.start_window_move();
                 }),

@@ -1,4 +1,4 @@
-use anyhow::{Result, bail};
+use anyhow::Result;
 use std::path::PathBuf;
 
 use clap::Parser;
@@ -12,10 +12,7 @@ pub struct Args {
 
 impl Args {
     pub fn validate(self) -> Result<Self> {
-        if !self.file.exists() {
-            bail!("File '{}' does not exist", self.file.display())
-        } else {
-            Ok(self)
-        }
+        // File doesn't need to exist - we'll create it on save
+        Ok(self)
     }
 }
