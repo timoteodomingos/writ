@@ -576,8 +576,16 @@ impl EditorState {
         // Check if we can upgrade the pending marker
         if let Some(ref pending) = self.inline_style.pending_marker {
             if let Some(upgraded) = pending.try_upgrade(c) {
-                // Upgraded - keep as pending
+                let is_closing = !upgraded.is_opening;
+                let matches = self.has_matching_open_style(upgraded.as_str());
+
+                // Keep as pending
                 self.inline_style.pending_marker = Some(upgraded);
+
+                // For closing markers, resolve immediately if it matches an open style
+                if is_closing && matches {
+                    self.resolve_pending_marker();
+                }
                 return;
             }
 
@@ -590,9 +598,47 @@ impl EditorState {
             // Opening marker - show as pending until next character
             self.inline_style.pending_marker = PendingMarker::from_char(c, true);
         } else {
-            // Closing marker - set as pending (will resolve on next non-marker char or different marker)
-            self.inline_style.pending_marker = PendingMarker::from_char(c, false);
+            // Closing marker - check if we should resolve immediately or wait for potential upgrade
+            if let Some(marker) = PendingMarker::from_char(c, false) {
+                let matches_current = self.has_matching_open_style(marker.as_str());
+                let could_match_upgraded = marker.kind.try_upgrade(c).is_some()
+                    && self.could_match_upgraded_marker(&marker.kind, c);
+
+                if matches_current && !could_match_upgraded {
+                    // Matches current and can't upgrade to something better - resolve now
+                    self.inline_style.pending_marker = Some(marker);
+                    self.resolve_pending_marker();
+                } else {
+                    // Either no match yet, or could upgrade to match something else
+                    // Keep pending to allow upgrading (* -> ** -> ***)
+                    self.inline_style.pending_marker = Some(marker);
+                }
+            }
         }
+    }
+
+    /// Check if upgrading the marker could match an open style
+    fn could_match_upgraded_marker(&self, kind: &PendingMarkerKind, c: char) -> bool {
+        if let Some(upgraded) = kind.try_upgrade(c) {
+            if self.has_matching_open_style(upgraded.as_str()) {
+                return true;
+            }
+            // Check one more level of upgrade
+            if let Some(double_upgraded) = upgraded.try_upgrade(c)
+                && self.has_matching_open_style(double_upgraded.as_str())
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Check if there's an open style with the given marker
+    fn has_matching_open_style(&self, marker: &str) -> bool {
+        self.inline_style
+            .open_styles
+            .iter()
+            .any(|os| os.marker == marker)
     }
 
     /// Resolve a pending marker - either close matching open styles or open new styles
