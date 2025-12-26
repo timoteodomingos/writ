@@ -93,43 +93,17 @@ impl PendingMarkerKind {
         }
     }
 
-    /// Convert to open styles (if this is a valid style marker)
-    /// Returns None for invalid markers, or Some with a list of styles to open
-    /// The offset is the cursor position where the style was opened
-    fn to_open_styles(&self, offset: usize) -> Option<Vec<OpenStyle>> {
+    /// Convert to styles to open (if this is a valid style marker)
+    /// Returns None for invalid markers, or Some with a list of (style, marker) pairs
+    fn to_styles(&self) -> Option<Vec<(TextStyle, &'static str)>> {
         match self {
-            PendingMarkerKind::SingleAsterisk => Some(vec![OpenStyle {
-                style: TextStyle::Italic,
-                marker: "*".to_string(),
-                opened_at: offset,
-            }]),
-            PendingMarkerKind::DoubleAsterisk => Some(vec![OpenStyle {
-                style: TextStyle::Bold,
-                marker: "**".to_string(),
-                opened_at: offset,
-            }]),
-            PendingMarkerKind::TripleAsterisk => Some(vec![
-                OpenStyle {
-                    style: TextStyle::Bold,
-                    marker: "**".to_string(),
-                    opened_at: offset,
-                },
-                OpenStyle {
-                    style: TextStyle::Italic,
-                    marker: "*".to_string(),
-                    opened_at: offset,
-                },
-            ]),
-            PendingMarkerKind::Backtick => Some(vec![OpenStyle {
-                style: TextStyle::Code,
-                marker: "`".to_string(),
-                opened_at: offset,
-            }]),
-            PendingMarkerKind::DoubleTilde => Some(vec![OpenStyle {
-                style: TextStyle::Strikethrough,
-                marker: "~~".to_string(),
-                opened_at: offset,
-            }]),
+            PendingMarkerKind::SingleAsterisk => Some(vec![(TextStyle::Italic, "*")]),
+            PendingMarkerKind::DoubleAsterisk => Some(vec![(TextStyle::Bold, "**")]),
+            PendingMarkerKind::TripleAsterisk => {
+                Some(vec![(TextStyle::Bold, "**"), (TextStyle::Italic, "*")])
+            }
+            PendingMarkerKind::Backtick => Some(vec![(TextStyle::Code, "`")]),
+            PendingMarkerKind::DoubleTilde => Some(vec![(TextStyle::Strikethrough, "~~")]),
             PendingMarkerKind::SingleTilde => None, // Single ~ is not a valid style
         }
     }
@@ -170,9 +144,143 @@ impl PendingMarker {
 #[derive(Debug, Clone, PartialEq)]
 pub struct OpenStyle {
     pub style: TextStyle,
+    /// The marker used to open this style (empty if inherited from existing text)
     pub marker: String,
     /// The cursor offset where this style was opened
     pub opened_at: usize,
+}
+
+impl OpenStyle {
+    /// Create an explicitly opened style (via marker like `*`, `**`, etc.)
+    fn explicit(style: TextStyle, marker: impl Into<String>, opened_at: usize) -> Self {
+        Self {
+            style,
+            marker: marker.into(),
+            opened_at,
+        }
+    }
+
+    /// Create an inherited style (from existing styled text)
+    fn inherited(style: TextStyle, opened_at: usize) -> Self {
+        Self {
+            style,
+            marker: String::new(),
+            opened_at,
+        }
+    }
+
+    /// Whether this style was explicitly opened (vs inherited)
+    fn is_explicit(&self) -> bool {
+        !self.marker.is_empty()
+    }
+}
+
+/// A stack of open styles with operations for push, close, and pruning
+#[derive(Debug, Clone, Default)]
+pub struct StyleStack {
+    styles: Vec<OpenStyle>,
+}
+
+impl StyleStack {
+    /// Create an empty style stack
+    pub fn new() -> Self {
+        Self { styles: Vec::new() }
+    }
+
+    /// Push an explicitly opened style onto the stack
+    pub fn push_explicit(&mut self, style: TextStyle, marker: impl Into<String>, opened_at: usize) {
+        self.styles
+            .push(OpenStyle::explicit(style, marker, opened_at));
+    }
+
+    /// Push an inherited style onto the stack (if not already present)
+    pub fn push_inherited(&mut self, style: TextStyle, opened_at: usize) {
+        if !self.styles.iter().any(|os| os.style == style) {
+            self.styles.push(OpenStyle::inherited(style, opened_at));
+        }
+    }
+
+    /// Try to close a style with the given marker (searches from most recent)
+    /// Returns true if a matching style was found and closed
+    pub fn close_matching(&mut self, marker: &str) -> bool {
+        for i in (0..self.styles.len()).rev() {
+            if self.styles[i].marker == marker {
+                self.styles.remove(i);
+                return true;
+            }
+        }
+        false
+    }
+
+    /// Check if there's an open style with the given marker
+    pub fn has_matching(&self, marker: &str) -> bool {
+        self.styles.iter().any(|os| os.marker == marker)
+    }
+
+    /// Remove styles when cursor reaches their opened_at position
+    /// Call this before deleting text, with the new cursor offset
+    pub fn prune_at_offset(&mut self, new_offset: usize) {
+        self.styles.retain(|style| new_offset > style.opened_at);
+    }
+
+    /// Sync with text styles at cursor position:
+    /// - Inherit any styles from text that aren't already open
+    /// - Remove inherited styles that are no longer backed by text
+    pub fn sync_with_text(&mut self, text_styles: &StyleSet, cursor_offset: usize) {
+        // Add inherited styles from text
+        for style in &text_styles.styles {
+            self.push_inherited(style.clone(), cursor_offset);
+        }
+
+        // Remove inherited styles not backed by text
+        self.styles
+            .retain(|os| os.is_explicit() || text_styles.styles.contains(&os.style));
+    }
+
+    /// Clear only inherited styles (keep explicitly opened ones)
+    pub fn clear_inherited(&mut self) {
+        self.styles.retain(|os| os.is_explicit());
+    }
+
+    /// Clear all styles
+    pub fn clear(&mut self) {
+        self.styles.clear();
+    }
+
+    /// Check if the stack is empty
+    pub fn is_empty(&self) -> bool {
+        self.styles.is_empty()
+    }
+
+    /// Get the number of open styles
+    pub fn len(&self) -> usize {
+        self.styles.len()
+    }
+
+    /// Get the current styles as a StyleSet
+    pub fn to_style_set(&self) -> StyleSet {
+        StyleSet {
+            styles: self.styles.iter().map(|os| os.style.clone()).collect(),
+        }
+    }
+
+    /// Iterate over open styles
+    pub fn iter(&self) -> impl Iterator<Item = &OpenStyle> {
+        self.styles.iter()
+    }
+
+    /// Get an open style by index
+    pub fn get(&self, index: usize) -> Option<&OpenStyle> {
+        self.styles.get(index)
+    }
+}
+
+impl std::ops::Index<usize> for StyleStack {
+    type Output = OpenStyle;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.styles[index]
+    }
 }
 
 /// Inline styling state for the editor
@@ -180,8 +288,8 @@ pub struct OpenStyle {
 pub struct InlineStyleState {
     /// Pending marker characters that haven't been committed to a chunk yet
     pub pending_marker: Option<PendingMarker>,
-    /// Stack of currently open styles (outermost first)
-    pub open_styles: Vec<OpenStyle>,
+    /// Stack of currently open styles
+    pub open_styles: StyleStack,
 }
 
 /// Represents a pending block marker (e.g., `#` for headings)
@@ -345,7 +453,7 @@ impl EditorState {
         }
 
         let mut indicator = String::new();
-        for open_style in &self.inline_style.open_styles {
+        for open_style in self.inline_style.open_styles.iter() {
             let ch = match open_style.style {
                 TextStyle::Bold => 'B',
                 TextStyle::Italic => 'I',
@@ -360,14 +468,7 @@ impl EditorState {
 
     /// Get current active styles from the open_styles stack
     fn current_styles(&self) -> StyleSet {
-        StyleSet {
-            styles: self
-                .inline_style
-                .open_styles
-                .iter()
-                .map(|os| os.style.clone())
-                .collect(),
-        }
+        self.inline_style.open_styles.to_style_set()
     }
 
     /// Create editor state from markdown string
@@ -664,10 +765,7 @@ impl EditorState {
 
     /// Check if there's an open style with the given marker
     fn has_matching_open_style(&self, marker: &str) -> bool {
-        self.inline_style
-            .open_styles
-            .iter()
-            .any(|os| os.marker == marker)
+        self.inline_style.open_styles.has_matching(marker)
     }
 
     /// Resolve a pending marker - either close matching open styles or open new styles
@@ -677,9 +775,13 @@ impl EditorState {
 
             if pending.is_opening {
                 // Opening marker - always open new styles (never close)
-                if let Some(open_styles) = pending.kind.to_open_styles(self.cursor.offset) {
-                    for style in open_styles {
-                        self.inline_style.open_styles.push(style);
+                if let Some(styles) = pending.kind.to_styles() {
+                    for (style, style_marker) in styles {
+                        self.inline_style.open_styles.push_explicit(
+                            style,
+                            style_marker,
+                            self.cursor.offset,
+                        );
                     }
                 } else {
                     // Invalid pending marker (e.g., single ~) - insert as literal text
@@ -691,8 +793,8 @@ impl EditorState {
                 // Closing marker - try to close matching open style
                 // For TripleAsterisk, we need to close both ** and *
                 if matches!(pending.kind, PendingMarkerKind::TripleAsterisk) {
-                    let closed_bold = self.try_close_style("**");
-                    let closed_italic = self.try_close_style("*");
+                    let closed_bold = self.inline_style.open_styles.close_matching("**");
+                    let closed_italic = self.inline_style.open_styles.close_matching("*");
 
                     if !closed_bold && !closed_italic {
                         // Nothing to close - insert as literal text
@@ -704,7 +806,7 @@ impl EditorState {
                 }
 
                 // Try to close matching open style
-                if self.try_close_style(marker) {
+                if self.inline_style.open_styles.close_matching(marker) {
                     return;
                 }
 
@@ -714,18 +816,6 @@ impl EditorState {
                 self.cursor.offset += marker.len();
             }
         }
-    }
-
-    /// Try to close an open style with the given marker
-    fn try_close_style(&mut self, marker: &str) -> bool {
-        // Find the most recently opened style with matching marker
-        for i in (0..self.inline_style.open_styles.len()).rev() {
-            if self.inline_style.open_styles[i].marker == marker {
-                self.inline_style.open_styles.remove(i);
-                return true;
-            }
-        }
-        false
     }
 
     fn handle_regular_char(&mut self, c: char) {
@@ -762,13 +852,11 @@ impl EditorState {
             return;
         }
 
-        // Remove any open styles where cursor would reach where they were opened
-        // (i.e., when new_offset == opened_at, the style should be removed)
+        // Remove styles when cursor reaches their opened_at position
         if self.cursor.offset > 0 {
-            let new_offset = self.cursor.offset - 1;
             self.inline_style
                 .open_styles
-                .retain(|style| new_offset > style.opened_at);
+                .prune_at_offset(self.cursor.offset - 1);
         } else {
             // At offset 0, all open styles should be removed
             self.inline_style.open_styles.clear();
@@ -791,39 +879,15 @@ impl EditorState {
                 .delete_range(self.cursor.offset - 1, self.cursor.offset);
             self.cursor.offset -= 1;
 
-            // Pick up styles from the text we're now in (if any)
-            // This allows continuing to type in the same style when backspacing into styled text
-            // We look at the character to the LEFT of cursor (cursor.offset - 1) since that's
-            // the text we're "in" after backspacing
+            // Sync styles with the text we're now in
             if self.cursor.offset > 0 {
                 let styles_at_cursor = block.text.styles_at(self.cursor.offset - 1);
-                for style in styles_at_cursor.styles.iter().cloned() {
-                    // Only add if we don't already have this style open
-                    if !self
-                        .inline_style
-                        .open_styles
-                        .iter()
-                        .any(|os| os.style == style)
-                    {
-                        self.inline_style.open_styles.push(OpenStyle {
-                            style,
-                            marker: String::new(), // No marker - inherited from existing text
-                            opened_at: self.cursor.offset,
-                        });
-                    }
-                }
-
-                // Remove inherited open styles (those with empty marker) that are no longer
-                // backed by styled text. Keep explicitly opened styles (non-empty marker)
-                // until we backspace before their opened_at position.
-                self.inline_style.open_styles.retain(|os| {
-                    !os.marker.is_empty() || styles_at_cursor.styles.contains(&os.style)
-                });
-            } else {
-                // At offset 0, remove inherited styles but keep explicitly opened ones
                 self.inline_style
                     .open_styles
-                    .retain(|os| !os.marker.is_empty());
+                    .sync_with_text(&styles_at_cursor, self.cursor.offset);
+            } else {
+                // At offset 0, remove inherited styles but keep explicitly opened ones
+                self.inline_style.open_styles.clear_inherited();
             }
 
             // If we've deleted all text in the block, convert heading to paragraph
