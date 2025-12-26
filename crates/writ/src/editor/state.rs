@@ -279,10 +279,7 @@ impl EditorState {
     /// Create editor state from a Document, placing cursor at start of first block
     pub fn new(document: Document) -> Self {
         let first_block_key = document
-            .block_order
-            .values()
-            .next()
-            .copied()
+            .first_block_key()
             .expect("Document must have at least one block");
 
         Self {
@@ -363,7 +360,7 @@ impl EditorState {
             }
 
             let block = &self.document.blocks[*block_key];
-            let text = self.block_plain_text(block);
+            let text = block.plain_text();
 
             if *block_key == self.cursor.block_key {
                 // Insert cursor marker at offset, with pending marker before cursor
@@ -386,11 +383,6 @@ impl EditorState {
     pub fn to_styled_debug_string(&self) -> String {
         let block = &self.document.blocks[self.cursor.block_key];
         block.text.to_debug_string()
-    }
-
-    /// Extract plain text from a block (ignoring styles)
-    fn block_plain_text(&self, block: &Block) -> String {
-        block.text.chunks.iter().map(|c| c.text.as_str()).collect()
     }
 
     fn current_block(&self) -> &Block {
@@ -466,30 +458,12 @@ impl EditorState {
         }
     }
 
-    /// Get the previous block key in document order
     fn previous_block_key(&self) -> Option<DefaultKey> {
-        let mut prev = None;
-        for key in self.document.block_order.values() {
-            if *key == self.cursor.block_key {
-                return prev;
-            }
-            prev = Some(*key);
-        }
-        None
+        self.document.previous_block_key(self.cursor.block_key)
     }
 
-    /// Get the next block key in document order
     fn next_block_key(&self) -> Option<DefaultKey> {
-        let mut found = false;
-        for key in self.document.block_order.values() {
-            if found {
-                return Some(*key);
-            }
-            if *key == self.cursor.block_key {
-                found = true;
-            }
-        }
-        None
+        self.document.next_block_key(self.cursor.block_key)
     }
 
     fn insert_text(&mut self, text: &str) {
@@ -509,7 +483,7 @@ impl EditorState {
             return true;
         }
         let block = self.current_block();
-        let text = self.block_plain_text(block);
+        let text = block.plain_text();
         text.chars()
             .nth(self.cursor.offset - 1)
             .map(|c| c.is_whitespace())

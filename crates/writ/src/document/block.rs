@@ -32,4 +32,9 @@ impl Block {
             BlockKind::Code { parent, .. } => *parent,
         }
     }
+
+    /// Extract plain text from this block (ignoring styles)
+    pub fn plain_text(&self) -> String {
+        self.text.chunks.iter().map(|c| c.text.as_str()).collect()
+    }
 }

@@ -248,4 +248,35 @@ impl Document {
         // Remove from blocks SlotMap
         self.blocks.remove(block_key);
     }
+
+    /// Get the first block key in document order
+    pub fn first_block_key(&self) -> Option<DefaultKey> {
+        self.block_order.values().next().copied()
+    }
+
+    /// Get the previous block key in document order
+    pub fn previous_block_key(&self, block_key: DefaultKey) -> Option<DefaultKey> {
+        let mut prev = None;
+        for key in self.block_order.values() {
+            if *key == block_key {
+                return prev;
+            }
+            prev = Some(*key);
+        }
+        None
+    }
+
+    /// Get the next block key in document order
+    pub fn next_block_key(&self, block_key: DefaultKey) -> Option<DefaultKey> {
+        let mut found = false;
+        for key in self.block_order.values() {
+            if found {
+                return Some(*key);
+            }
+            if *key == block_key {
+                found = true;
+            }
+        }
+        None
+    }
 }
