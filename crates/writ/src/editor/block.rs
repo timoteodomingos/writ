@@ -230,12 +230,17 @@ impl IntoElement for Block {
                             );
                             window.paint_quad(fill(cursor_bounds, self.text_color));
 
-                            // Paint active styles indicator after cursor
+                            // Paint active styles indicator as floating tooltip above cursor
                             if let Some(ref indicator) = active_styles_indicator {
                                 let base_font = text_style.font();
-                                let mut current_x = cursor_x + px(4.0);
 
-                                // Render each character separately with its own styling
+                                // First, measure total width of indicator by shaping all chars
+                                let mut shaped_chars = Vec::new();
+                                let mut total_width = px(0.0);
+                                let padding_x = px(4.0);
+                                let padding_y = px(2.0);
+                                let tooltip_gap = px(4.0); // Gap between tooltip and cursor
+
                                 for ch in indicator.chars() {
                                     let (weight, style, strikethrough) = match ch {
                                         'B' => (FontWeight::BOLD, gpui::FontStyle::Normal, None),
@@ -265,7 +270,7 @@ impl IntoElement for Block {
                                     let run = TextRun {
                                         len: ch.len_utf8(),
                                         font,
-                                        color: self.marker_color.into(),
+                                        color: self.text_color.into(),
                                         background_color: None,
                                         underline: None,
                                         strikethrough,
@@ -278,8 +283,30 @@ impl IntoElement for Block {
                                         None,
                                     );
 
+                                    total_width += shaped_char.width;
+                                    shaped_chars.push(shaped_char);
+                                }
+
+                                // Calculate tooltip position (above cursor, centered on cursor)
+                                let tooltip_height = line_height + padding_y * 2.0;
+                                let tooltip_width = total_width + padding_x * 2.0;
+                                let tooltip_x = cursor_x - tooltip_width / 2.0 + px(1.0); // Center on cursor
+                                let tooltip_y = pos.y - tooltip_height - tooltip_gap;
+
+                                // Paint background rectangle
+                                let bg_bounds = Bounds::new(
+                                    gpui::point(tooltip_x, tooltip_y),
+                                    size(tooltip_width, tooltip_height),
+                                );
+                                window.paint_quad(fill(bg_bounds, self.marker_color));
+
+                                // Paint each styled character
+                                let mut current_x = tooltip_x + padding_x;
+                                let text_y = tooltip_y + padding_y;
+
+                                for shaped_char in shaped_chars {
                                     let _ = shaped_char.paint(
-                                        gpui::point(current_x, pos.y),
+                                        gpui::point(current_x, text_y),
                                         line_height,
                                         window,
                                         cx,
