@@ -16,6 +16,7 @@ pub enum BlockKind {
         parent: Option<DefaultKey>,
         language: Option<String>,
     },
+    HorizontalRule,
 }
 
 #[derive(Debug, Clone)]
@@ -30,6 +31,7 @@ impl Block {
             BlockKind::Heading { .. } => None,
             BlockKind::Paragraph { parent } => *parent,
             BlockKind::Code { parent, .. } => *parent,
+            BlockKind::HorizontalRule => None,
         }
     }
 

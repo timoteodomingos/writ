@@ -7,10 +7,11 @@ pub use block::*;
 pub use container::*;
 use fractional_index::FractionalIndex;
 pub use parser::*;
-use pulldown_cmark::Parser as MarkdownParser;
+use pulldown_cmark::{Options, Parser as MarkdownParser};
 pub use rich_text::*;
 use slotmap::{DefaultKey, SlotMap};
 use std::collections::{BTreeMap, HashMap, HashSet};
+use strum::IntoDiscriminant;
 
 pub struct Document {
     pub blocks: SlotMap<DefaultKey, Block>,
@@ -20,7 +21,10 @@ pub struct Document {
 
 impl Document {
     pub fn from_markdown(markdown: &str) -> Document {
-        let parser = MarkdownParser::new(markdown);
+        let mut options = Options::empty();
+        options.insert(Options::ENABLE_TASKLISTS);
+        options.insert(Options::ENABLE_STRIKETHROUGH);
+        let parser = MarkdownParser::new_ext(markdown, options);
         let mut doc = Parser::default().parse(parser);
 
         // Ensure document always has at least one block
@@ -78,7 +82,7 @@ impl Document {
         };
 
         match container.kind {
-            ContainerKind::ListItem => {
+            ContainerKind::ListItem { checked } => {
                 let list_key = container.parent.expect("ListItem must have a parent list");
                 let list = &self.containers[list_key];
 
@@ -89,10 +93,19 @@ impl Document {
                         let count = container_counts.get(&list_key).copied().unwrap_or(0);
                         container_counts.insert(list_key, count + 1);
 
+                        // Checkbox prefix if this is a task list item
+                        let checkbox = match checked {
+                            Some(true) => "[x] ",
+                            Some(false) => "[ ] ",
+                            None => "",
+                        };
+
                         match list.kind {
-                            ContainerKind::BulletedList => format!("{}- ", parent_prefix),
+                            ContainerKind::BulletedList => {
+                                format!("{}- {}", parent_prefix, checkbox)
+                            }
                             ContainerKind::NumberedList => {
-                                format!("{}{}. ", parent_prefix, count + 1)
+                                format!("{}{}. {}", parent_prefix, count + 1, checkbox)
                             }
                             _ => panic!("ListItem parent must be a list"),
                         }
@@ -101,12 +114,13 @@ impl Document {
                         // Continuation block (not first in list item) - needs indentation
                         // Indent by the width of the marker that was used for this list item
                         let count = container_counts.get(&list_key).copied().unwrap_or(1);
+                        let checkbox_width = if checked.is_some() { 4 } else { 0 }; // "[x] " or "[ ] "
                         let marker_width = match list.kind {
-                            ContainerKind::BulletedList => 2, // "- "
+                            ContainerKind::BulletedList => 2 + checkbox_width, // "- " + checkbox
                             ContainerKind::NumberedList => {
                                 // "N. " where N is the item number
                                 let digits = count.to_string().len();
-                                digits + 2 // digits + ". "
+                                digits + 2 + checkbox_width // digits + ". " + checkbox
                             }
                             _ => panic!("ListItem parent must be a list"),
                         };
@@ -115,11 +129,12 @@ impl Document {
                     None => {
                         // Traversing through - indent by the marker width
                         let count = container_counts.get(&list_key).copied().unwrap_or(1);
+                        let checkbox_width = if checked.is_some() { 4 } else { 0 };
                         let marker_width = match list.kind {
-                            ContainerKind::BulletedList => 2, // "- "
+                            ContainerKind::BulletedList => 2 + checkbox_width,
                             ContainerKind::NumberedList => {
                                 let digits = count.to_string().len();
-                                digits + 2
+                                digits + 2 + checkbox_width
                             }
                             _ => panic!("ListItem parent must be a list"),
                         };
@@ -159,6 +174,7 @@ impl Document {
                     format!("{}```{}\n{}\n{}```", prefix, lang, indented_content, prefix)
                 }
             }
+            BlockKind::HorizontalRule => "---".to_string(),
         }
     }
 
@@ -185,9 +201,9 @@ impl Document {
         // - Previous block was also the first (and only) in its list item
         // - List items container paths intersect
         if let Some(pp) = prev_parent
-            && self.containers[pp].kind == ContainerKind::ListItem
+            && self.containers[pp].kind.discriminant() == ContainerKindDiscriminants::ListItem
             && let Some(cp) = curr_parent
-            && self.containers[cp].kind == ContainerKind::ListItem
+            && self.containers[cp].kind.discriminant() == ContainerKindDiscriminants::ListItem
             && !self.get_path(pp).is_disjoint(&self.get_path(cp))
             && self.sibling_index(prev_key) == 0
             && self.sibling_index(curr_key) == 0

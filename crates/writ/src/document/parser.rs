@@ -6,8 +6,8 @@ use slotmap::{DefaultKey, SlotMap};
 use strum::IntoDiscriminant;
 
 use crate::document::{
-    Block, BlockKind, BlockKindDiscriminants, Container, ContainerKind, Document, RichText,
-    StyleSet, TextStyle, TextStyleDiscriminants,
+    Block, BlockKind, BlockKindDiscriminants, Container, ContainerKind, ContainerKindDiscriminants,
+    Document, RichText, StyleSet, TextStyle, TextStyleDiscriminants,
 };
 
 #[derive(Default)]
@@ -66,10 +66,10 @@ impl Parser {
         self.current_block = None;
     }
 
-    fn pop_container(&mut self, expected_kind: ContainerKind) {
+    fn pop_container(&mut self, expected_kind: ContainerKindDiscriminants) {
         match self.container_stack.pop() {
             Some(key) => {
-                if self.containers[key].kind != expected_kind {
+                if self.containers[key].kind.discriminant() != expected_kind {
                     panic!("Unexpected container kind");
                 }
             }
@@ -118,7 +118,8 @@ impl Parser {
                         });
                     }
                     Tag::Item => {
-                        self.push_container(ContainerKind::ListItem);
+                        // Start with checked=None, may be updated by TaskListMarker event
+                        self.push_container(ContainerKind::ListItem { checked: None });
                     }
                     Tag::BlockQuote(_) => {
                         self.push_container(ContainerKind::Quote);
@@ -160,21 +161,26 @@ impl Parser {
                             url: dest_url.to_string(),
                         });
                     }
+                    Tag::Image { dest_url, .. } => {
+                        self.push_style(TextStyle::Image {
+                            url: dest_url.to_string(),
+                        });
+                    }
                     other => todo!("Start tag: {other:?}"),
                 },
                 Event::End(tag_end) => match tag_end {
                     TagEnd::List(numbered) => {
                         self.pop_container(if numbered {
-                            ContainerKind::NumberedList
+                            ContainerKindDiscriminants::NumberedList
                         } else {
-                            ContainerKind::BulletedList
+                            ContainerKindDiscriminants::BulletedList
                         });
                     }
                     TagEnd::Item => {
-                        self.pop_container(ContainerKind::ListItem);
+                        self.pop_container(ContainerKindDiscriminants::ListItem);
                     }
                     TagEnd::BlockQuote(_) => {
-                        self.pop_container(ContainerKind::Quote);
+                        self.pop_container(ContainerKindDiscriminants::Quote);
                     }
                     TagEnd::Heading(_) => {
                         self.clear_current_block(BlockKindDiscriminants::Heading);
@@ -197,6 +203,9 @@ impl Parser {
                     TagEnd::Link => {
                         self.pop_style(TextStyleDiscriminants::Link);
                     }
+                    TagEnd::Image => {
+                        self.pop_style(TextStyleDiscriminants::Image);
+                    }
                     other => todo!("End tag: {other:?}"),
                 },
                 Event::Text(text) => {
@@ -217,6 +226,19 @@ impl Parser {
                 }
                 Event::HardBreak => {
                     self.push_text("\n");
+                }
+                Event::Rule => {
+                    self.push_block(BlockKind::HorizontalRule);
+                    self.current_block = None;
+                }
+                Event::TaskListMarker(checked) => {
+                    // Update the current list item's checked state
+                    if let Some(&container_key) = self.container_stack.last()
+                        && let ContainerKind::ListItem { checked: ref mut c } =
+                            self.containers[container_key].kind
+                    {
+                        *c = Some(checked);
+                    }
                 }
                 other => todo!("Event: {other:?}"),
             }

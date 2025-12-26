@@ -12,6 +12,7 @@ pub enum TextStyle {
     Code,
     Strikethrough,
     Link { url: String },
+    Image { url: String },
 }
 
 impl TextStyle {
@@ -22,6 +23,7 @@ impl TextStyle {
             TextStyle::Code => "`",
             TextStyle::Strikethrough => "~~",
             TextStyle::Link { .. } => "[",
+            TextStyle::Image { .. } => "![",
         }
     }
 
@@ -32,6 +34,7 @@ impl TextStyle {
             TextStyle::Code => "`".to_string(),
             TextStyle::Strikethrough => "~~".to_string(),
             TextStyle::Link { url } => format!("]({})", url),
+            TextStyle::Image { url } => format!("]({})", url),
         }
     }
 }
@@ -316,6 +319,7 @@ impl RichText {
                         TextStyle::Code => "<code>",
                         TextStyle::Strikethrough => "<s>",
                         TextStyle::Link { .. } => "<a>",
+                        TextStyle::Image { .. } => "<img>",
                     });
                 }
                 result.push_str(&chunk.text);
@@ -327,6 +331,7 @@ impl RichText {
                         TextStyle::Code => "</code>",
                         TextStyle::Strikethrough => "</s>",
                         TextStyle::Link { .. } => "</a>",
+                        TextStyle::Image { .. } => "</img>",
                     });
                 }
             }
@@ -406,6 +411,10 @@ impl RichText {
                             });
                         }
                         TextStyle::Link { .. } => {
+                            style.color = Some(theme.cyan.into());
+                        }
+                        TextStyle::Image { .. } => {
+                            // Style images similar to links
                             style.color = Some(theme.cyan.into());
                         }
                     }

@@ -477,6 +477,7 @@ impl EditorState {
                 TextStyle::Code => 'C',
                 TextStyle::Strikethrough => 'S',
                 TextStyle::Link { .. } => 'L',
+                TextStyle::Image { .. } => 'G', // G for graphic
             };
             indicator.push(ch);
         }
