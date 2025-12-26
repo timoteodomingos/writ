@@ -661,8 +661,27 @@ impl EditorState {
                 .text
                 .delete_range(self.cursor.offset - 1, self.cursor.offset);
             self.cursor.offset -= 1;
+        } else {
+            // At start of block - merge with previous block
+            if let Some(prev_key) = self.previous_block_key() {
+                // Get the length of the previous block (cursor will go here)
+                let prev_len = self.document.blocks[prev_key].text.len();
+
+                // Get the current block's text
+                let current_text = self.document.blocks[self.cursor.block_key].text.clone();
+
+                // Append current block's text to previous block
+                self.document.blocks[prev_key].text.append(current_text);
+
+                // Remove current block
+                let current_key = self.cursor.block_key;
+                self.document.remove_block(current_key);
+
+                // Move cursor to end of previous block's original text
+                self.cursor.block_key = prev_key;
+                self.cursor.offset = prev_len;
+            }
         }
-        // TODO: At start of block - merge with previous block
     }
 
     fn delete(&mut self) {
@@ -673,8 +692,23 @@ impl EditorState {
             block
                 .text
                 .delete_range(self.cursor.offset, self.cursor.offset + 1);
+        } else {
+            // At end of block - merge with next block
+            if let Some(next_key) = self.next_block_key() {
+                // Get the next block's text
+                let next_text = self.document.blocks[next_key].text.clone();
+
+                // Append next block's text to current block
+                self.document.blocks[self.cursor.block_key]
+                    .text
+                    .append(next_text);
+
+                // Remove next block
+                self.document.remove_block(next_key);
+
+                // Cursor stays in same position
+            }
         }
-        // TODO: At end of block - merge with next block
     }
 
     fn enter(&mut self) {

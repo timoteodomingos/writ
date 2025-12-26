@@ -95,55 +95,23 @@ impl Render for Editor {
             .enumerate()
             .map(|(block_idx, block_key)| {
                 let block_key = *block_key;
-                let block = &self.state.document.blocks[block_key];
+                let doc_block = &self.state.document.blocks[block_key];
                 let is_cursor_block = block_key == self.state.cursor.block_key;
-                let cursor_offset = if is_cursor_block {
-                    Some(self.state.cursor.offset)
-                } else {
-                    None
-                };
 
-                // Get pending marker text for cursor block
-                let pending_marker = if is_cursor_block {
-                    let marker_text = self.state.pending_marker_text();
-                    if marker_text.is_empty() {
-                        None
-                    } else {
-                        Some(marker_text.to_string())
-                    }
-                } else {
-                    None
-                };
-
-                // Get pending block marker text for cursor block
-                let pending_block_marker = if is_cursor_block {
-                    self.state.pending_block_marker_text()
-                } else {
-                    None
-                };
-
-                // Get heading level if this is a heading block
-                let heading_level = match &block.kind {
-                    crate::document::BlockKind::Heading { level, .. } => Some(*level),
-                    _ => None,
-                };
-
-                let plain_text: String =
-                    block.text.chunks.iter().map(|c| c.text.as_str()).collect();
-                let highlights = block.text.to_highlights(theme);
-
-                Block {
+                let mut block = Block::from_document_block(
                     block_idx,
                     block_key,
-                    plain_text,
-                    highlights,
-                    cursor_offset,
-                    pending_marker,
-                    pending_block_marker,
-                    heading_level,
-                    foreground_color: theme.foreground,
-                    editor: entity.clone(),
+                    doc_block,
+                    theme,
+                    entity.clone(),
+                );
+
+                // Mark as cursor block if this is where the cursor is
+                if is_cursor_block {
+                    block = block.with_cursor();
                 }
+
+                block
             })
             .collect();
 

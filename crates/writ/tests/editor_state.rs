@@ -702,3 +702,126 @@ fn test_enter_clears_block_marker() {
     state.apply(EditorAction::Enter);
     assert!(state.block_style.pending_marker.is_none());
 }
+
+// ============================================================================
+// Block Merge Tests
+// ============================================================================
+
+#[test]
+fn test_backspace_merges_with_previous_block() {
+    let mut state = EditorState::from_markdown("First\n\nSecond");
+    assert_eq!(state.to_debug_string(), "[|]First\nSecond");
+
+    // Move to start of second block
+    state.apply(EditorAction::MoveCursor(Direction::Down));
+    assert_eq!(state.to_debug_string(), "First\n[|]Second");
+
+    // Backspace should merge with previous block
+    state.apply(EditorAction::Backspace);
+    assert_eq!(state.to_debug_string(), "First[|]Second");
+
+    // Should now be a single block
+    assert_eq!(state.document.block_order.len(), 1);
+}
+
+#[test]
+fn test_backspace_merge_cursor_position() {
+    let mut state = EditorState::from_markdown("ABC\n\nDEF");
+
+    // Move to start of second block
+    state.apply(EditorAction::MoveCursor(Direction::Down));
+
+    // Backspace - cursor should be at position 3 (after "ABC")
+    state.apply(EditorAction::Backspace);
+
+    assert_eq!(state.cursor.offset, 3);
+    assert_eq!(state.to_debug_string(), "ABC[|]DEF");
+}
+
+#[test]
+fn test_delete_merges_with_next_block() {
+    let mut state = EditorState::from_markdown("First\n\nSecond");
+
+    // Move to end of first block
+    state.apply(EditorAction::MoveCursor(Direction::End));
+    assert_eq!(state.to_debug_string(), "First[|]\nSecond");
+
+    // Delete should merge with next block
+    state.apply(EditorAction::Delete);
+    assert_eq!(state.to_debug_string(), "First[|]Second");
+
+    // Should now be a single block
+    assert_eq!(state.document.block_order.len(), 1);
+}
+
+#[test]
+fn test_delete_merge_cursor_stays() {
+    let mut state = EditorState::from_markdown("ABC\n\nDEF");
+
+    // Move to end of first block
+    state.apply(EditorAction::MoveCursor(Direction::End));
+    assert_eq!(state.cursor.offset, 3);
+
+    // Delete - cursor should stay at position 3
+    state.apply(EditorAction::Delete);
+
+    assert_eq!(state.cursor.offset, 3);
+    assert_eq!(state.to_debug_string(), "ABC[|]DEF");
+}
+
+#[test]
+fn test_backspace_at_first_block_does_nothing() {
+    let mut state = EditorState::from_markdown("Hello");
+    assert_eq!(state.to_debug_string(), "[|]Hello");
+
+    // Backspace at start of first block should do nothing
+    state.apply(EditorAction::Backspace);
+    assert_eq!(state.to_debug_string(), "[|]Hello");
+}
+
+#[test]
+fn test_delete_at_last_block_does_nothing() {
+    let mut state = EditorState::from_markdown("Hello");
+    state.apply(EditorAction::MoveCursor(Direction::End));
+    assert_eq!(state.to_debug_string(), "Hello[|]");
+
+    // Delete at end of last block should do nothing
+    state.apply(EditorAction::Delete);
+    assert_eq!(state.to_debug_string(), "Hello[|]");
+}
+
+#[test]
+fn test_backspace_merge_preserves_styles() {
+    let mut state = EditorState::from_markdown("*italic*\n\n**bold**");
+
+    // Move to start of second block
+    state.apply(EditorAction::MoveCursor(Direction::Down));
+
+    // Backspace to merge
+    state.apply(EditorAction::Backspace);
+
+    // Both styles should be preserved
+    let block = &state.document.blocks[state.cursor.block_key];
+    assert_eq!(block.text.to_debug_string(), "<i>italic</i><b>bold</b>");
+}
+
+#[test]
+fn test_enter_then_backspace_roundtrip() {
+    let mut state = EditorState::from_markdown("HelloWorld");
+
+    // Move to middle
+    for _ in 0..5 {
+        state.apply(EditorAction::MoveCursor(Direction::Right));
+    }
+    assert_eq!(state.to_debug_string(), "Hello[|]World");
+
+    // Enter to split
+    state.apply(EditorAction::Enter);
+    assert_eq!(state.to_debug_string(), "Hello\n[|]World");
+    assert_eq!(state.document.block_order.len(), 2);
+
+    // Backspace to merge back
+    state.apply(EditorAction::Backspace);
+    assert_eq!(state.to_debug_string(), "Hello[|]World");
+    assert_eq!(state.document.block_order.len(), 1);
+}

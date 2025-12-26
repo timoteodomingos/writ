@@ -4,23 +4,58 @@ use gpui::{
 };
 use slotmap::DefaultKey;
 
+use crate::document::BlockKind;
+use crate::theme::Theme;
+
 use super::{Editor, EditorAction};
 
 /// A view for rendering a single block of text with cursor
 pub struct Block {
     pub block_idx: usize,
     pub block_key: DefaultKey,
+    pub kind: BlockKind,
     pub plain_text: String,
     pub highlights: Vec<(std::ops::Range<usize>, HighlightStyle)>,
-    pub cursor_offset: Option<usize>,
-    /// Pending inline marker text to show at cursor (e.g., "*" or "**")
-    pub pending_marker: Option<String>,
-    /// Pending block marker text to show at start of line (e.g., "# " or "## ")
-    pub pending_block_marker: Option<String>,
-    /// Heading level (1-6) if this is a heading block, None for paragraphs
-    pub heading_level: Option<usize>,
+    /// Whether this block contains the cursor (offset and pending markers read from editor state)
+    pub has_cursor: bool,
     pub foreground_color: gpui::Rgba,
     pub editor: Entity<Editor>,
+}
+
+impl Block {
+    /// Create an editor Block from a document Block
+    pub fn from_document_block(
+        block_idx: usize,
+        block_key: DefaultKey,
+        doc_block: &crate::document::Block,
+        theme: &Theme,
+        editor: Entity<Editor>,
+    ) -> Self {
+        let plain_text: String = doc_block
+            .text
+            .chunks
+            .iter()
+            .map(|c| c.text.as_str())
+            .collect();
+        let highlights = doc_block.text.to_highlights(theme);
+
+        Self {
+            block_idx,
+            block_key,
+            kind: doc_block.kind.clone(),
+            plain_text,
+            highlights,
+            has_cursor: false,
+            foreground_color: theme.foreground,
+            editor,
+        }
+    }
+
+    /// Mark this block as containing the cursor
+    pub fn with_cursor(mut self) -> Self {
+        self.has_cursor = true;
+        self
+    }
 }
 
 impl IntoElement for Block {
@@ -35,12 +70,16 @@ impl IntoElement for Block {
         let layout_for_prepaint = text_layout.clone();
 
         let editor_for_click = self.editor.clone();
+        let editor_for_prepaint = self.editor.clone();
         let block_key = self.block_key;
-        let cursor_offset = self.cursor_offset;
-        let pending_marker = self.pending_marker;
-        let pending_block_marker = self.pending_block_marker;
-        let heading_level = self.heading_level;
+        let has_cursor = self.has_cursor;
         let foreground_color = self.foreground_color;
+
+        // Extract heading level from kind
+        let heading_level = match &self.kind {
+            BlockKind::Heading { level, .. } => Some(*level),
+            _ => None,
+        };
 
         // Apply heading font size if this is a heading block
         let base_div = gpui::div().id(("block", self.block_idx)).relative();
@@ -65,27 +104,25 @@ impl IntoElement for Block {
                     // Prepaint: store layout and calculate cursor position
                     move |_bounds, _window, cx| {
                         // Store layout for click handling
-                        self.editor.update(cx, |ed, _| {
+                        editor_for_prepaint.update(cx, |ed, _| {
                             ed.block_layouts
                                 .insert(block_key, layout_for_prepaint.clone());
                         });
 
-                        // Calculate cursor position if this block has the cursor
-                        let cursor_pos =
-                            cursor_offset.and_then(|offset| text_layout.position_for_index(offset));
-
-                        // Return data for paint phase
-                        (
-                            cursor_pos,
-                            pending_marker.clone(),
-                            pending_block_marker.clone(),
-                        )
+                        // Get cursor info from editor state if this block has the cursor
+                        if has_cursor {
+                            let editor = editor_for_prepaint.read(cx);
+                            let offset = editor.state.cursor.offset;
+                            let pending_marker = editor.state.pending_marker_text().to_string();
+                            let pending_block_marker = editor.state.pending_block_marker_text();
+                            let cursor_pos = text_layout.position_for_index(offset);
+                            (cursor_pos, Some((pending_marker, pending_block_marker)))
+                        } else {
+                            (None, None)
+                        }
                     },
                     // Paint: draw the cursor and pending markers
-                    move |_bounds,
-                          (cursor_pos, pending_marker, pending_block_marker),
-                          window: &mut gpui::Window,
-                          cx| {
+                    move |_bounds, (cursor_pos, pending_markers), window: &mut gpui::Window, cx| {
                         if let Some(pos) = cursor_pos {
                             // Get line height from window
                             let text_style = window.text_style();
@@ -96,65 +133,67 @@ impl IntoElement for Block {
 
                             let mut cursor_x = pos.x;
 
-                            // Paint pending block marker (dimmed) at start of line if present
-                            if let Some(ref block_marker) = pending_block_marker {
-                                let marker_text: SharedString = block_marker.clone().into();
-                                let run = TextRun {
-                                    len: block_marker.len(),
-                                    font: text_style.font(),
-                                    color: gpui::Hsla {
-                                        h: 0.0,
-                                        s: 0.0,
-                                        l: 0.5,
-                                        a: 0.7,
-                                    },
-                                    background_color: None,
-                                    underline: None,
-                                    strikethrough: None,
-                                };
-                                let shaped_marker = window.text_system().shape_line(
-                                    marker_text,
-                                    font_size,
-                                    &[run],
-                                    None,
-                                );
+                            if let Some((pending_marker, pending_block_marker)) = pending_markers {
+                                // Paint pending block marker (dimmed) at start of line if present
+                                if let Some(block_marker) = pending_block_marker {
+                                    let marker_text: SharedString = block_marker.clone().into();
+                                    let run = TextRun {
+                                        len: block_marker.len(),
+                                        font: text_style.font(),
+                                        color: gpui::Hsla {
+                                            h: 0.0,
+                                            s: 0.0,
+                                            l: 0.5,
+                                            a: 0.7,
+                                        },
+                                        background_color: None,
+                                        underline: None,
+                                        strikethrough: None,
+                                    };
+                                    let shaped_marker = window.text_system().shape_line(
+                                        marker_text,
+                                        font_size,
+                                        &[run],
+                                        None,
+                                    );
 
-                                // Paint at start of line
-                                let _ = shaped_marker.paint(pos, line_height, window, cx);
+                                    // Paint at start of line
+                                    let _ = shaped_marker.paint(pos, line_height, window, cx);
 
-                                // Move cursor position after the block marker
-                                cursor_x = pos.x + shaped_marker.width;
-                            }
+                                    // Move cursor position after the block marker
+                                    cursor_x = pos.x + shaped_marker.width;
+                                }
 
-                            // Paint pending inline marker (dimmed) if present
-                            if let Some(ref marker) = pending_marker {
-                                // Shape the marker text
-                                let marker_text: SharedString = marker.clone().into();
-                                let run = TextRun {
-                                    len: marker.len(),
-                                    font: text_style.font(),
-                                    color: gpui::Hsla {
-                                        h: 0.0,
-                                        s: 0.0,
-                                        l: 0.5,
-                                        a: 0.7,
-                                    },
-                                    background_color: None,
-                                    underline: None,
-                                    strikethrough: None,
-                                };
-                                let shaped_marker = window.text_system().shape_line(
-                                    marker_text,
-                                    font_size,
-                                    &[run],
-                                    None,
-                                );
+                                // Paint pending inline marker (dimmed) if present
+                                if !pending_marker.is_empty() {
+                                    // Shape the marker text
+                                    let marker_text: SharedString = pending_marker.clone().into();
+                                    let run = TextRun {
+                                        len: pending_marker.len(),
+                                        font: text_style.font(),
+                                        color: gpui::Hsla {
+                                            h: 0.0,
+                                            s: 0.0,
+                                            l: 0.5,
+                                            a: 0.7,
+                                        },
+                                        background_color: None,
+                                        underline: None,
+                                        strikethrough: None,
+                                    };
+                                    let shaped_marker = window.text_system().shape_line(
+                                        marker_text,
+                                        font_size,
+                                        &[run],
+                                        None,
+                                    );
 
-                                // Paint the marker at cursor position
-                                let _ = shaped_marker.paint(pos, line_height, window, cx);
+                                    // Paint the marker at cursor position
+                                    let _ = shaped_marker.paint(pos, line_height, window, cx);
 
-                                // Move cursor position after the marker
-                                cursor_x = pos.x + shaped_marker.width;
+                                    // Move cursor position after the marker
+                                    cursor_x = pos.x + shaped_marker.width;
+                                }
                             }
 
                             // Paint cursor bar after any pending marker

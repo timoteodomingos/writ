@@ -231,4 +231,21 @@ impl Document {
 
         new_key
     }
+
+    /// Remove a block from the document
+    pub fn remove_block(&mut self, block_key: DefaultKey) {
+        // Find and remove from block_order
+        let index_to_remove = self
+            .block_order
+            .iter()
+            .find(|(_, k)| **k == block_key)
+            .map(|(idx, _)| idx.clone());
+
+        if let Some(index) = index_to_remove {
+            self.block_order.remove(&index);
+        }
+
+        // Remove from blocks SlotMap
+        self.blocks.remove(block_key);
+    }
 }
