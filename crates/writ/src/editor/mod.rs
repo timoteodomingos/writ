@@ -154,6 +154,10 @@ impl Render for Editor {
                     if let Some(block_marker) = self.state.pending_block_marker_text() {
                         block = block.with_pending_block_marker(block_marker);
                     }
+
+                    if let Some(indicator) = self.state.active_styles_indicator() {
+                        block = block.with_active_styles_indicator(indicator);
+                    }
                 }
 
                 // Create on_layout callback that stores layout in editor

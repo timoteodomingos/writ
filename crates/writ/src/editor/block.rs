@@ -29,6 +29,8 @@ pub struct Block {
     pub pending_block_marker: Option<String>,
     /// Pending inline marker (e.g. "**" for bold)
     pub pending_inline_marker: Option<String>,
+    /// Active styles indicator (e.g. "BI" for bold+italic)
+    pub active_styles_indicator: Option<String>,
     /// Callback when block is clicked, receives character index
     pub on_click: Option<ClickCallback>,
     /// Callback to report layout after prepaint
@@ -60,6 +62,7 @@ impl Block {
             cursor_offset: None,
             pending_block_marker: None,
             pending_inline_marker: None,
+            active_styles_indicator: None,
             on_click: None,
             on_layout: None,
         }
@@ -80,6 +83,12 @@ impl Block {
     /// Set pending inline marker
     pub fn with_pending_inline_marker(mut self, marker: String) -> Self {
         self.pending_inline_marker = Some(marker);
+        self
+    }
+
+    /// Set active styles indicator
+    pub fn with_active_styles_indicator(mut self, indicator: String) -> Self {
+        self.active_styles_indicator = Some(indicator);
         self
     }
 
@@ -110,6 +119,7 @@ impl IntoElement for Block {
         let cursor_offset = self.cursor_offset;
         let pending_block_marker = self.pending_block_marker.clone();
         let pending_inline_marker = self.pending_inline_marker.clone();
+        let active_styles_indicator = self.active_styles_indicator.clone();
         let on_layout = self.on_layout.clone();
         let on_click = self.on_click.clone();
         let layout_for_click = layout_for_prepaint.clone();
@@ -219,6 +229,65 @@ impl IntoElement for Block {
                                 size(px(2.0), line_height),
                             );
                             window.paint_quad(fill(cursor_bounds, self.text_color));
+
+                            // Paint active styles indicator after cursor
+                            if let Some(ref indicator) = active_styles_indicator {
+                                let base_font = text_style.font();
+                                let mut current_x = cursor_x + px(4.0);
+
+                                // Render each character separately with its own styling
+                                for ch in indicator.chars() {
+                                    let (weight, style, strikethrough) = match ch {
+                                        'B' => (FontWeight::BOLD, gpui::FontStyle::Normal, None),
+                                        'I' => {
+                                            (FontWeight::default(), gpui::FontStyle::Italic, None)
+                                        }
+                                        'S' => (
+                                            FontWeight::default(),
+                                            gpui::FontStyle::Normal,
+                                            Some(gpui::StrikethroughStyle {
+                                                thickness: px(1.0),
+                                                color: Some(self.marker_color.into()),
+                                            }),
+                                        ),
+                                        _ => (FontWeight::default(), gpui::FontStyle::Normal, None),
+                                    };
+
+                                    let font = gpui::Font {
+                                        family: base_font.family.clone(),
+                                        features: base_font.features.clone(),
+                                        fallbacks: base_font.fallbacks.clone(),
+                                        weight,
+                                        style,
+                                    };
+
+                                    let char_text: SharedString = ch.to_string().into();
+                                    let run = TextRun {
+                                        len: ch.len_utf8(),
+                                        font,
+                                        color: self.marker_color.into(),
+                                        background_color: None,
+                                        underline: None,
+                                        strikethrough,
+                                    };
+
+                                    let shaped_char = window.text_system().shape_line(
+                                        char_text,
+                                        font_size,
+                                        &[run],
+                                        None,
+                                    );
+
+                                    let _ = shaped_char.paint(
+                                        gpui::point(current_x, pos.y),
+                                        line_height,
+                                        window,
+                                        cx,
+                                    );
+
+                                    current_x = current_x + shaped_char.width;
+                                }
+                            }
                         }
                     },
                 )

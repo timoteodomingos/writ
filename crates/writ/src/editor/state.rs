@@ -329,6 +329,26 @@ impl EditorState {
         self.block_style.pending_marker.as_ref().map(|m| m.as_str())
     }
 
+    /// Get an indicator string for active styles (e.g. "BI" for bold+italic)
+    pub fn active_styles_indicator(&self) -> Option<String> {
+        if self.inline_style.open_styles.is_empty() {
+            return None;
+        }
+
+        let mut indicator = String::new();
+        for open_style in &self.inline_style.open_styles {
+            let ch = match open_style.style {
+                TextStyle::Bold => 'B',
+                TextStyle::Italic => 'I',
+                TextStyle::Code => 'C',
+                TextStyle::Strikethrough => 'S',
+                TextStyle::Link { .. } => 'L',
+            };
+            indicator.push(ch);
+        }
+        Some(indicator)
+    }
+
     /// Get current active styles from the open_styles stack
     fn current_styles(&self) -> StyleSet {
         StyleSet {
