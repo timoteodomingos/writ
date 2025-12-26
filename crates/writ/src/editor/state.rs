@@ -95,33 +95,40 @@ impl PendingMarkerKind {
 
     /// Convert to open styles (if this is a valid style marker)
     /// Returns None for invalid markers, or Some with a list of styles to open
-    fn to_open_styles(&self) -> Option<Vec<OpenStyle>> {
+    /// The offset is the cursor position where the style was opened
+    fn to_open_styles(&self, offset: usize) -> Option<Vec<OpenStyle>> {
         match self {
             PendingMarkerKind::SingleAsterisk => Some(vec![OpenStyle {
                 style: TextStyle::Italic,
                 marker: "*".to_string(),
+                opened_at: offset,
             }]),
             PendingMarkerKind::DoubleAsterisk => Some(vec![OpenStyle {
                 style: TextStyle::Bold,
                 marker: "**".to_string(),
+                opened_at: offset,
             }]),
             PendingMarkerKind::TripleAsterisk => Some(vec![
                 OpenStyle {
                     style: TextStyle::Bold,
                     marker: "**".to_string(),
+                    opened_at: offset,
                 },
                 OpenStyle {
                     style: TextStyle::Italic,
                     marker: "*".to_string(),
+                    opened_at: offset,
                 },
             ]),
             PendingMarkerKind::Backtick => Some(vec![OpenStyle {
                 style: TextStyle::Code,
                 marker: "`".to_string(),
+                opened_at: offset,
             }]),
             PendingMarkerKind::DoubleTilde => Some(vec![OpenStyle {
                 style: TextStyle::Strikethrough,
                 marker: "~~".to_string(),
+                opened_at: offset,
             }]),
             PendingMarkerKind::SingleTilde => None, // Single ~ is not a valid style
         }
@@ -164,6 +171,8 @@ impl PendingMarker {
 pub struct OpenStyle {
     pub style: TextStyle,
     pub marker: String,
+    /// The cursor offset where this style was opened
+    pub opened_at: usize,
 }
 
 /// Inline styling state for the editor
@@ -668,7 +677,7 @@ impl EditorState {
 
             if pending.is_opening {
                 // Opening marker - always open new styles (never close)
-                if let Some(open_styles) = pending.kind.to_open_styles() {
+                if let Some(open_styles) = pending.kind.to_open_styles(self.cursor.offset) {
                     for style in open_styles {
                         self.inline_style.open_styles.push(style);
                     }
@@ -753,10 +762,16 @@ impl EditorState {
             return;
         }
 
-        // If no pending marker but there are open styles, pop the most recent one
-        if !self.inline_style.open_styles.is_empty() && self.cursor.offset == 0 {
-            self.inline_style.open_styles.pop();
-            return;
+        // Remove any open styles where cursor would reach where they were opened
+        // (i.e., when new_offset == opened_at, the style should be removed)
+        if self.cursor.offset > 0 {
+            let new_offset = self.cursor.offset - 1;
+            self.inline_style
+                .open_styles
+                .retain(|style| new_offset > style.opened_at);
+        } else {
+            // At offset 0, all open styles should be removed
+            self.inline_style.open_styles.clear();
         }
 
         // At offset 0 with heading block, convert to paragraph
@@ -776,9 +791,40 @@ impl EditorState {
                 .delete_range(self.cursor.offset - 1, self.cursor.offset);
             self.cursor.offset -= 1;
 
-            // Clear open styles - when deleting, we're editing not continuing to type
-            // The user can re-open styles by typing new markers
-            self.inline_style.open_styles.clear();
+            // Pick up styles from the text we're now in (if any)
+            // This allows continuing to type in the same style when backspacing into styled text
+            // We look at the character to the LEFT of cursor (cursor.offset - 1) since that's
+            // the text we're "in" after backspacing
+            if self.cursor.offset > 0 {
+                let styles_at_cursor = block.text.styles_at(self.cursor.offset - 1);
+                for style in styles_at_cursor.styles.iter().cloned() {
+                    // Only add if we don't already have this style open
+                    if !self
+                        .inline_style
+                        .open_styles
+                        .iter()
+                        .any(|os| os.style == style)
+                    {
+                        self.inline_style.open_styles.push(OpenStyle {
+                            style,
+                            marker: String::new(), // No marker - inherited from existing text
+                            opened_at: self.cursor.offset,
+                        });
+                    }
+                }
+
+                // Remove inherited open styles (those with empty marker) that are no longer
+                // backed by styled text. Keep explicitly opened styles (non-empty marker)
+                // until we backspace before their opened_at position.
+                self.inline_style.open_styles.retain(|os| {
+                    !os.marker.is_empty() || styles_at_cursor.styles.contains(&os.style)
+                });
+            } else {
+                // At offset 0, remove inherited styles but keep explicitly opened ones
+                self.inline_style
+                    .open_styles
+                    .retain(|os| !os.marker.is_empty());
+            }
 
             // If we've deleted all text in the block, convert heading to paragraph
             if block.text.is_empty()

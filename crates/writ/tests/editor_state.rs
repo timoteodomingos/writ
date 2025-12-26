@@ -1,3 +1,4 @@
+use writ::document::TextStyle;
 use writ::editor::{Direction, EditorAction, EditorState};
 
 #[test]
@@ -349,30 +350,102 @@ fn test_mixed_plain_and_styled() {
 }
 
 #[test]
-fn test_backspace_clears_open_styles_when_block_empty() {
+fn test_backspace_removes_style_when_reaching_open_position() {
     let mut state = EditorState::from_markdown("x");
     state.apply(EditorAction::Delete);
-    // Open italic style
+    // Open italic style at offset 0
     state.apply(EditorAction::InsertText("*".to_string()));
     state.apply(EditorAction::InsertText("a".to_string()));
     assert!(!state.inline_style.open_styles.is_empty());
-    // Delete the 'a' - block becomes empty, styles should be cleared
+    // Delete the 'a' - cursor goes to offset 0 where style was opened
+    // Style should be removed since cursor reached the open position
     state.apply(EditorAction::Backspace);
     assert_eq!(state.to_debug_string(), "[|]");
     assert!(state.inline_style.open_styles.is_empty());
 }
 
 #[test]
-fn test_backspace_clears_all_open_styles_when_block_empty() {
-    let mut state = EditorState::from_markdown("x");
-    state.apply(EditorAction::Delete);
-    // Open bold then italic: ***
-    state.apply(EditorAction::InsertText("**".to_string()));
+fn test_backspace_keeps_style_until_reaching_open_position() {
+    // Start with empty document
+    let mut state = EditorState::from_markdown("");
+    // Type "x " - cursor at offset 2
+    state.apply(EditorAction::InsertText("x ".to_string()));
+    assert_eq!(state.cursor.offset, 2);
+    // Now type "*ab" - style opens at offset 2, "ab" inserted, cursor moves to 4
     state.apply(EditorAction::InsertText("*".to_string()));
-    state.apply(EditorAction::InsertText("a".to_string()));
-    assert_eq!(state.inline_style.open_styles.len(), 2);
-    // Delete the 'a' - block becomes empty, all styles should be cleared at once
+    state.apply(EditorAction::InsertText("ab".to_string()));
+    // Text is "x ab" (4 chars), cursor at offset 4, style opened at offset 2
+    assert_eq!(state.cursor.offset, 4);
+    assert_eq!(state.inline_style.open_styles.len(), 1);
+    assert_eq!(state.inline_style.open_styles[0].opened_at, 2);
+    // Delete 'b' - cursor goes to offset 3, style at 2, so kept (3 > 2)
     state.apply(EditorAction::Backspace);
+    assert_eq!(state.cursor.offset, 3);
+    assert_eq!(state.inline_style.open_styles.len(), 1);
+    // Delete 'a' - cursor goes to offset 2, which equals where style opened
+    // Style should be removed
+    state.apply(EditorAction::Backspace);
+    assert_eq!(state.cursor.offset, 2);
+    assert_eq!(state.inline_style.open_styles.len(), 0);
+}
+
+#[test]
+fn test_backspace_into_styled_text_inherits_style() {
+    // Create text with italic in the middle: "a *italic* b"
+    // After parsing: "a " (plain) + "italic" (italic) + " b" (plain)
+    // Positions: "a " = 0-1, "italic" = 2-7, " b" = 8-9
+    let mut state = EditorState::from_markdown("a *italic* b");
+    assert_eq!(state.to_styled_debug_string(), "a <i>italic</i> b");
+
+    // Cursor starts at offset 0, move to end
+    state.apply(EditorAction::MoveCursor(Direction::End));
+    // Text is "a italic b" (10 chars), cursor at offset 10
+    assert_eq!(state.cursor.offset, 10);
+    // No open styles yet (cursor movement clears them)
+    assert!(state.inline_style.open_styles.is_empty());
+
+    // Backspace to delete 'b' - cursor goes to 9
+    // Character to left (pos 8) is ' ' which is plain
+    state.apply(EditorAction::Backspace);
+    assert_eq!(state.cursor.offset, 9);
+    assert!(state.inline_style.open_styles.is_empty());
+
+    // Backspace to delete ' ' (the space after italic) - cursor goes to 8
+    // Character to left (pos 7) is 'c' which is italic!
+    state.apply(EditorAction::Backspace);
+    assert_eq!(state.cursor.offset, 8);
+    // Should have picked up italic style from 'c'
+    assert_eq!(state.inline_style.open_styles.len(), 1);
+    assert_eq!(state.inline_style.open_styles[0].style, TextStyle::Italic);
+
+    // Type more text - should be italic
+    state.apply(EditorAction::InsertText("X".to_string()));
+    assert_eq!(state.to_styled_debug_string(), "a <i>italicX</i>");
+}
+
+#[test]
+fn test_backspace_into_styled_text_then_past_it() {
+    // Start fresh and type: "hello *world"
+    let mut state = EditorState::from_markdown("");
+    state.apply(EditorAction::InsertText("hello ".to_string()));
+    state.apply(EditorAction::InsertText("*".to_string()));
+    state.apply(EditorAction::InsertText("world".to_string()));
+    // "hello world" with italic on "world", cursor at 11
+    assert_eq!(state.cursor.offset, 11);
+    assert_eq!(state.inline_style.open_styles.len(), 1);
+    assert_eq!(state.inline_style.open_styles[0].opened_at, 6);
+
+    // Backspace 4 times to delete "orld" - should still have italic open (cursor at 7 > 6)
+    for _ in 0..4 {
+        state.apply(EditorAction::Backspace);
+    }
+    assert_eq!(state.cursor.offset, 7);
+    assert_eq!(state.inline_style.open_styles.len(), 1);
+
+    // Backspace once more to delete "w" - cursor goes to 6, which equals where italic opened
+    // Italic style should be removed
+    state.apply(EditorAction::Backspace);
+    assert_eq!(state.cursor.offset, 6);
     assert_eq!(state.inline_style.open_styles.len(), 0);
 }
 
