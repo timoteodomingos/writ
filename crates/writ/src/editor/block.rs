@@ -1,9 +1,9 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, Bounds, FontWeight, HighlightStyle, IntoElement, MouseButton, MouseDownEvent, Rgba,
-    SharedString, StyledText, TextLayout, TextRun, Window, canvas, fill, prelude::*, px, rems,
-    size,
+    App, BorderStyle, Bounds, FontWeight, HighlightStyle, IntoElement, MouseButton, MouseDownEvent,
+    Pixels, Rgba, SharedString, StyledText, TextLayout, TextRun, Window, canvas, fill, prelude::*,
+    px, quad, rems, size,
 };
 
 use crate::document::BlockKind;
@@ -23,6 +23,7 @@ pub struct Block {
     pub highlights: Vec<(std::ops::Range<usize>, HighlightStyle)>,
     pub text_color: Rgba,
     pub marker_color: Rgba,
+    pub selection_color: Rgba,
     /// Cursor offset if this block contains the cursor
     pub cursor_offset: Option<usize>,
     /// Pending block marker (e.g. "## " for heading)
@@ -59,6 +60,7 @@ impl Block {
             highlights,
             text_color: theme.foreground,
             marker_color: theme.comment,
+            selection_color: theme.selection,
             cursor_offset: None,
             pending_block_marker: None,
             pending_inline_marker: None,
@@ -234,12 +236,18 @@ impl IntoElement for Block {
                             if let Some(ref indicator) = active_styles_indicator {
                                 let base_font = text_style.font();
 
+                                // Use smaller font for tooltip
+                                let tooltip_font_size = font_size * 0.75;
+                                let tooltip_line_height = tooltip_font_size * 1.2;
+
                                 // First, measure total width of indicator by shaping all chars
                                 let mut shaped_chars = Vec::new();
                                 let mut total_width = px(0.0);
                                 let padding_x = px(4.0);
-                                let padding_y = px(2.0);
+                                let padding_y = px(1.0);
                                 let tooltip_gap = px(4.0); // Gap between tooltip and cursor
+                                let border_width = px(1.0);
+                                let corner_radius = px(3.0);
 
                                 for ch in indicator.chars() {
                                     let (weight, style, strikethrough) = match ch {
@@ -252,7 +260,7 @@ impl IntoElement for Block {
                                             gpui::FontStyle::Normal,
                                             Some(gpui::StrikethroughStyle {
                                                 thickness: px(1.0),
-                                                color: Some(self.marker_color.into()),
+                                                color: Some(self.text_color.into()),
                                             }),
                                         ),
                                         _ => (FontWeight::default(), gpui::FontStyle::Normal, None),
@@ -278,7 +286,7 @@ impl IntoElement for Block {
 
                                     let shaped_char = window.text_system().shape_line(
                                         char_text,
-                                        font_size,
+                                        tooltip_font_size,
                                         &[run],
                                         None,
                                     );
@@ -288,17 +296,29 @@ impl IntoElement for Block {
                                 }
 
                                 // Calculate tooltip position (above cursor, centered on cursor)
-                                let tooltip_height = line_height + padding_y * 2.0;
+                                let tooltip_height = tooltip_line_height + padding_y * 2.0;
                                 let tooltip_width = total_width + padding_x * 2.0;
                                 let tooltip_x = cursor_x - tooltip_width / 2.0 + px(1.0); // Center on cursor
                                 let tooltip_y = pos.y - tooltip_height - tooltip_gap;
 
-                                // Paint background rectangle
+                                // Paint background with rounded corners and border
                                 let bg_bounds = Bounds::new(
                                     gpui::point(tooltip_x, tooltip_y),
                                     size(tooltip_width, tooltip_height),
                                 );
-                                window.paint_quad(fill(bg_bounds, self.marker_color));
+                                window.paint_quad(quad(
+                                    bg_bounds,
+                                    corner_radius,
+                                    self.marker_color,
+                                    gpui::Edges::<Pixels> {
+                                        top: border_width,
+                                        right: border_width,
+                                        bottom: border_width,
+                                        left: border_width,
+                                    },
+                                    self.selection_color,
+                                    BorderStyle::Solid,
+                                ));
 
                                 // Paint each styled character
                                 let mut current_x = tooltip_x + padding_x;
@@ -307,7 +327,7 @@ impl IntoElement for Block {
                                 for shaped_char in shaped_chars {
                                     let _ = shaped_char.paint(
                                         gpui::point(current_x, text_y),
-                                        line_height,
+                                        tooltip_line_height,
                                         window,
                                         cx,
                                     );
