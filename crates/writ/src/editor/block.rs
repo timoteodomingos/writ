@@ -1,7 +1,7 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, Bounds, FontWeight, HighlightStyle, IntoElement, MouseButton, MouseDownEvent,
+    App, Bounds, FontWeight, HighlightStyle, IntoElement, MouseButton, MouseDownEvent, Rgba,
     SharedString, StyledText, TextLayout, TextRun, Window, canvas, fill, prelude::*, px, rems,
     size,
 };
@@ -21,7 +21,8 @@ pub struct Block {
     pub kind: BlockKind,
     pub plain_text: String,
     pub highlights: Vec<(std::ops::Range<usize>, HighlightStyle)>,
-    pub foreground_color: gpui::Rgba,
+    pub text_color: Rgba,
+    pub marker_color: Rgba,
     /// Cursor offset if this block contains the cursor
     pub cursor_offset: Option<usize>,
     /// Pending block marker (e.g. "## " for heading)
@@ -54,7 +55,8 @@ impl Block {
             kind: doc_block.kind.clone(),
             plain_text,
             highlights,
-            foreground_color: theme.foreground,
+            text_color: theme.foreground,
+            marker_color: theme.comment,
             cursor_offset: None,
             pending_block_marker: None,
             pending_inline_marker: None,
@@ -108,7 +110,6 @@ impl IntoElement for Block {
         let cursor_offset = self.cursor_offset;
         let pending_block_marker = self.pending_block_marker.clone();
         let pending_inline_marker = self.pending_inline_marker.clone();
-        let foreground_color = self.foreground_color;
         let on_layout = self.on_layout.clone();
         let on_click = self.on_click.clone();
         let layout_for_click = layout_for_prepaint.clone();
@@ -142,7 +143,7 @@ impl IntoElement for Block {
                     // Prepaint: report layout and calculate cursor position
                     move |_bounds, window, cx| {
                         // Report layout via callback
-                        if let Some(ref on_layout) = on_layout {
+                        if let Some(on_layout) = &on_layout {
                             on_layout(layout_for_prepaint.clone(), window, cx);
                         }
 
@@ -167,12 +168,7 @@ impl IntoElement for Block {
                                 let run = TextRun {
                                     len: block_marker.len(),
                                     font: text_style.font(),
-                                    color: gpui::Hsla {
-                                        h: 0.0,
-                                        s: 0.0,
-                                        l: 0.5,
-                                        a: 0.7,
-                                    },
+                                    color: self.marker_color.into(),
                                     background_color: None,
                                     underline: None,
                                     strikethrough: None,
@@ -198,12 +194,7 @@ impl IntoElement for Block {
                                 let run = TextRun {
                                     len: inline_marker.len(),
                                     font: text_style.font(),
-                                    color: gpui::Hsla {
-                                        h: 0.0,
-                                        s: 0.0,
-                                        l: 0.5,
-                                        a: 0.7,
-                                    },
+                                    color: self.marker_color.into(),
                                     background_color: None,
                                     underline: None,
                                     strikethrough: None,
@@ -227,7 +218,7 @@ impl IntoElement for Block {
                                 gpui::point(cursor_x, pos.y),
                                 size(px(2.0), line_height),
                             );
-                            window.paint_quad(fill(cursor_bounds, foreground_color));
+                            window.paint_quad(fill(cursor_bounds, self.text_color));
                         }
                     },
                 )
@@ -237,7 +228,7 @@ impl IntoElement for Block {
             .on_mouse_down(
                 MouseButton::Left,
                 move |event: &MouseDownEvent, window, cx: &mut App| {
-                    if let Some(ref on_click) = on_click {
+                    if let Some(on_click) = &on_click {
                         // Use the layout from the styled text to get character index
                         let char_index = match layout_for_click.index_for_position(event.position) {
                             Ok(idx) => idx,

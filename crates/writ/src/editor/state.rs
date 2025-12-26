@@ -1,6 +1,9 @@
 use slotmap::DefaultKey;
+use strum::IntoDiscriminant;
 
-use crate::document::{Block, BlockKind, Document, RichText, StyleSet, TextStyle};
+use crate::document::{
+    Block, BlockKind, BlockKindDiscriminants, Document, RichText, StyleSet, TextStyle,
+};
 
 /// Cursor position within the document
 #[derive(Debug, Clone, PartialEq)]
@@ -648,7 +651,7 @@ impl EditorState {
         // At offset 0 with heading block, convert to paragraph
         if self.cursor.offset == 0 {
             let block = &mut self.document.blocks[self.cursor.block_key];
-            if let BlockKind::Heading { .. } = block.kind {
+            if block.kind.discriminant() != BlockKindDiscriminants::Paragraph {
                 block.kind = BlockKind::Paragraph { parent: None };
                 return;
             }

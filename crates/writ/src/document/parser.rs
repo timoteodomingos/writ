@@ -108,7 +108,6 @@ impl Parser {
 
     pub fn parse(&mut self, parser: MarkdownParser) -> Document {
         for event in parser {
-            println!("Event: {:#?}", event);
             match event {
                 Event::Start(tag) => match tag {
                     Tag::List(start) => {
