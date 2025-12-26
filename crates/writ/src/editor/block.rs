@@ -24,6 +24,7 @@ pub struct Block {
     pub text_color: Rgba,
     pub marker_color: Rgba,
     pub selection_color: Rgba,
+    pub cursor_color: Rgba,
     /// Cursor offset if this block contains the cursor
     pub cursor_offset: Option<usize>,
     /// Pending block marker (e.g. "## " for heading)
@@ -61,6 +62,7 @@ impl Block {
             text_color: theme.foreground,
             marker_color: theme.comment,
             selection_color: theme.selection,
+            cursor_color: theme.purple,
             cursor_offset: None,
             pending_block_marker: None,
             pending_inline_marker: None,
@@ -230,7 +232,7 @@ impl IntoElement for Block {
                                 gpui::point(cursor_x, pos.y),
                                 size(px(2.0), line_height),
                             );
-                            window.paint_quad(fill(cursor_bounds, self.text_color));
+                            window.paint_quad(fill(cursor_bounds, self.cursor_color));
 
                             // Paint active styles indicator as floating tooltip above cursor
                             if let Some(ref indicator) = active_styles_indicator {
