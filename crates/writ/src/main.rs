@@ -6,7 +6,7 @@ use gpui::{
 use writ::{
     args::Args,
     editor::{Editor, EditorState},
-    theme,
+    http, theme,
     title_bar::FileInfo,
     window::{CloseWindow, Quit, window_shadow},
 };
@@ -49,7 +49,7 @@ fn main() {
         .expect("Failed to validate arguments");
     let content = load_file(&args.file);
 
-    let app = Application::new();
+    let app = Application::new().with_http_client(http::Client::new());
 
     app.run(move |cx| {
         cx.set_global(theme::dracula());
