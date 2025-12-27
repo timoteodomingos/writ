@@ -481,6 +481,7 @@ impl RichText {
                         }
                         TextStyle::Link { .. } => {
                             style.color = Some(theme.cyan.into());
+                            // Underline is added dynamically on hover in editor/block.rs
                         }
                         TextStyle::Image { .. } => {
                             // Style images similar to links
@@ -496,5 +497,31 @@ impl RichText {
         }
 
         highlights
+    }
+
+    /// Get clickable link ranges with their URLs.
+    /// Returns (byte_range, url) for each link/image in the text.
+    pub fn clickable_links(&self) -> Vec<(Range<usize>, String)> {
+        let mut links = Vec::new();
+        let mut byte_offset = 0;
+
+        for chunk in &self.chunks {
+            let chunk_len = chunk.text.len();
+            let range = byte_offset..(byte_offset + chunk_len);
+
+            for style in &chunk.styles.styles {
+                match style {
+                    TextStyle::Link { url } | TextStyle::Image { url } => {
+                        links.push((range.clone(), url.clone()));
+                        break; // Only one link per chunk
+                    }
+                    _ => {}
+                }
+            }
+
+            byte_offset += chunk_len;
+        }
+
+        links
     }
 }

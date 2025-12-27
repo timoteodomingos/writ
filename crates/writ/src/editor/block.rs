@@ -1,9 +1,9 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, BorderStyle, Bounds, FontWeight, HighlightStyle, IntoElement, MouseButton, MouseDownEvent,
-    Pixels, Rgba, SharedString, StyledText, TextLayout, TextRun, Window, canvas, prelude::*, px,
-    quad, rems, size,
+    App, BorderStyle, Bounds, CursorStyle, FontWeight, HighlightStyle, IntoElement, MouseButton,
+    MouseDownEvent, Pixels, Rgba, SharedString, StyledText, TextLayout, TextRun, Window, canvas,
+    prelude::*, px, quad, rems, size,
 };
 
 use crate::document::BlockKind;
@@ -25,6 +25,7 @@ pub struct Block {
     pub marker_color: Rgba,
     pub selection_color: Rgba,
     pub cursor_color: Rgba,
+    pub link_color: Rgba,
     /// Cursor offset if this block contains the cursor
     pub cursor_offset: Option<usize>,
     /// Pending block marker (e.g. "## " for heading)
@@ -35,6 +36,8 @@ pub struct Block {
     pub active_styles_indicator: Option<String>,
     /// Ranges of link marker characters to highlight in marker color
     pub link_marker_ranges: Vec<std::ops::Range<usize>>,
+    /// Clickable links: (byte_range, url)
+    pub clickable_links: Vec<(std::ops::Range<usize>, String)>,
     /// Callback when block is clicked, receives character index
     pub on_click: Option<ClickCallback>,
     /// Callback to report layout after prepaint
@@ -55,6 +58,7 @@ impl Block {
             .map(|c| c.text.as_str())
             .collect();
         let highlights = doc_block.text.to_highlights(theme);
+        let clickable_links = doc_block.text.clickable_links();
 
         Self {
             block_idx,
@@ -65,11 +69,13 @@ impl Block {
             marker_color: theme.comment,
             selection_color: theme.selection,
             cursor_color: theme.purple,
+            link_color: theme.cyan,
             cursor_offset: None,
             pending_block_marker: None,
             pending_inline_marker: None,
             active_styles_indicator: None,
             link_marker_ranges: Vec::new(),
+            clickable_links,
             on_click: None,
             on_layout: None,
         }
@@ -148,6 +154,10 @@ impl IntoElement for Block {
         let on_layout = self.on_layout.clone();
         let on_click = self.on_click.clone();
         let layout_for_click = layout_for_prepaint.clone();
+        let clickable_links = self.clickable_links.clone();
+        let clickable_links_for_cursor = self.clickable_links.clone();
+        let layout_for_cursor = layout_for_prepaint.clone();
+        let link_color = self.link_color;
 
         // Extract heading level from kind
         let heading_level = match &self.kind {
@@ -172,6 +182,7 @@ impl IntoElement for Block {
         }
 
         sized_div
+            .cursor(CursorStyle::IBeam)
             .child(styled_text)
             .child(
                 canvas(
@@ -392,15 +403,84 @@ impl IntoElement for Block {
             .on_mouse_down(
                 MouseButton::Left,
                 move |event: &MouseDownEvent, window, cx: &mut App| {
+                    // Use the layout from the styled text to get character index
+                    let char_index = match layout_for_click.index_for_position(event.position) {
+                        Ok(idx) => idx,
+                        Err(idx) => idx.min(text_len),
+                    };
+
+                    // Ctrl+click on a link opens it
+                    if event.modifiers.control {
+                        for (range, url) in &clickable_links {
+                            if range.contains(&char_index) {
+                                // Open the URL in the default browser
+                                let _ = open::that(url);
+                                return;
+                            }
+                        }
+                    }
+
+                    // Normal click - set cursor position
                     if let Some(on_click) = &on_click {
-                        // Use the layout from the styled text to get character index
-                        let char_index = match layout_for_click.index_for_position(event.position) {
-                            Ok(idx) => idx,
-                            Err(idx) => idx.min(text_len),
-                        };
                         on_click(char_index, window, cx);
                     }
                 },
+            )
+            .child(
+                // Canvas for hover underline on links (when Ctrl held)
+                canvas(
+                    move |_bounds, _window, _cx| {},
+                    move |_bounds, (), window: &mut Window, _cx| {
+                        let modifiers = window.modifiers();
+                        if !modifiers.control {
+                            return;
+                        }
+
+                        let mouse_pos = window.mouse_position();
+                        let char_index = match layout_for_cursor.index_for_position(mouse_pos) {
+                            Ok(idx) => idx,
+                            Err(idx) => idx.min(text_len),
+                        };
+
+                        // Find if we're hovering over a link
+                        let hovered_link_range = clickable_links_for_cursor
+                            .iter()
+                            .find(|(range, _)| range.contains(&char_index))
+                            .map(|(range, _)| range.clone());
+
+                        // Paint underline for hovered link
+                        if let Some(range) = hovered_link_range {
+                            // Get positions for start and end of link
+                            if let (Some(start_pos), Some(end_pos)) = (
+                                layout_for_cursor.position_for_index(range.start),
+                                layout_for_cursor.position_for_index(range.end),
+                            ) {
+                                let text_style = window.text_style();
+                                let font_size = text_style.font_size.to_pixels(window.rem_size());
+                                let line_height = text_style
+                                    .line_height
+                                    .to_pixels(font_size.into(), window.rem_size());
+
+                                // Draw underline
+                                let underline_y = start_pos.y + line_height - px(2.0);
+                                let underline_bounds = Bounds::new(
+                                    gpui::point(start_pos.x, underline_y),
+                                    gpui::size(end_pos.x - start_pos.x, px(1.0)),
+                                );
+                                window.paint_quad(quad(
+                                    underline_bounds,
+                                    px(0.0),
+                                    link_color,
+                                    gpui::Edges::default(),
+                                    gpui::Hsla::transparent_black(),
+                                    BorderStyle::Solid,
+                                ));
+                            }
+                        }
+                    },
+                )
+                .absolute()
+                .size_full(),
             )
     }
 }

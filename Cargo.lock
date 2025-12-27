@@ -6689,6 +6689,7 @@ dependencies = [
  "fractional_index",
  "gpui",
  "itertools 0.14.0",
+ "open",
  "pulldown-cmark",
  "ropey",
  "serde_json",
