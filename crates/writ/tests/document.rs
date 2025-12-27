@@ -1,6 +1,18 @@
 use writ::document::Document;
 
 #[test]
+#[should_panic(expected = "inline images are not supported")]
+fn test_inline_image_text_before_panics() {
+    Document::from_markdown("hello ![alt](http://example.com/image.png)\n");
+}
+
+#[test]
+#[should_panic(expected = "inline images are not supported")]
+fn test_inline_image_text_after_panics() {
+    Document::from_markdown("![alt](http://example.com/image.png) world\n");
+}
+
+#[test]
 fn test_nested_numbered_list_indentation() {
     // Original uses 3-space indentation
     let input = "1. Numbered item 1

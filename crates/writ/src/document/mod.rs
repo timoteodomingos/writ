@@ -175,6 +175,9 @@ impl Document {
                 }
             }
             BlockKind::HorizontalRule => "---".to_string(),
+            BlockKind::Image { url, alt } => {
+                format!("![{}]({})", alt, url)
+            }
         }
     }
 

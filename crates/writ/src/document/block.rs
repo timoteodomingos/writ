@@ -17,6 +17,10 @@ pub enum BlockKind {
         language: Option<String>,
     },
     HorizontalRule,
+    Image {
+        url: String,
+        alt: String,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -32,6 +36,7 @@ impl Block {
             BlockKind::Paragraph { parent } => *parent,
             BlockKind::Code { parent, .. } => *parent,
             BlockKind::HorizontalRule => None,
+            BlockKind::Image { .. } => None,
         }
     }
 

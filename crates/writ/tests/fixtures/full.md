@@ -127,9 +127,9 @@ Text after the rule.
 
 ## Images
 
-Here is an inline image: ![alt text](https://example.com/image.png) in a sentence.
+![alt text](https://example.com/image.png)
 
-A paragraph with ![logo](https://example.com/logo.svg) and **bold text** together.
+![logo](https://example.com/logo.svg)
 
 ## Task Lists
 

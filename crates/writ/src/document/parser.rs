@@ -19,6 +19,8 @@ pub struct Parser {
     style_stack: Vec<TextStyle>,
     container_stack: Vec<DefaultKey>,
     current_block: Option<DefaultKey>,
+    /// Whether we're inside a paragraph that contained an image (to detect trailing text)
+    in_image_paragraph: bool,
 }
 
 impl Parser {
@@ -162,9 +164,18 @@ impl Parser {
                         });
                     }
                     Tag::Image { dest_url, .. } => {
-                        self.push_style(TextStyle::Image {
-                            url: dest_url.to_string(),
-                        });
+                        // Check if current block already has text (inline image not supported)
+                        if let Some(key) = self.current_block {
+                            if !self.blocks[key].text.chunks.is_empty() {
+                                panic!("inline images are not supported");
+                            }
+                            // Replace the empty paragraph with an Image block
+                            self.blocks[key].kind = BlockKind::Image {
+                                url: dest_url.to_string(),
+                                alt: String::new(),
+                            };
+                            self.in_image_paragraph = true;
+                        }
                     }
                     other => todo!("Start tag: {other:?}"),
                 },
@@ -186,7 +197,13 @@ impl Parser {
                         self.clear_current_block(BlockKindDiscriminants::Heading);
                     }
                     TagEnd::Paragraph => {
-                        self.clear_current_block(BlockKindDiscriminants::Paragraph);
+                        // If this was an image paragraph, just reset the flag
+                        // (current_block was already cleared in TagEnd::Image)
+                        if self.in_image_paragraph {
+                            self.in_image_paragraph = false;
+                        } else {
+                            self.clear_current_block(BlockKindDiscriminants::Paragraph);
+                        }
                     }
                     TagEnd::CodeBlock => {
                         self.clear_current_block(BlockKindDiscriminants::Code);
@@ -204,11 +221,24 @@ impl Parser {
                         self.pop_style(TextStyleDiscriminants::Link);
                     }
                     TagEnd::Image => {
-                        self.pop_style(TextStyleDiscriminants::Image);
+                        self.clear_current_block(BlockKindDiscriminants::Image);
                     }
                     other => todo!("End tag: {other:?}"),
                 },
                 Event::Text(text) => {
+                    // If we're inside an image tag, this is alt text
+                    if let Some(key) = self.current_block
+                        && let BlockKind::Image { alt, .. } = &mut self.blocks[key].kind
+                    {
+                        alt.push_str(&text);
+                        continue;
+                    }
+
+                    // Text after an image in the same paragraph is not supported
+                    if self.in_image_paragraph {
+                        panic!("inline images are not supported");
+                    }
+
                     if self.current_block.is_none() {
                         self.push_block(BlockKind::Paragraph {
                             parent: self.get_parent(),
