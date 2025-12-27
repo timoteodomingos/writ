@@ -1145,8 +1145,14 @@ impl EditorState {
         // First, handle URL capture mode
         if let Some(ref capture) = self.inline_style.url_capture.clone() {
             if capture.url.is_empty() {
-                // URL is empty - cancel URL capture, go back to pending state
-                // The `]` is still in the text, so just restore the state
+                // URL is empty - cancel URL capture, delete the `(`, go back to pending state
+                // Delete the `(` from text
+                let block = &mut self.document.blocks[self.cursor.block_key];
+                block
+                    .text
+                    .delete_range(self.cursor.offset - 1, self.cursor.offset);
+                self.cursor.offset -= 1;
+
                 self.inline_style.url_capture = None;
                 self.inline_style.pending_marker =
                     Some(PendingMarker::new(PendingMarkerKind::CloseBracket, false));
