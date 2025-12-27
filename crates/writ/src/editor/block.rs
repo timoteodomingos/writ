@@ -130,16 +130,62 @@ impl IntoElement for Block {
     fn into_element(self) -> Self::Element {
         let text_len = self.plain_text.len();
 
-        // Combine regular highlights with link marker highlights
-        let mut all_highlights = self.highlights;
-        for range in self.link_marker_ranges {
-            all_highlights.push((
-                range,
-                HighlightStyle {
-                    color: Some(self.marker_color.into()),
-                    ..Default::default()
-                },
-            ));
+        // Build highlights, splitting at link marker range boundaries to apply marker color
+        // only to the specific marker characters, not the entire chunk
+        let mut all_highlights = Vec::new();
+        for (range, style) in self.highlights {
+            // Collect all marker ranges that overlap with this highlight
+            let overlapping_markers: Vec<_> = self
+                .link_marker_ranges
+                .iter()
+                .filter(|mr| range.start < mr.end && range.end > mr.start)
+                .cloned()
+                .collect();
+
+            if overlapping_markers.is_empty() {
+                // No overlap - keep highlight as-is
+                all_highlights.push((range, style));
+            } else {
+                // Split the highlight at marker boundaries
+                let mut pos = range.start;
+                for marker_range in &overlapping_markers {
+                    // Part before the marker (if any)
+                    if pos < marker_range.start && marker_range.start < range.end {
+                        all_highlights.push((pos..marker_range.start, style));
+                        pos = marker_range.start;
+                    }
+                    // The marker part itself
+                    let marker_end = marker_range.end.min(range.end);
+                    if pos < marker_end {
+                        let mut marker_style = style;
+                        marker_style.color = Some(self.marker_color.into());
+                        all_highlights.push((pos..marker_end, marker_style));
+                        pos = marker_end;
+                    }
+                }
+                // Part after the last marker (if any)
+                if pos < range.end {
+                    all_highlights.push((pos..range.end, style));
+                }
+            }
+        }
+
+        // Also add marker highlights for ranges that don't have existing highlights
+        for range in &self.link_marker_ranges {
+            // Check if this range is already covered by an existing highlight
+            let already_covered = all_highlights
+                .iter()
+                .any(|(hr, _)| hr.start <= range.start && hr.end >= range.end);
+
+            if !already_covered {
+                all_highlights.push((
+                    range.clone(),
+                    HighlightStyle {
+                        color: Some(self.marker_color.into()),
+                        ..Default::default()
+                    },
+                ));
+            }
         }
 
         // Create styled text element and get its layout handle
