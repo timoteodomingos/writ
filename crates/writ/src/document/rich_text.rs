@@ -499,6 +499,33 @@ impl RichText {
         highlights
     }
 
+    /// Remove link/image styles from chunk containing the given offset.
+    /// Returns true if a link/image style was removed.
+    pub fn remove_link_style_at(&mut self, offset: usize) -> bool {
+        let mut pos = 0;
+        for chunk in &mut self.chunks {
+            let chunk_end = pos + chunk.text.len();
+            if offset < chunk_end {
+                // Found the chunk - remove any link/image styles
+                let had_link = chunk
+                    .styles
+                    .styles
+                    .iter()
+                    .any(|s| matches!(s, TextStyle::Link { .. } | TextStyle::Image { .. }));
+                if had_link {
+                    chunk
+                        .styles
+                        .styles
+                        .retain(|s| !matches!(s, TextStyle::Link { .. } | TextStyle::Image { .. }));
+                    return true;
+                }
+                return false;
+            }
+            pos = chunk_end;
+        }
+        false
+    }
+
     /// Get clickable link ranges with their URLs.
     /// Returns (byte_range, url) for each link/image in the text.
     pub fn clickable_links(&self) -> Vec<(Range<usize>, String)> {

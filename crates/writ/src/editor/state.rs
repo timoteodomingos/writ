@@ -1218,12 +1218,20 @@ impl EditorState {
         // Then delete actual text
         if self.cursor.offset > 0 {
             let block = &mut self.document.blocks[self.cursor.block_key];
+
+            // Before deleting, check if we're backspacing into a link/image.
+            // If so, remove the link style from that chunk - links can't be edited,
+            // only created fresh.
+            if self.cursor.offset >= 2 {
+                block.text.remove_link_style_at(self.cursor.offset - 2);
+            }
+
             block
                 .text
                 .delete_range(self.cursor.offset - 1, self.cursor.offset);
             self.cursor.offset -= 1;
 
-            // Sync styles with the text we're now in
+            // Sync styles with the text we're now in (but links were already removed above)
             if self.cursor.offset > 0 {
                 let styles_at_cursor = block.text.styles_at(self.cursor.offset - 1);
                 self.inline_style
