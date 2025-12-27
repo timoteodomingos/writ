@@ -526,6 +526,39 @@ impl RichText {
         false
     }
 
+    /// Extract plain text substring from [start, end)
+    pub fn plain_substring(&self, start: usize, end: usize) -> String {
+        if start >= end {
+            return String::new();
+        }
+
+        let mut result = String::new();
+        let mut pos = 0;
+
+        for chunk in &self.chunks {
+            let chunk_end = pos + chunk.text.len();
+
+            if chunk_end <= start {
+                // Chunk is entirely before the range
+                pos = chunk_end;
+                continue;
+            }
+            if pos >= end {
+                // Chunk is entirely after the range
+                break;
+            }
+
+            // Chunk overlaps with range
+            let chunk_start_in_range = start.saturating_sub(pos);
+            let chunk_end_in_range = (end - pos).min(chunk.text.len());
+            result.push_str(&chunk.text[chunk_start_in_range..chunk_end_in_range]);
+
+            pos = chunk_end;
+        }
+
+        result
+    }
+
     /// Get clickable link ranges with their URLs.
     /// Returns (byte_range, url) for each link/image in the text.
     pub fn clickable_links(&self) -> Vec<(Range<usize>, String)> {

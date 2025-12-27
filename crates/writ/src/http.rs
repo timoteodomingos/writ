@@ -6,15 +6,11 @@ use gpui::http_client::{
     http::{HeaderValue, StatusCode},
 };
 
-pub struct Client {
-    client: reqwest::Client,
-}
+pub struct Client;
 
 impl Client {
     pub fn new() -> Arc<Self> {
-        Arc::new(Self {
-            client: reqwest::Client::new(),
-        })
+        Arc::new(Self)
     }
 }
 
@@ -35,22 +31,21 @@ impl HttpClient for Client {
         &self,
         req: Request<AsyncBody>,
     ) -> BoxFuture<'static, anyhow::Result<Response<AsyncBody>>> {
-        let client = self.client.clone();
         let (parts, _body) = req.into_parts();
         let uri = parts.uri.to_string();
 
-        async move {
-            let response = client.get(&uri).send().await?;
-            let status = response.status();
-            let bytes = response.bytes().await?;
+        // Use smol's blocking task spawner to run ureq in a thread pool
+        smol::unblock(move || {
+            let response = ureq::get(&uri).call()?;
+            let status = response.status().as_u16();
+            let bytes = response.into_body().read_to_vec()?;
 
-            let async_body = AsyncBody::from_bytes(bytes);
+            let async_body = AsyncBody::from_bytes(bytes.into());
             let mut http_response = Response::new(async_body);
-            *http_response.status_mut() =
-                StatusCode::from_u16(status.as_u16()).unwrap_or(StatusCode::OK);
+            *http_response.status_mut() = StatusCode::from_u16(status).unwrap_or(StatusCode::OK);
 
             Ok(http_response)
-        }
+        })
         .boxed()
     }
 }

@@ -3,7 +3,7 @@ use std::rc::Rc;
 use gpui::{
     App, BorderStyle, Bounds, CursorStyle, FontWeight, HighlightStyle, IntoElement, MouseButton,
     MouseDownEvent, Pixels, Rgba, SharedString, StyledText, TextLayout, TextRun, Window, canvas,
-    prelude::*, px, quad, rems, size,
+    img, prelude::*, px, quad, rems, size,
 };
 
 use crate::document::BlockKind;
@@ -128,6 +128,21 @@ impl IntoElement for Block {
     type Element = gpui::Stateful<gpui::Div>;
 
     fn into_element(self) -> Self::Element {
+        // Handle image blocks specially - render as img() element
+        if let BlockKind::Image { url, alt } = &self.kind {
+            let url = url.clone();
+            let alt = alt.clone();
+            return gpui::div()
+                .id(("block", self.block_idx))
+                .w_full()
+                .overflow_hidden()
+                .child(
+                    img(url)
+                        .max_w_full()
+                        .with_fallback(move || gpui::div().child(alt.clone()).into_any_element()),
+                );
+        }
+
         let text_len = self.plain_text.len();
 
         // Build highlights, splitting at link marker range boundaries to apply marker color

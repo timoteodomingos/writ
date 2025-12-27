@@ -69,6 +69,20 @@ impl Editor {
             return;
         }
 
+        // Handle paste with Ctrl-V or Cmd-V
+        if keystroke.key.as_str() == "v"
+            && (keystroke.modifiers.control || keystroke.modifiers.platform)
+        {
+            if let Some(clipboard) = cx.read_from_clipboard()
+                && let Some(text) = clipboard.text()
+            {
+                self.state.apply(EditorAction::InsertText(text.to_string()));
+                self.mark_dirty(cx);
+                cx.notify();
+            }
+            return;
+        }
+
         // First check for special keys
         let action = match keystroke.key.as_str() {
             "left" => Some(EditorAction::MoveCursor(Direction::Left)),

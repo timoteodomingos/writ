@@ -822,11 +822,12 @@ impl EditorState {
         if c == '[' {
             self.resolve_pending_marker();
 
-            // Check if previous character was `!` - if so, this is an image
-            let is_image = self.cursor.offset > 0 && {
+            // Check if this is an image: `!` must be at position 0, `[` at position 1
+            // This ensures images only work at block start (like headings)
+            let is_image = self.cursor.offset == 1 && {
                 let block = self.current_block();
                 let text = block.plain_text();
-                text.chars().nth(self.cursor.offset - 1) == Some('!')
+                text.starts_with('!')
             };
 
             self.insert_char_as_text(c);
@@ -880,33 +881,40 @@ impl EditorState {
     /// Complete a link/image by applying style to text range and setting URL
     fn complete_link_with_url(&mut self) {
         if let Some(capture) = self.inline_style.url_capture.take() {
-            let style = if capture.is_image {
-                TextStyle::Image {
+            // For images, convert the block to BlockKind::Image
+            if capture.is_image {
+                // Extract alt text: from position 2 (after `![`) to text_end
+                // text_start is position of `[`, so alt text is from text_start + 1 to text_end
+                let alt = self.document.blocks[self.cursor.block_key]
+                    .text
+                    .plain_substring(capture.text_start + 1, capture.text_end);
+
+                // Convert block to Image
+                let block = &mut self.document.blocks[self.cursor.block_key];
+                block.kind = BlockKind::Image {
                     url: capture.url.clone(),
-                }
-            } else {
-                TextStyle::Link {
-                    url: capture.url.clone(),
-                }
+                    alt,
+                };
+                block.text = RichText::default();
+
+                // Move cursor to next block (or create one)
+                self.move_to_next_block_or_create();
+                return;
+            }
+
+            // For links, apply style as before
+            let style = TextStyle::Link {
+                url: capture.url.clone(),
             };
 
             let block = &mut self.document.blocks[self.cursor.block_key];
 
             // Text structure:
-            // - `[` at text_start (or `![` for images)
+            // - `[` at text_start
             // - link text from text_start + 1 to text_end
             // - `]` at text_end
             // - `(` at text_end + 1
             // - URL text from text_end + 2 to cursor.offset
-
-            // Calculate bracket position and length
-            let bracket_start = if capture.is_image {
-                // For images, also delete the `!` before `[`
-                capture.text_start.saturating_sub(1)
-            } else {
-                capture.text_start
-            };
-            let bracket_len = if capture.is_image { 2 } else { 1 }; // `![` or `[`
 
             // Delete from end to start to keep positions valid:
             // 1. Delete URL text (from text_end + 2 to cursor, after `](`)
@@ -918,16 +926,16 @@ impl EditorState {
                 .text
                 .delete_range(capture.text_end, capture.text_end + 2);
 
-            // 3. Delete opening bracket(s)
+            // 3. Delete opening bracket `[`
             block
                 .text
-                .delete_range(bracket_start, bracket_start + bracket_len);
+                .delete_range(capture.text_start, capture.text_start + 1);
 
             // Calculate styled range after deletions
-            // The link text was from (text_start + bracket_len) to text_end
-            // After deleting brackets, it shifts left by bracket_len
-            let styled_start = bracket_start;
-            let styled_end = capture.text_end - bracket_len;
+            // The link text was from (text_start + 1) to text_end
+            // After deleting `[`, it shifts left by 1
+            let styled_start = capture.text_start;
+            let styled_end = capture.text_end - 1;
 
             // Apply the style to the text range
             block
@@ -936,6 +944,25 @@ impl EditorState {
 
             // Update cursor position to end of styled text
             self.cursor.offset = styled_end;
+        }
+    }
+
+    /// Move cursor to next block, or create a new paragraph if at end
+    fn move_to_next_block_or_create(&mut self) {
+        if let Some(next_key) = self.document.next_block_key(self.cursor.block_key) {
+            self.cursor.block_key = next_key;
+            self.cursor.offset = 0;
+        } else {
+            // Create new paragraph after current block
+            let new_key = self.document.insert_block_after(
+                self.cursor.block_key,
+                Block {
+                    kind: BlockKind::Paragraph { parent: None },
+                    text: RichText::default(),
+                },
+            );
+            self.cursor.block_key = new_key;
+            self.cursor.offset = 0;
         }
     }
 

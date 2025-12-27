@@ -1122,6 +1122,8 @@ fn test_link_complete_flow() {
 
 #[test]
 fn test_image_complete_flow() {
+    use writ::document::BlockKind;
+
     let mut state = EditorState::from_markdown("x");
     state.apply(EditorAction::Delete);
     state.apply(EditorAction::InsertText(
@@ -1133,8 +1135,21 @@ fn test_image_complete_flow() {
     assert!(state.inline_style.unclosed_bracket.is_none());
     assert!(state.inline_style.url_capture.is_none());
 
-    // Text should have image style applied (brackets are removed)
-    assert_eq!(state.to_styled_debug_string(), "<img>alt</img>");
+    // First block should be an Image block
+    let first_key = state.document.first_block_key().unwrap();
+    let first_block = &state.document.blocks[first_key];
+    assert!(
+        matches!(
+            &first_block.kind,
+            BlockKind::Image { url, alt } if url == "https://example.com/img.png" && alt == "alt"
+        ),
+        "Expected Image block, got {:?}",
+        first_block.kind
+    );
+
+    // Cursor should have moved to a new paragraph block
+    assert_ne!(state.cursor.block_key, first_key);
+    assert_eq!(state.cursor.offset, 0);
 }
 
 #[test]
