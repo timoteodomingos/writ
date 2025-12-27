@@ -1044,3 +1044,184 @@ fn test_empty_heading_converts_to_paragraph_on_backspace() {
         writ::document::BlockKind::Paragraph { .. }
     ));
 }
+
+// ============================================================================
+// Link and Image Tests
+// ============================================================================
+
+#[test]
+fn test_bracket_tracks_unclosed() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText("[".to_string()));
+
+    // Should have unclosed bracket tracked
+    assert!(state.inline_style.unclosed_bracket.is_some());
+    let bracket = state.inline_style.unclosed_bracket.as_ref().unwrap();
+    assert_eq!(bracket.position, 0);
+    assert!(!bracket.is_image);
+
+    // Text should contain the [
+    assert_eq!(state.to_debug_string(), "[[|]");
+}
+
+#[test]
+fn test_exclamation_bracket_tracks_image() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText("![".to_string()));
+
+    // Should have unclosed bracket tracked as image
+    assert!(state.inline_style.unclosed_bracket.is_some());
+    let bracket = state.inline_style.unclosed_bracket.as_ref().unwrap();
+    assert_eq!(bracket.position, 1); // position of [
+    assert!(bracket.is_image);
+
+    // Text should contain ![
+    assert_eq!(state.to_debug_string(), "![[|]");
+}
+
+#[test]
+fn test_close_bracket_without_open_is_literal() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText("hello]world".to_string()));
+
+    // No unclosed bracket, so ] should be literal
+    assert!(state.inline_style.unclosed_bracket.is_none());
+    assert_eq!(state.to_styled_debug_string(), "hello]world");
+}
+
+#[test]
+fn test_close_bracket_with_open_creates_pending() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText("[link]".to_string()));
+
+    // Should have pending ] marker (but it's not displayed since ] is already in text)
+    assert!(state.inline_style.pending_marker.is_some());
+    assert_eq!(state.pending_marker_text(), ""); // ] is in text, not displayed as marker
+}
+
+#[test]
+fn test_link_complete_flow() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText(
+        "[link](https://example.com)".to_string(),
+    ));
+
+    // Link should be complete - no pending state
+    assert!(state.inline_style.pending_marker.is_none());
+    assert!(state.inline_style.unclosed_bracket.is_none());
+    assert!(state.inline_style.url_capture.is_none());
+
+    // Text should have link style applied (brackets are removed)
+    assert_eq!(state.to_styled_debug_string(), "<a>link</a>");
+}
+
+#[test]
+fn test_image_complete_flow() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText(
+        "![alt](https://example.com/img.png)".to_string(),
+    ));
+
+    // Image should be complete
+    assert!(state.inline_style.pending_marker.is_none());
+    assert!(state.inline_style.unclosed_bracket.is_none());
+    assert!(state.inline_style.url_capture.is_none());
+
+    // Text should have image style applied (brackets are removed)
+    assert_eq!(state.to_styled_debug_string(), "<img>alt</img>");
+}
+
+#[test]
+fn test_bracket_space_paren_is_literal() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText("[text] (not a link)".to_string()));
+
+    // Space between ] and ( means literal brackets
+    // The ] resolves the pending marker, then space is typed, clearing state
+    assert!(state.inline_style.url_capture.is_none());
+}
+
+#[test]
+fn test_url_capture_indicator() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText("[link](".to_string()));
+
+    // Should be in URL capture mode
+    assert!(state.inline_style.url_capture.is_some());
+
+    // Should show link indicator
+    let indicator = state.active_styles_indicator();
+    assert!(indicator.is_some());
+    assert!(indicator.unwrap().contains('↗'));
+}
+
+#[test]
+fn test_image_url_capture_indicator() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText("![alt](".to_string()));
+
+    // Should be in URL capture mode
+    assert!(state.inline_style.url_capture.is_some());
+
+    // Should show image indicator
+    let indicator = state.active_styles_indicator();
+    assert!(indicator.is_some());
+    assert!(indicator.unwrap().contains('▣'));
+}
+
+#[test]
+fn test_backspace_in_url() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText("[link](abc".to_string()));
+
+    // Should have URL "abc"
+    let capture = state.inline_style.url_capture.as_ref().unwrap();
+    assert_eq!(capture.url, "abc");
+
+    state.apply(EditorAction::Backspace);
+
+    // Should now have URL "ab"
+    let capture = state.inline_style.url_capture.as_ref().unwrap();
+    assert_eq!(capture.url, "ab");
+}
+
+#[test]
+fn test_backspace_empty_url_returns_to_pending() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText("[link](".to_string()));
+
+    assert!(state.inline_style.url_capture.is_some());
+
+    state.apply(EditorAction::Backspace);
+
+    // Should go back to pending ] state
+    assert!(state.inline_style.url_capture.is_none());
+    assert!(state.inline_style.pending_marker.is_some());
+    assert!(state.inline_style.unclosed_bracket.is_some());
+}
+
+#[test]
+fn test_cursor_movement_clears_link_state() {
+    let mut state = EditorState::from_markdown("x");
+    state.apply(EditorAction::Delete);
+    state.apply(EditorAction::InsertText("[link](".to_string()));
+
+    assert!(state.inline_style.url_capture.is_some());
+
+    state.apply(EditorAction::MoveCursor(Direction::Left));
+
+    // All link state should be cleared
+    assert!(state.inline_style.url_capture.is_none());
+    assert!(state.inline_style.unclosed_bracket.is_none());
+}

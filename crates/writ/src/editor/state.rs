@@ -48,6 +48,8 @@ pub enum PendingMarkerKind {
     SingleTilde,
     /// Double `~~` - strikethrough mode
     DoubleTilde,
+    /// Single `]` - could become `](` to start URL capture
+    CloseBracket,
 }
 
 impl PendingMarkerKind {
@@ -60,6 +62,8 @@ impl PendingMarkerKind {
             PendingMarkerKind::Backtick => "`",
             PendingMarkerKind::SingleTilde => "~",
             PendingMarkerKind::DoubleTilde => "~~",
+            // CloseBracket is already inserted as text, so don't display it again
+            PendingMarkerKind::CloseBracket => "",
         }
     }
 
@@ -69,6 +73,7 @@ impl PendingMarkerKind {
             '*' => Some(PendingMarkerKind::SingleAsterisk),
             '`' => Some(PendingMarkerKind::Backtick),
             '~' => Some(PendingMarkerKind::SingleTilde),
+            ']' => Some(PendingMarkerKind::CloseBracket),
             _ => None,
         }
     }
@@ -79,6 +84,7 @@ impl PendingMarkerKind {
             (PendingMarkerKind::SingleAsterisk, '*') => Some(PendingMarkerKind::DoubleAsterisk),
             (PendingMarkerKind::DoubleAsterisk, '*') => Some(PendingMarkerKind::TripleAsterisk),
             (PendingMarkerKind::SingleTilde, '~') => Some(PendingMarkerKind::DoubleTilde),
+            // CloseBracket doesn't upgrade - `(` is handled specially
             _ => None,
         }
     }
@@ -104,7 +110,9 @@ impl PendingMarkerKind {
             }
             PendingMarkerKind::Backtick => Some(vec![(TextStyle::Code, "`")]),
             PendingMarkerKind::DoubleTilde => Some(vec![(TextStyle::Strikethrough, "~~")]),
-            PendingMarkerKind::SingleTilde => None, // Single ~ is not a valid style
+            // These are not valid style markers on their own
+            PendingMarkerKind::SingleTilde => None,
+            PendingMarkerKind::CloseBracket => None,
         }
     }
 }
@@ -300,6 +308,28 @@ impl std::ops::Index<usize> for StyleStack {
     }
 }
 
+/// Tracks an unclosed `[` or `![` for potential link/image
+#[derive(Debug, Clone, PartialEq)]
+pub struct UnclosedBracket {
+    /// Offset in text where `[` was typed (after any `!`)
+    pub position: usize,
+    /// True if this was `![` (image), false if just `[` (link)
+    pub is_image: bool,
+}
+
+/// State for URL capture after `](`
+#[derive(Debug, Clone, PartialEq)]
+pub struct UrlCapture {
+    /// True if this is for an image, false for link
+    pub is_image: bool,
+    /// The accumulated URL text
+    pub url: String,
+    /// Position where the link text starts (the `[` position)
+    pub text_start: usize,
+    /// Position where the link text ends (just before `]`)
+    pub text_end: usize,
+}
+
 /// Inline styling state for the editor
 #[derive(Debug, Clone, Default)]
 pub struct InlineStyleState {
@@ -307,6 +337,10 @@ pub struct InlineStyleState {
     pub pending_marker: Option<PendingMarker>,
     /// Stack of currently open styles
     pub open_styles: StyleStack,
+    /// Tracks unclosed `[` or `![` for potential link/image
+    pub unclosed_bracket: Option<UnclosedBracket>,
+    /// Active URL capture after `](`
+    pub url_capture: Option<UrlCapture>,
 }
 
 /// Represents a pending block marker (e.g., `#` for headings)
@@ -465,23 +499,61 @@ impl EditorState {
 
     /// Get an indicator string for active styles (e.g. "BI" for bold+italic)
     pub fn active_styles_indicator(&self) -> Option<String> {
-        if self.inline_style.open_styles.is_empty() {
-            return None;
+        let mut indicator = String::new();
+
+        // Show link/image indicator when in URL capture mode
+        if let Some(ref capture) = self.inline_style.url_capture {
+            indicator.push(if capture.is_image { '▣' } else { '↗' });
         }
 
-        let mut indicator = String::new();
         for open_style in self.inline_style.open_styles.iter() {
             let ch = match open_style.style {
                 TextStyle::Bold => 'B',
                 TextStyle::Italic => 'I',
                 TextStyle::Code => 'C',
                 TextStyle::Strikethrough => 'S',
-                TextStyle::Link { .. } => 'L',
-                TextStyle::Image { .. } => 'G', // G for graphic
+                TextStyle::Link { .. } => '↗',
+                TextStyle::Image { .. } => '▣',
             };
             indicator.push(ch);
         }
-        Some(indicator)
+
+        if indicator.is_empty() {
+            None
+        } else {
+            Some(indicator)
+        }
+    }
+
+    /// Get ranges of link/image marker characters that should be displayed in marker color.
+    /// Returns byte ranges for `[`, `]`, `(`, and URL text that are part of an in-progress link.
+    /// Only returns ranges when in URL capture mode (after `](` has been typed).
+    pub fn link_marker_ranges(&self) -> Vec<std::ops::Range<usize>> {
+        let mut ranges = Vec::new();
+
+        // Only show marker colors when in URL capture mode (after `](` typed)
+        if let Some(ref capture) = self.inline_style.url_capture {
+            // Add `[` (or `![` for images)
+            if capture.is_image && capture.text_start > 0 {
+                ranges.push((capture.text_start - 1)..capture.text_start);
+            }
+            ranges.push(capture.text_start..(capture.text_start + 1));
+
+            // Add `]` at text_end
+            ranges.push(capture.text_end..(capture.text_end + 1));
+
+            // Add `(` at text_end + 1
+            let paren_pos = capture.text_end + 1;
+            ranges.push(paren_pos..(paren_pos + 1));
+
+            // Add URL text (from after `(` to cursor)
+            let url_start = capture.text_end + 2;
+            if self.cursor.offset > url_start {
+                ranges.push(url_start..self.cursor.offset);
+            }
+        }
+
+        ranges
     }
 
     /// Get current active styles from the open_styles stack
@@ -508,8 +580,10 @@ impl EditorState {
     }
 
     fn set_cursor(&mut self, block_key: DefaultKey, offset: usize) {
-        // Clear pending markers and block style state
+        // Clear pending markers, link state, and block style state
         self.inline_style.pending_marker = None;
+        self.inline_style.unclosed_bracket = None;
+        self.inline_style.url_capture = None;
         self.block_style = BlockStyleState::default();
 
         if let Some(block) = self.document.blocks.get(block_key) {
@@ -585,8 +659,10 @@ impl EditorState {
     }
 
     fn move_cursor(&mut self, direction: Direction) {
-        // Clear pending markers and block style state
+        // Clear pending markers, link state, and block style state
         self.inline_style.pending_marker = None;
+        self.inline_style.unclosed_bracket = None;
+        self.inline_style.url_capture = None;
         self.block_style = BlockStyleState::default();
 
         match direction {
@@ -668,7 +744,7 @@ impl EditorState {
 
     /// Check if a character is a potential inline style marker
     fn is_marker_char(c: char) -> bool {
-        matches!(c, '*' | '`' | '~')
+        matches!(c, '*' | '`' | '~' | ']')
     }
 
     /// Check if the character immediately before cursor is whitespace (or cursor is at start)
@@ -692,7 +768,76 @@ impl EditorState {
     }
 
     fn insert_char(&mut self, c: char) {
-        // Check for block marker handling first
+        // Handle URL capture mode first - takes priority
+        if let Some(ref capture) = self.inline_style.url_capture.clone() {
+            if c == ')' {
+                // Complete the link/image
+                self.complete_link_with_url();
+                return;
+            } else {
+                // Insert the character as visible text and accumulate in URL
+                self.insert_char_as_text(c);
+                let mut new_capture = capture.clone();
+                new_capture.url.push(c);
+                self.inline_style.url_capture = Some(new_capture);
+                return;
+            }
+        }
+
+        // Handle `(` after pending `]` - starts URL capture if we have unclosed bracket
+        if c == '(' {
+            let should_start_url_capture = self
+                .inline_style
+                .pending_marker
+                .as_ref()
+                .is_some_and(|p| p.kind == PendingMarkerKind::CloseBracket)
+                && self.inline_style.unclosed_bracket.is_some();
+
+            if should_start_url_capture {
+                // Extract bracket info before mutating
+                let bracket = self.inline_style.unclosed_bracket.take().unwrap();
+
+                // Insert `(` as visible text
+                self.insert_char_as_text(c);
+
+                // Start URL capture mode
+                // text_end is position before the `]` (cursor was after `]`, now after `(`)
+                let text_end = self.cursor.offset - 2; // -1 for `(`, -1 for `]`
+                self.inline_style.url_capture = Some(UrlCapture {
+                    is_image: bracket.is_image,
+                    url: String::new(),
+                    text_start: bracket.position,
+                    text_end,
+                });
+                self.inline_style.pending_marker = None;
+                return;
+            }
+            // No pending ] or no unclosed bracket - insert ( as literal
+            self.resolve_pending_marker();
+            self.insert_char_as_text(c);
+            return;
+        }
+
+        // Track `[` for potential link or `![` for image
+        if c == '[' {
+            self.resolve_pending_marker();
+
+            // Check if previous character was `!` - if so, this is an image
+            let is_image = self.cursor.offset > 0 && {
+                let block = self.current_block();
+                let text = block.plain_text();
+                text.chars().nth(self.cursor.offset - 1) == Some('!')
+            };
+
+            self.insert_char_as_text(c);
+            self.inline_style.unclosed_bracket = Some(UnclosedBracket {
+                position: self.cursor.offset - 1, // position of the [
+                is_image,
+            });
+            return;
+        }
+
+        // Check for block marker handling
         if self.can_use_block_marker() {
             if let Some(ref pending) = self.block_style.pending_marker {
                 // Try to upgrade existing block marker
@@ -732,6 +877,68 @@ impl EditorState {
         }
     }
 
+    /// Complete a link/image by applying style to text range and setting URL
+    fn complete_link_with_url(&mut self) {
+        if let Some(capture) = self.inline_style.url_capture.take() {
+            let style = if capture.is_image {
+                TextStyle::Image {
+                    url: capture.url.clone(),
+                }
+            } else {
+                TextStyle::Link {
+                    url: capture.url.clone(),
+                }
+            };
+
+            let block = &mut self.document.blocks[self.cursor.block_key];
+
+            // Text structure:
+            // - `[` at text_start (or `![` for images)
+            // - link text from text_start + 1 to text_end
+            // - `]` at text_end
+            // - `(` at text_end + 1
+            // - URL text from text_end + 2 to cursor.offset
+
+            // Calculate bracket position and length
+            let bracket_start = if capture.is_image {
+                // For images, also delete the `!` before `[`
+                capture.text_start.saturating_sub(1)
+            } else {
+                capture.text_start
+            };
+            let bracket_len = if capture.is_image { 2 } else { 1 }; // `![` or `[`
+
+            // Delete from end to start to keep positions valid:
+            // 1. Delete URL text (from text_end + 2 to cursor, after `](`)
+            let url_start = capture.text_end + 2; // position after `](`
+            block.text.delete_range(url_start, self.cursor.offset);
+
+            // 2. Delete `](` at text_end (2 characters)
+            block
+                .text
+                .delete_range(capture.text_end, capture.text_end + 2);
+
+            // 3. Delete opening bracket(s)
+            block
+                .text
+                .delete_range(bracket_start, bracket_start + bracket_len);
+
+            // Calculate styled range after deletions
+            // The link text was from (text_start + bracket_len) to text_end
+            // After deleting brackets, it shifts left by bracket_len
+            let styled_start = bracket_start;
+            let styled_end = capture.text_end - bracket_len;
+
+            // Apply the style to the text range
+            block
+                .text
+                .apply_style_to_range(styled_start, styled_end, style);
+
+            // Update cursor position to end of styled text
+            self.cursor.offset = styled_end;
+        }
+    }
+
     /// Insert a character as plain text with current styles
     fn insert_char_as_text(&mut self, c: char) {
         let styles = self.current_styles();
@@ -744,6 +951,23 @@ impl EditorState {
 
     fn handle_marker_char(&mut self, c: char) {
         let is_opening = self.char_before_cursor_is_whitespace();
+
+        // Special handling for `]` - track position if we have an unclosed bracket
+        if c == ']' {
+            self.resolve_pending_marker();
+            if self.inline_style.unclosed_bracket.is_some() {
+                // Insert ] as literal text, but record that we're waiting for (
+                self.insert_char_as_text(c);
+                // Set pending marker to track that ] was just typed (for detecting `](`)
+                self.inline_style.pending_marker =
+                    Some(PendingMarker::new(PendingMarkerKind::CloseBracket, false));
+                return;
+            } else {
+                // No unclosed bracket - insert ] as literal text
+                self.insert_char_as_text(c);
+                return;
+            }
+        }
 
         // Check if we can upgrade the pending marker
         if let Some(ref pending) = self.inline_style.pending_marker {
@@ -918,7 +1142,35 @@ impl EditorState {
     }
 
     fn backspace(&mut self) {
-        // First, consume pending block marker character by character
+        // First, handle URL capture mode
+        if let Some(ref capture) = self.inline_style.url_capture.clone() {
+            if capture.url.is_empty() {
+                // URL is empty - cancel URL capture, go back to pending state
+                // The `]` is still in the text, so just restore the state
+                self.inline_style.url_capture = None;
+                self.inline_style.pending_marker =
+                    Some(PendingMarker::new(PendingMarkerKind::CloseBracket, false));
+                // Restore the unclosed bracket
+                self.inline_style.unclosed_bracket = Some(UnclosedBracket {
+                    position: capture.text_start,
+                    is_image: capture.is_image,
+                });
+            } else {
+                // Remove last character from URL (both from capture and visible text)
+                let block = &mut self.document.blocks[self.cursor.block_key];
+                block
+                    .text
+                    .delete_range(self.cursor.offset - 1, self.cursor.offset);
+                self.cursor.offset -= 1;
+
+                let mut new_capture = capture.clone();
+                new_capture.url.pop();
+                self.inline_style.url_capture = Some(new_capture);
+            }
+            return;
+        }
+
+        // Next, consume pending block marker character by character
         if let Some(pending) = &self.block_style.pending_marker {
             if let Some(downgraded) = pending.downgrade() {
                 self.block_style.pending_marker = Some(downgraded);

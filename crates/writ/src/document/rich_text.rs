@@ -303,6 +303,75 @@ impl RichText {
         self.chunks.retain(|c| !c.text.is_empty());
     }
 
+    /// Apply a style to a range of text [start, end)
+    /// This is used for retroactively styling text (e.g., when completing a link)
+    pub fn apply_style_to_range(&mut self, start: usize, end: usize, style: TextStyle) {
+        if start >= end {
+            return;
+        }
+
+        // We need to find all chunks that overlap with [start, end) and add the style to them
+        // This may require splitting chunks at the boundaries
+
+        let mut new_chunks = Vec::new();
+        let mut pos = 0;
+
+        for chunk in &self.chunks {
+            let chunk_start = pos;
+            let chunk_end = pos + chunk.text.len();
+            pos = chunk_end;
+
+            if chunk_end <= start || chunk_start >= end {
+                // Chunk is entirely outside the range - keep as is
+                new_chunks.push(chunk.clone());
+            } else if chunk_start >= start && chunk_end <= end {
+                // Chunk is entirely inside the range - add style
+                let mut new_styles = chunk.styles.clone();
+                new_styles.styles.push(style.clone());
+                new_chunks.push(TextChunk {
+                    text: chunk.text.clone(),
+                    styles: new_styles,
+                });
+            } else {
+                // Chunk partially overlaps - need to split
+                let text = &chunk.text;
+
+                // Part before the range
+                if chunk_start < start {
+                    let before_len = start - chunk_start;
+                    new_chunks.push(TextChunk {
+                        text: text[..before_len].to_string(),
+                        styles: chunk.styles.clone(),
+                    });
+                }
+
+                // Part inside the range
+                let inside_start = start.saturating_sub(chunk_start);
+                let inside_end = (end - chunk_start).min(text.len());
+                if inside_start < inside_end {
+                    let mut new_styles = chunk.styles.clone();
+                    new_styles.styles.push(style.clone());
+                    new_chunks.push(TextChunk {
+                        text: text[inside_start..inside_end].to_string(),
+                        styles: new_styles,
+                    });
+                }
+
+                // Part after the range
+                if chunk_end > end {
+                    let after_start = end - chunk_start;
+                    new_chunks.push(TextChunk {
+                        text: text[after_start..].to_string(),
+                        styles: chunk.styles.clone(),
+                    });
+                }
+            }
+        }
+
+        self.chunks = new_chunks;
+        self.merge_adjacent_chunks();
+    }
+
     /// Debug representation showing styled chunks
     /// Format: "<i>hello</i><b>world</b>"
     pub fn to_debug_string(&self) -> String {

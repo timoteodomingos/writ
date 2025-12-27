@@ -158,6 +158,12 @@ impl Render for Editor {
                     if let Some(indicator) = self.state.active_styles_indicator() {
                         block = block.with_active_styles_indicator(indicator);
                     }
+
+                    // Add link marker ranges for highlighting
+                    let link_ranges = self.state.link_marker_ranges();
+                    if !link_ranges.is_empty() {
+                        block = block.with_link_marker_ranges(link_ranges);
+                    }
                 }
 
                 // Create on_layout callback that stores layout in editor

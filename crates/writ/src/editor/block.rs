@@ -33,6 +33,8 @@ pub struct Block {
     pub pending_inline_marker: Option<String>,
     /// Active styles indicator (e.g. "BI" for bold+italic)
     pub active_styles_indicator: Option<String>,
+    /// Ranges of link marker characters to highlight in marker color
+    pub link_marker_ranges: Vec<std::ops::Range<usize>>,
     /// Callback when block is clicked, receives character index
     pub on_click: Option<ClickCallback>,
     /// Callback to report layout after prepaint
@@ -67,6 +69,7 @@ impl Block {
             pending_block_marker: None,
             pending_inline_marker: None,
             active_styles_indicator: None,
+            link_marker_ranges: Vec::new(),
             on_click: None,
             on_layout: None,
         }
@@ -96,6 +99,12 @@ impl Block {
         self
     }
 
+    /// Set link marker ranges (characters to highlight in marker color)
+    pub fn with_link_marker_ranges(mut self, ranges: Vec<std::ops::Range<usize>>) -> Self {
+        self.link_marker_ranges = ranges;
+        self
+    }
+
     /// Set click callback
     pub fn on_click(mut self, callback: ClickCallback) -> Self {
         self.on_click = Some(callback);
@@ -115,8 +124,20 @@ impl IntoElement for Block {
     fn into_element(self) -> Self::Element {
         let text_len = self.plain_text.len();
 
+        // Combine regular highlights with link marker highlights
+        let mut all_highlights = self.highlights;
+        for range in self.link_marker_ranges {
+            all_highlights.push((
+                range,
+                HighlightStyle {
+                    color: Some(self.marker_color.into()),
+                    ..Default::default()
+                },
+            ));
+        }
+
         // Create styled text element and get its layout handle
-        let styled_text = StyledText::new(self.plain_text).with_highlights(self.highlights);
+        let styled_text = StyledText::new(self.plain_text).with_highlights(all_highlights);
         let text_layout = styled_text.layout().clone();
         let layout_for_prepaint = text_layout.clone();
 
