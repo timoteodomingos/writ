@@ -1,8 +1,8 @@
 use std::rc::Rc;
 
 use gpui::{
-    App, Context, CursorStyle, FocusHandle, Focusable, IntoElement, KeyDownEvent, Window, div,
-    prelude::*,
+    App, Context, CursorStyle, FocusHandle, Focusable, IntoElement, KeyDownEvent, ScrollHandle,
+    Window, div, prelude::*,
 };
 
 use crate::buffer::Buffer;
@@ -19,6 +19,8 @@ pub struct Editor {
     cursor: Cursor,
     /// Focus handle for keyboard input
     focus_handle: FocusHandle,
+    /// Scroll handle for scrolling cursor into view
+    scroll_handle: ScrollHandle,
 }
 
 impl Editor {
@@ -31,7 +33,14 @@ impl Editor {
             buffer,
             cursor: Cursor::start(),
             focus_handle,
+            scroll_handle: ScrollHandle::new(),
         }
+    }
+
+    /// Scroll the cursor line into view.
+    fn scroll_cursor_into_view(&self) {
+        let cursor_line = self.buffer.byte_to_line(self.cursor.offset);
+        self.scroll_handle.scroll_to_item(cursor_line);
     }
 
     /// Get the buffer contents.
@@ -122,6 +131,9 @@ impl Editor {
                 }
             }
         }
+
+        // Scroll cursor into view after any cursor movement
+        self.scroll_cursor_into_view();
     }
 }
 
@@ -179,6 +191,7 @@ impl Render for Editor {
             .on_key_down(cx.listener(Self::on_key_down))
             .size_full()
             .overflow_scroll()
+            .track_scroll(&self.scroll_handle)
             .font_family("Iosevka Aile")
             .text_color(text_color)
             .cursor(CursorStyle::IBeam)

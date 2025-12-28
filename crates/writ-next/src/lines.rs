@@ -359,24 +359,11 @@ fn extract_image_region(node: &Node, text: &str) -> Option<StyledRegion> {
     // Incomplete images like ![text] should show all markers
     let url = url?;
 
-    // For images, content_range is `!` + alt text (skipping the `[`)
-    // We include the `!` at full_start, then skip `[`, then include the alt text
-    // This results in showing "!alt text" instead of "![alt text"
-    let content_start = full_start; // Start at `!`
-    let content_end = alt_end; // End after alt text
-
-    // But we need to hide the `[` which is between `!` and the alt text
-    // The content_range mechanism doesn't support gaps, so we need a different approach:
-    // Actually, content_range defines what to SHOW, and full_range minus content_range is hidden.
-    // So if content_range is just the alt text (without `!`), only alt text shows.
-    // But we want "!alt text".
-    //
-    // The issue is that content_range must be contiguous. Since `![` are adjacent and we want
-    // to show `!` but hide `[`, we can't do this with a single content_range.
-    //
-    // For now, let's just show the alt text without the `!` to avoid the weird `![` artifact.
-    // This is simpler and still conveys meaning.
-    let content_start = alt_start; // Start at alt text (skip `![`)
+    // For images, we show just the alt text (hiding `![`, `]`, and `](url)`)
+    // We can't show `!alt text` because content_range must be contiguous and `![` are adjacent.
+    // Showing just the alt text is clean and conveys the meaning.
+    let content_start = alt_start;
+    let content_end = alt_end;
 
     Some(StyledRegion {
         full_range: full_start..full_end,
