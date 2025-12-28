@@ -83,9 +83,13 @@ impl RenderBlock {
     }
 
     /// Check if a cursor position is within this block.
+    ///
+    /// The cursor can be at the end of the block (cursor == range.end),
+    /// which represents the position right after the last character.
+    /// This is important for cursor rendering when the cursor is between blocks.
     pub fn contains_cursor(&self, cursor: usize) -> bool {
         let range = self.range();
-        cursor >= range.start && cursor < range.end
+        cursor >= range.start && cursor <= range.end
     }
 }
 
@@ -543,6 +547,25 @@ mod tests {
         assert_eq!(blocks.len(), 2);
         assert!(matches!(&blocks[0], RenderBlock::Heading { .. }));
         assert!(matches!(&blocks[1], RenderBlock::Paragraph { .. }));
+    }
+
+    #[test]
+    fn test_block_ranges_debug() {
+        // "# Heading\n\nParagraph"
+        //  0123456789 0 1234567890
+        //            1          2
+        let buf: Buffer = "# Heading\n\nParagraph".parse().unwrap();
+        let blocks = extract_blocks(&buf);
+
+        eprintln!("Buffer: {:?}", buf.text());
+        for (i, block) in blocks.iter().enumerate() {
+            eprintln!("Block {}: {:?}", i, block.range());
+        }
+
+        // Heading is bytes 0-10 (includes trailing \n)
+        assert_eq!(blocks[0].range(), 0..10);
+        // Paragraph is bytes 11-20 (after the blank line)
+        assert_eq!(blocks[1].range(), 11..20);
     }
 
     #[test]

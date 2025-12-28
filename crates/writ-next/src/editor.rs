@@ -1,16 +1,14 @@
+use std::rc::Rc;
+
 use gpui::{
-    App, Context, CursorStyle, FocusHandle, Focusable, FontStyle, FontWeight, HighlightStyle,
-    IntoElement, KeyDownEvent, MouseButton, MouseDownEvent, SharedString, StyledText, TextRun,
-    Window, canvas, div, point, prelude::*, px,
+    App, Context, CursorStyle, FocusHandle, Focusable, IntoElement, KeyDownEvent, Window, div,
+    prelude::*,
 };
 
-use crate::block_view::BlockView;
+use crate::block_view::{BlockView, ClickCallback};
 use crate::blocks::extract_blocks;
 use crate::buffer::Buffer;
 use crate::cursor::Cursor;
-use crate::render::{
-    TextStyle, buffer_to_visual_offset, compute_render_spans, visual_to_buffer_offset,
-};
 use crate::theme::Theme;
 
 /// The main editor component.
@@ -114,66 +112,6 @@ impl Editor {
             }
         }
     }
-
-    /// Handle mouse click to position cursor.
-    fn on_click(&mut self, visual_index: usize, _window: &mut Window, cx: &mut Context<Self>) {
-        // Convert visual index to buffer offset using render spans
-        // Use current cursor position to compute spans (matches what's displayed)
-        let spans = compute_render_spans(&self.buffer, self.cursor.offset);
-        let buffer_offset = visual_to_buffer_offset(&spans, visual_index);
-
-        self.cursor = Cursor::new(buffer_offset.min(self.buffer.len_bytes()));
-        cx.notify();
-    }
-
-    /// Build styled text from render spans.
-    fn build_styled_text(
-        &self,
-        theme: &Theme,
-    ) -> (String, Vec<(std::ops::Range<usize>, HighlightStyle)>) {
-        let spans = compute_render_spans(&self.buffer, self.cursor.offset);
-
-        let mut text = String::new();
-        let mut highlights = Vec::new();
-
-        for span in spans {
-            let start = text.len();
-            text.push_str(&span.text);
-            let end = text.len();
-
-            if span.style != TextStyle::default() {
-                let mut highlight = HighlightStyle::default();
-
-                if span.style.bold {
-                    highlight.font_weight = Some(FontWeight::BOLD);
-                }
-                if span.style.italic {
-                    highlight.font_style = Some(FontStyle::Italic);
-                }
-                if span.style.code {
-                    highlight.color = Some(theme.green.into());
-                }
-                if span.style.strikethrough {
-                    highlight.strikethrough = Some(gpui::StrikethroughStyle {
-                        thickness: px(1.0),
-                        color: Some(theme.foreground.into()),
-                    });
-                }
-                // Headings are bold (font size requires per-line rendering, TODO later)
-                // The heading_level field is already used for bold via TextStyle::heading()
-
-                highlights.push((start..end, highlight));
-            }
-        }
-
-        (text, highlights)
-    }
-
-    /// Calculate the visual cursor position given render spans.
-    fn visual_cursor_position(&self) -> usize {
-        let spans = compute_render_spans(&self.buffer, self.cursor.offset);
-        buffer_to_visual_offset(&spans, self.cursor.offset)
-    }
 }
 
 impl Focusable for Editor {
@@ -187,16 +125,38 @@ impl Render for Editor {
         let theme = cx.global::<Theme>();
         let text_color = theme.foreground;
         let code_color = theme.green;
+        let cursor_color = theme.purple;
         let cursor_offset = self.cursor.offset;
 
         // Extract blocks from the buffer
         let blocks = extract_blocks(&self.buffer);
         let buffer_text = self.buffer.text();
 
-        // Build block views
+        // Create click callback that updates cursor position
+        let entity = cx.entity().clone();
+        let on_click: ClickCallback = Rc::new(move |buffer_offset, _window, cx| {
+            entity.update(cx, |editor, cx| {
+                editor.cursor = Cursor::new(buffer_offset);
+                cx.notify();
+            });
+        });
+
+        // Build block views with click handling
         let block_views: Vec<_> = blocks
             .iter()
-            .map(|block| BlockView::new(block, &buffer_text, cursor_offset, code_color, text_color))
+            .enumerate()
+            .map(|(idx, block)| {
+                BlockView::new(
+                    block,
+                    &buffer_text,
+                    cursor_offset,
+                    code_color,
+                    text_color,
+                    cursor_color,
+                    idx,
+                )
+                .on_click(on_click.clone())
+            })
             .collect();
 
         div()
