@@ -186,6 +186,8 @@ impl Render for Editor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.global::<Theme>();
         let text_color = theme.foreground;
+        let code_color = theme.green;
+        let cursor_offset = self.cursor.offset;
 
         // Extract blocks from the buffer
         let blocks = extract_blocks(&self.buffer);
@@ -194,7 +196,7 @@ impl Render for Editor {
         // Build block views
         let block_views: Vec<_> = blocks
             .iter()
-            .map(|block| BlockView::new(block, &buffer_text))
+            .map(|block| BlockView::new(block, &buffer_text, cursor_offset, code_color, text_color))
             .collect();
 
         div()

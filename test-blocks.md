@@ -1,10 +1,10 @@
 # Welcome to writ-next
 
-This is a paragraph with some text.
+This is a paragraph with **bold** and *italic* text.
 
 ## Second Heading
 
-Another paragraph here.
+Another paragraph with `code` here.
 
 - List item 1
 - List item 2
