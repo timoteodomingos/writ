@@ -1,10 +1,11 @@
 use clap::Parser;
 use gpui::{
-    Application, Bounds, FocusHandle, Focusable, KeyBinding, Point, Size, Window, WindowBounds,
-    WindowDecorations, WindowOptions, div, prelude::*, rems,
+    Application, Bounds, Entity, FocusHandle, Focusable, KeyBinding, Point, Size, Window,
+    WindowBounds, WindowDecorations, WindowOptions, div, prelude::*, rems,
 };
 use writ_next::{
     args::Args,
+    editor::Editor,
     http, theme,
     title_bar::FileInfo,
     window::{CloseWindow, Quit, window_shadow},
@@ -12,10 +13,11 @@ use writ_next::{
 
 pub struct Root {
     focus_handle: FocusHandle,
+    editor: Entity<Editor>,
 }
 
 impl Render for Root {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         window_shadow().child(
             div()
                 .id("root")
@@ -32,7 +34,8 @@ impl Render for Root {
                 .flex()
                 .flex_col()
                 .size_full()
-                .child("writ-next: empty editor placeholder"),
+                .bg(cx.global::<theme::Theme>().background)
+                .child(self.editor.clone()),
         )
     }
 }
@@ -81,7 +84,16 @@ fn main() {
             cx.open_window(window_options, |window, cx| {
                 let focus_handle = cx.focus_handle();
                 focus_handle.focus(window);
-                cx.new(|_| Root { focus_handle })
+
+                // Create editor with sample content
+                let editor = cx.new(|cx| {
+                    Editor::new("# Welcome to writ-next\n\nThis is **bold** and *italic* text.\n\nType here to edit!", cx)
+                });
+
+                cx.new(|_| Root {
+                    focus_handle,
+                    editor,
+                })
             })
             .expect("Failed to open window");
         })

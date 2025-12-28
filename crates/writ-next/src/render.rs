@@ -87,7 +87,6 @@ pub fn compute_render_spans(buffer: &Buffer, cursor_offset: usize) -> Vec<Render
         }];
     };
 
-    let mut spans = Vec::new();
     let mut styled_regions: Vec<StyledRegion> = Vec::new();
 
     // Walk the block tree to find inline nodes
@@ -100,54 +99,92 @@ pub fn compute_render_spans(buffer: &Buffer, cursor_offset: usize) -> Vec<Render
         &mut styled_regions,
     );
 
-    // Sort regions by start position
-    styled_regions.sort_by_key(|r| r.full_range.start);
-
-    // Build render spans by walking through the text
-    // and applying styles / hiding markers as needed
-    let mut pos = 0;
+    // Collect all boundary points where styles might change
+    // Include both full_range boundaries (for marker visibility) and content_range boundaries
+    let mut boundaries: Vec<usize> = Vec::new();
+    boundaries.push(0);
+    boundaries.push(text.len());
 
     for region in &styled_regions {
-        // Add any unstyled text before this region
-        if pos < region.full_range.start {
-            spans.push(RenderSpan {
-                text: text[pos..region.full_range.start].to_string(),
-                style: TextStyle::default(),
-                buffer_range: pos..region.full_range.start,
-            });
-        }
-
-        // Check if cursor is inside this styled region
         let cursor_inside =
             cursor_offset >= region.full_range.start && cursor_offset <= region.full_range.end;
 
         if cursor_inside {
-            // Show everything including markers
-            spans.push(RenderSpan {
-                text: text[region.full_range.clone()].to_string(),
-                style: region.style,
-                buffer_range: region.full_range.clone(),
-            });
+            // Show markers - use full range
+            boundaries.push(region.full_range.start);
+            boundaries.push(region.full_range.end);
         } else {
-            // Hide markers, show only content with style
-            if region.content_range.start < region.content_range.end {
-                spans.push(RenderSpan {
-                    text: text[region.content_range.clone()].to_string(),
-                    style: region.style,
-                    buffer_range: region.content_range.clone(),
-                });
+            // Hide markers - use content range, but also mark full_range for hiding
+            boundaries.push(region.full_range.start);
+            boundaries.push(region.content_range.start);
+            boundaries.push(region.content_range.end);
+            boundaries.push(region.full_range.end);
+        }
+    }
+
+    boundaries.sort();
+    boundaries.dedup();
+
+    // Build spans between consecutive boundaries
+    let mut spans = Vec::new();
+
+    for window in boundaries.windows(2) {
+        let start = window[0];
+        let end = window[1];
+
+        if start >= end || start >= text.len() {
+            continue;
+        }
+
+        let end = end.min(text.len());
+
+        // Check if this range is hidden (inside a marker area when cursor is outside)
+        let mut is_hidden = false;
+        for region in &styled_regions {
+            let cursor_inside =
+                cursor_offset >= region.full_range.start && cursor_offset <= region.full_range.end;
+
+            if !cursor_inside {
+                // Markers are hidden - check if this byte range overlaps the marker area
+                let in_opening_marker = start >= region.full_range.start
+                    && start < region.content_range.start
+                    && end <= region.content_range.start;
+                let in_closing_marker = start >= region.content_range.end
+                    && start < region.full_range.end
+                    && end <= region.full_range.end;
+
+                if in_opening_marker || in_closing_marker {
+                    is_hidden = true;
+                    break;
+                }
             }
         }
 
-        pos = region.full_range.end;
-    }
+        if is_hidden {
+            continue;
+        }
 
-    // Add any remaining unstyled text
-    if pos < text.len() {
+        // Compute merged style for this range
+        let mut style = TextStyle::default();
+        for region in &styled_regions {
+            let cursor_inside =
+                cursor_offset >= region.full_range.start && cursor_offset <= region.full_range.end;
+
+            let style_range = if cursor_inside {
+                &region.full_range
+            } else {
+                &region.content_range
+            };
+
+            if style_range.start <= start && end <= style_range.end {
+                style = style.merge(&region.style);
+            }
+        }
+
         spans.push(RenderSpan {
-            text: text[pos..].to_string(),
-            style: TextStyle::default(),
-            buffer_range: pos..text.len(),
+            text: text[start..end].to_string(),
+            style,
+            buffer_range: start..end,
         });
     }
 
@@ -205,29 +242,42 @@ fn collect_inline_nodes(node: Node, text: &str, regions: &mut Vec<StyledRegion>)
             if let Some(region) = extract_emphasis_region(node, text, TextStyle::italic()) {
                 regions.push(region);
             }
+            // Also recurse into children for nested styles
+            recurse_into_children(node, text, regions);
         }
         "strong_emphasis" => {
             if let Some(region) = extract_emphasis_region(node, text, TextStyle::bold()) {
                 regions.push(region);
             }
+            // Also recurse into children for nested styles
+            recurse_into_children(node, text, regions);
         }
         "code_span" => {
             if let Some(region) = extract_code_span_region(node, text) {
                 regions.push(region);
             }
+            // Code spans typically don't have nested styles, but recurse anyway
+            recurse_into_children(node, text, regions);
         }
         "strikethrough" => {
             if let Some(region) = extract_emphasis_region(node, text, TextStyle::strikethrough()) {
                 regions.push(region);
             }
+            // Also recurse into children for nested styles
+            recurse_into_children(node, text, regions);
         }
         _ => {
             // Recurse into children for other node types
-            for i in 0..node.child_count() {
-                if let Some(child) = node.child(i as u32) {
-                    collect_inline_nodes(child, text, regions);
-                }
-            }
+            recurse_into_children(node, text, regions);
+        }
+    }
+}
+
+/// Helper to recurse into child nodes.
+fn recurse_into_children(node: Node, text: &str, regions: &mut Vec<StyledRegion>) {
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i as u32) {
+            collect_inline_nodes(child, text, regions);
         }
     }
 }
@@ -392,5 +442,40 @@ mod tests {
 
         // Should show markers since cursor is at edge
         assert_eq!(spans[1].text, "**bold**");
+    }
+
+    #[test]
+    fn test_nested_styles_cursor_outside() {
+        let buf: Buffer = "*italic **bold***".parse().unwrap();
+        let spans = compute_render_spans(&buf, 100); // cursor far away
+
+        // With cursor outside, markers hidden:
+        // "italic " (italic) + "bold" (bold+italic)
+        // The outer italic covers everything, inner bold covers "bold"
+        for span in &spans {
+            eprintln!(
+                "span: {:?} bold={} italic={}",
+                span.text, span.style.bold, span.style.italic
+            );
+        }
+
+        // Find the "bold" part - it should have both bold and italic
+        let bold_span = spans.iter().find(|s| s.text.contains("bold")).unwrap();
+        assert!(bold_span.style.bold, "bold text should be bold");
+        assert!(
+            bold_span.style.italic,
+            "bold text inside italic should also be italic"
+        );
+
+        // Find the "italic " part (without "bold") - should only be italic
+        let italic_span = spans
+            .iter()
+            .find(|s| s.text.contains("italic") && !s.text.contains("bold"))
+            .unwrap();
+        assert!(italic_span.style.italic, "italic text should be italic");
+        assert!(
+            !italic_span.style.bold,
+            "italic-only text should not be bold"
+        );
     }
 }

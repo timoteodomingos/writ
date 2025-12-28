@@ -1,6 +1,7 @@
 pub mod args;
 pub mod buffer;
 pub mod cursor;
+pub mod editor;
 pub mod http;
 pub mod parser;
 pub mod render;
