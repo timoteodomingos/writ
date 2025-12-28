@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui::{
@@ -10,6 +11,7 @@ use crate::cursor::Cursor;
 use crate::line_view::{ClickCallback, LineView};
 use crate::lines::{extract_inline_styles, extract_lines};
 use crate::theme::Theme;
+use crate::title_bar::FileInfo;
 
 /// The main editor component.
 pub struct Editor {
@@ -152,6 +154,10 @@ impl Render for Editor {
         let link_color = theme.cyan;
         let cursor_offset = self.cursor.offset;
 
+        // Get the base path for resolving relative image paths
+        let file_info = cx.global::<FileInfo>();
+        let base_path: Option<PathBuf> = file_info.path.parent().map(|p| p.to_path_buf());
+
         // Extract lines from the buffer
         let lines = extract_lines(&self.buffer);
         let buffer_text = self.buffer.text();
@@ -179,6 +185,7 @@ impl Render for Editor {
                     text_color,
                     cursor_color,
                     link_color,
+                    base_path.clone(),
                 )
                 .on_click(on_click.clone())
             })

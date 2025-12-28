@@ -1,6 +1,7 @@
 //! Line view component for rendering individual lines.
 
 use std::ops::Range;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gpui::{
@@ -13,6 +14,12 @@ use crate::render::StyledRegion;
 
 /// Callback type for click events - receives the buffer offset where the click occurred.
 pub type ClickCallback = Rc<dyn Fn(usize, &mut Window, &mut App)>;
+
+/// Represents a resolved image source for rendering.
+enum ImageSource {
+    Url(String),
+    Path(PathBuf),
+}
 
 /// A view component for rendering a single line.
 pub struct LineView<'a> {
@@ -29,6 +36,8 @@ pub struct LineView<'a> {
     text_color: Rgba,
     cursor_color: Rgba,
     link_color: Rgba,
+    /// Base path for resolving relative image paths (directory containing the markdown file)
+    base_path: Option<PathBuf>,
     /// Callback when line is clicked
     on_click: Option<ClickCallback>,
 }
@@ -44,6 +53,7 @@ impl<'a> LineView<'a> {
         text_color: Rgba,
         cursor_color: Rgba,
         link_color: Rgba,
+        base_path: Option<PathBuf>,
     ) -> Self {
         Self {
             line,
@@ -54,6 +64,7 @@ impl<'a> LineView<'a> {
             text_color,
             cursor_color,
             link_color,
+            base_path,
             on_click: None,
         }
     }
@@ -62,6 +73,34 @@ impl<'a> LineView<'a> {
     pub fn on_click(mut self, callback: ClickCallback) -> Self {
         self.on_click = Some(callback);
         self
+    }
+
+    /// Resolve an image path to an absolute path or URL.
+    ///
+    /// - URLs (http://, https://) are returned as-is
+    /// - Absolute paths are returned as-is
+    /// - Relative paths are resolved against the base_path (markdown file's directory)
+    fn resolve_image_source(&self, image_path: &str) -> ImageSource {
+        // Check if it's a URL
+        if image_path.starts_with("http://") || image_path.starts_with("https://") {
+            return ImageSource::Url(image_path.to_string());
+        }
+
+        let path = Path::new(image_path);
+
+        // If it's an absolute path, use it directly
+        if path.is_absolute() {
+            return ImageSource::Path(path.to_path_buf());
+        }
+
+        // It's a relative path - resolve against base_path
+        if let Some(ref base) = self.base_path {
+            let resolved = base.join(path);
+            return ImageSource::Path(resolved);
+        }
+
+        // No base path available, try as-is (might fail)
+        ImageSource::Path(path.to_path_buf())
     }
 
     /// Check if the cursor is on this line.
@@ -325,7 +364,21 @@ impl IntoElement for LineView<'_> {
         // Handle image-only lines specially
         if let Some(ref image_url) = self.line.image_url {
             let alt_text = self.line.image_alt.clone().unwrap_or_default();
-            let url = image_url.clone();
+
+            // Resolve the image source (URL, absolute path, or relative path)
+            let image_source = self.resolve_image_source(image_url);
+
+            // Create the image element based on the resolved source
+            let create_image = |source: &ImageSource, alt: String| -> gpui::Img {
+                match source {
+                    ImageSource::Url(url) => img(url.clone())
+                        .max_w_full()
+                        .with_fallback(move || div().child(alt.clone()).into_any_element()),
+                    ImageSource::Path(path) => img(path.clone())
+                        .max_w_full()
+                        .with_fallback(move || div().child(alt.clone()).into_any_element()),
+                }
+            };
 
             if self.cursor_on_line() {
                 // Cursor on line: show text AND image
@@ -342,14 +395,11 @@ impl IntoElement for LineView<'_> {
                 let styled_text = StyledText::new(shared_text).with_highlights(highlights);
                 let text_layout = styled_text.layout().clone();
 
-                let mut line_div =
-                    div()
-                        .id(("line", line_number))
-                        .relative()
-                        .child(img(url.clone()).max_w_full().with_fallback(move || {
-                            div().child(alt_text.clone()).into_any_element()
-                        }))
-                        .child(styled_text);
+                let mut line_div = div()
+                    .id(("line", line_number))
+                    .relative()
+                    .child(create_image(&image_source, alt_text.clone()))
+                    .child(styled_text);
 
                 // Add cursor overlay
                 if let Some(cursor_pos) = visual_cursor_pos {
@@ -384,11 +434,7 @@ impl IntoElement for LineView<'_> {
                     .id(("line", line_number))
                     .w_full()
                     .overflow_hidden()
-                    .child(
-                        img(url).max_w_full().with_fallback(move || {
-                            div().child(alt_text.clone()).into_any_element()
-                        }),
-                    );
+                    .child(create_image(&image_source, alt_text));
             }
         }
 

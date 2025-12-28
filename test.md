@@ -1,5 +1,15 @@
-# Heading
+# Image Test
 
-This has **bold** and *italic* and `code` text.
+## Relative path (same directory)
 
-Another paragraph here.
+![Local Image](test-image.png)
+
+## Absolute path
+
+![Absolute Image](/home/wilfred/Documents/writ/test-image.png)
+
+## URL (external)
+
+![Rust Logo](https://www.rust-lang.org/logos/rust-logo-128x128.png)
+
+## Some text with **bold** and *italic*
