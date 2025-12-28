@@ -18,6 +18,6 @@ gpui = "0.2.2"
 ropey = "1.6.1"
 smol = "2"
 # Use same revision as Zed - works with tree-sitter 0.23
-tree-sitter = "0.23.2"
-tree-sitter-md = { git = "https://github.com/tree-sitter-grammars/tree-sitter-markdown", rev = "9a23c1a96c0513d8fc6520972beedd419a973539", features = ["parser"] }
+tree-sitter = "0.26"
+tree-sitter-md = "0.5"
 ureq = { version = "3", features = ["rustls"] }

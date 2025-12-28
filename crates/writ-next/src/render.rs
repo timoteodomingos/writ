@@ -1,6 +1,9 @@
 use std::ops::Range;
 
-use crate::buffer::Buffer;
+use crate::{
+    buffer::Buffer,
+    parser::{MarkdownCursor, MarkdownTree},
+};
 use tree_sitter::Node;
 
 /// A text style to apply during rendering.
@@ -167,9 +170,9 @@ struct StyledRegion {
 
 /// Walk the tree and collect styled regions from inline content.
 fn collect_inline_styles(
-    tree: &tree_sitter_md::MarkdownTree,
+    tree: &MarkdownTree,
     text: &str,
-    cursor: &mut tree_sitter_md::MarkdownCursor,
+    cursor: &mut MarkdownCursor,
     _cursor_offset: usize,
     regions: &mut Vec<StyledRegion>,
 ) {
@@ -221,7 +224,7 @@ fn collect_inline_nodes(node: Node, text: &str, regions: &mut Vec<StyledRegion>)
         _ => {
             // Recurse into children for other node types
             for i in 0..node.child_count() {
-                if let Some(child) = node.child(i) {
+                if let Some(child) = node.child(i as u32) {
                     collect_inline_nodes(child, text, regions);
                 }
             }
@@ -244,7 +247,7 @@ fn extract_emphasis_region(node: Node, _text: &str, style: TextStyle) -> Option<
     // Collect all delimiter positions
     let mut delimiters: Vec<(usize, usize)> = Vec::new();
     for i in 0..node.child_count() {
-        if let Some(child) = node.child(i) {
+        if let Some(child) = node.child(i as u32) {
             let kind = child.kind();
             if kind == "emphasis_delimiter" || kind.ends_with("_delimiter") {
                 delimiters.push((child.start_byte(), child.end_byte()));
@@ -283,7 +286,7 @@ fn extract_code_span_region(node: Node, _text: &str) -> Option<StyledRegion> {
     let mut content_end = full_end;
 
     for i in 0..node.child_count() {
-        if let Some(child) = node.child(i)
+        if let Some(child) = node.child(i as u32)
             && child.kind() == "code_span_delimiter"
         {
             if child.start_byte() == full_start {

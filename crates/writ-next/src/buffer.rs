@@ -1,7 +1,8 @@
 use ropey::Rope;
 use std::ops::Range;
 use std::str::FromStr;
-use tree_sitter_md::{MarkdownParser, MarkdownTree};
+
+use crate::parser::{MarkdownParser, MarkdownTree};
 
 /// A text buffer backed by a rope with incremental tree-sitter parsing.
 ///
