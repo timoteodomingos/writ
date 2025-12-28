@@ -6,7 +6,9 @@ use gpui::{
 
 use crate::buffer::Buffer;
 use crate::cursor::Cursor;
-use crate::render::{TextStyle, compute_render_spans};
+use crate::render::{
+    TextStyle, buffer_to_visual_offset, compute_render_spans, visual_to_buffer_offset,
+};
 use crate::theme::Theme;
 
 /// The main editor component.
@@ -112,25 +114,11 @@ impl Editor {
     }
 
     /// Handle mouse click to position cursor.
-    fn on_click(&mut self, index: usize, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_click(&mut self, visual_index: usize, _window: &mut Window, cx: &mut Context<Self>) {
         // Convert visual index to buffer offset using render spans
+        // Use current cursor position to compute spans (matches what's displayed)
         let spans = compute_render_spans(&self.buffer, self.cursor.offset);
-
-        let mut visual_pos = 0;
-        let mut buffer_offset = 0;
-
-        for span in &spans {
-            let span_visual_len = span.text.len();
-            if visual_pos + span_visual_len > index {
-                // Click is within this span
-                let offset_in_span = index - visual_pos;
-                // Map visual offset to buffer offset within span
-                buffer_offset = span.buffer_range.start + offset_in_span;
-                break;
-            }
-            visual_pos += span_visual_len;
-            buffer_offset = span.buffer_range.end;
-        }
+        let buffer_offset = visual_to_buffer_offset(&spans, visual_index);
 
         self.cursor = Cursor::new(buffer_offset.min(self.buffer.len_bytes()));
         cx.notify();
@@ -180,28 +168,7 @@ impl Editor {
     /// Calculate the visual cursor position given render spans.
     fn visual_cursor_position(&self) -> usize {
         let spans = compute_render_spans(&self.buffer, self.cursor.offset);
-        let cursor_offset = self.cursor.offset;
-
-        let mut visual_pos = 0;
-
-        for span in &spans {
-            if cursor_offset <= span.buffer_range.start {
-                // Cursor is before this span
-                break;
-            } else if cursor_offset <= span.buffer_range.end {
-                // Cursor is within this span
-                let offset_in_buffer = cursor_offset - span.buffer_range.start;
-                // For now, assume 1:1 mapping within visible text
-                // This works because we show full content when cursor is inside
-                visual_pos += offset_in_buffer.min(span.text.len());
-                break;
-            } else {
-                // Cursor is after this span
-                visual_pos += span.text.len();
-            }
-        }
-
-        visual_pos
+        buffer_to_visual_offset(&spans, self.cursor.offset)
     }
 }
 

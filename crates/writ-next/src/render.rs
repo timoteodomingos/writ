@@ -66,6 +66,52 @@ pub struct RenderSpan {
     pub buffer_range: Range<usize>,
 }
 
+/// Convert a visual offset (in rendered text) to a buffer offset.
+///
+/// The `spans` should be computed with the current cursor position.
+/// Returns the buffer byte offset corresponding to the visual position.
+pub fn visual_to_buffer_offset(spans: &[RenderSpan], visual_offset: usize) -> usize {
+    let mut visual_pos = 0;
+
+    for span in spans {
+        let span_visual_len = span.text.len();
+        if visual_pos + span_visual_len > visual_offset {
+            // Click is within this span
+            let offset_in_span = visual_offset - visual_pos;
+            return span.buffer_range.start + offset_in_span.min(span.text.len());
+        }
+        visual_pos += span_visual_len;
+    }
+
+    // Past the end - return end of last span or 0
+    spans.last().map(|s| s.buffer_range.end).unwrap_or(0)
+}
+
+/// Convert a buffer offset to a visual offset (in rendered text).
+///
+/// The `spans` should be computed with the cursor at `buffer_offset`.
+/// Returns the visual position corresponding to the buffer offset.
+pub fn buffer_to_visual_offset(spans: &[RenderSpan], buffer_offset: usize) -> usize {
+    let mut visual_pos = 0;
+
+    for span in spans {
+        if buffer_offset <= span.buffer_range.start {
+            // Cursor is before this span
+            break;
+        } else if buffer_offset <= span.buffer_range.end {
+            // Cursor is within this span
+            let offset_in_buffer = buffer_offset - span.buffer_range.start;
+            visual_pos += offset_in_buffer.min(span.text.len());
+            break;
+        } else {
+            // Cursor is after this span
+            visual_pos += span.text.len();
+        }
+    }
+
+    visual_pos
+}
+
 /// Compute the render spans for a buffer given a cursor position.
 ///
 /// This walks the tree-sitter AST and determines:
@@ -477,5 +523,68 @@ mod tests {
             !italic_span.style.bold,
             "italic-only text should not be bold"
         );
+    }
+
+    #[test]
+    fn test_visual_to_buffer_offset_plain_text() {
+        let buf: Buffer = "hello world".parse().unwrap();
+        let spans = compute_render_spans(&buf, 0);
+
+        // Plain text: visual offset == buffer offset
+        assert_eq!(visual_to_buffer_offset(&spans, 0), 0);
+        assert_eq!(visual_to_buffer_offset(&spans, 5), 5);
+        assert_eq!(visual_to_buffer_offset(&spans, 11), 11);
+    }
+
+    #[test]
+    fn test_visual_to_buffer_offset_with_hidden_markers() {
+        let buf: Buffer = "hello **bold** world".parse().unwrap();
+        // Cursor at 0 (outside bold), so markers are hidden
+        // Visual: "hello bold world" (16 chars)
+        // Buffer: "hello **bold** world" (20 chars)
+        let spans = compute_render_spans(&buf, 0);
+
+        // "hello " -> visual 0-5, buffer 0-5
+        assert_eq!(visual_to_buffer_offset(&spans, 0), 0);
+        assert_eq!(visual_to_buffer_offset(&spans, 5), 5);
+
+        // "bold" -> visual 6-9, buffer 8-11 (markers hidden)
+        assert_eq!(visual_to_buffer_offset(&spans, 6), 8); // 'b' in bold
+        assert_eq!(visual_to_buffer_offset(&spans, 9), 11); // 'd' in bold
+
+        // " world" -> visual 10-15, buffer 14-19
+        assert_eq!(visual_to_buffer_offset(&spans, 10), 14);
+    }
+
+    #[test]
+    fn test_buffer_to_visual_offset_with_hidden_markers() {
+        let buf: Buffer = "hello **bold** world".parse().unwrap();
+        // Cursor at 0 (outside bold), so markers are hidden
+        let spans = compute_render_spans(&buf, 0);
+
+        // "hello " -> buffer 0-5, visual 0-5
+        assert_eq!(buffer_to_visual_offset(&spans, 0), 0);
+        assert_eq!(buffer_to_visual_offset(&spans, 5), 5);
+
+        // "bold" -> buffer 8-11, visual 6-9
+        assert_eq!(buffer_to_visual_offset(&spans, 8), 6); // 'b' in bold
+        assert_eq!(buffer_to_visual_offset(&spans, 11), 9); // 'd' in bold
+
+        // " world" -> buffer 14-19, visual 10-15
+        assert_eq!(buffer_to_visual_offset(&spans, 14), 10);
+    }
+
+    #[test]
+    fn test_visual_to_buffer_offset_cursor_inside() {
+        let buf: Buffer = "hello **bold** world".parse().unwrap();
+        // Cursor at 10 (inside bold), so markers are shown
+        // Visual: "hello **bold** world" (20 chars)
+        let spans = compute_render_spans(&buf, 10);
+
+        // With markers shown, visual == buffer
+        assert_eq!(visual_to_buffer_offset(&spans, 0), 0);
+        assert_eq!(visual_to_buffer_offset(&spans, 6), 6); // first *
+        assert_eq!(visual_to_buffer_offset(&spans, 8), 8); // 'b' in bold
+        assert_eq!(visual_to_buffer_offset(&spans, 14), 14); // space after **
     }
 }
