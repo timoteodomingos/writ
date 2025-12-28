@@ -13,6 +13,8 @@ pub struct TextStyle {
     pub italic: bool,
     pub code: bool,
     pub strikethrough: bool,
+    /// Heading level (1-6), or 0 for non-heading text
+    pub heading_level: u8,
 }
 
 impl TextStyle {
@@ -44,6 +46,15 @@ impl TextStyle {
         }
     }
 
+    /// Create a heading style.
+    pub fn heading(level: u8) -> Self {
+        Self {
+            heading_level: level,
+            bold: true, // Headings are bold
+            ..Default::default()
+        }
+    }
+
     /// Merge another style into this one.
     pub fn merge(&self, other: &TextStyle) -> Self {
         Self {
@@ -51,6 +62,7 @@ impl TextStyle {
             italic: self.italic || other.italic,
             code: self.code || other.code,
             strikethrough: self.strikethrough || other.strikethrough,
+            heading_level: self.heading_level.max(other.heading_level),
         }
     }
 }
@@ -134,8 +146,9 @@ pub fn compute_render_spans(buffer: &Buffer, cursor_offset: usize) -> Vec<Render
     };
 
     let mut styled_regions: Vec<StyledRegion> = Vec::new();
+    let mut block_regions: Vec<BlockRegion> = Vec::new();
 
-    // Walk the block tree to find inline nodes
+    // Walk the block tree to find inline nodes and block regions
     let mut block_cursor = tree.walk();
     collect_inline_styles(
         tree,
@@ -145,12 +158,17 @@ pub fn compute_render_spans(buffer: &Buffer, cursor_offset: usize) -> Vec<Render
         &mut styled_regions,
     );
 
+    // Reset cursor and collect block regions
+    let mut block_cursor = tree.walk();
+    collect_block_regions(tree, &text, &mut block_cursor, &mut block_regions);
+
     // Collect all boundary points where styles might change
     // Include both full_range boundaries (for marker visibility) and content_range boundaries
     let mut boundaries: Vec<usize> = Vec::new();
     boundaries.push(0);
     boundaries.push(text.len());
 
+    // Add boundaries from inline styled regions
     for region in &styled_regions {
         let cursor_inside =
             cursor_offset >= region.full_range.start && cursor_offset <= region.full_range.end;
@@ -162,6 +180,26 @@ pub fn compute_render_spans(buffer: &Buffer, cursor_offset: usize) -> Vec<Render
         } else {
             // Hide markers - use content range, but also mark full_range for hiding
             boundaries.push(region.full_range.start);
+            boundaries.push(region.content_range.start);
+            boundaries.push(region.content_range.end);
+            boundaries.push(region.full_range.end);
+        }
+    }
+
+    // Add boundaries from block regions
+    for region in &block_regions {
+        // For block-level elements, visibility is based on whether cursor is on the same line
+        let cursor_on_line =
+            cursor_offset >= region.full_range.start && cursor_offset < region.full_range.end;
+
+        if cursor_on_line {
+            // Show markers - full range
+            boundaries.push(region.full_range.start);
+            boundaries.push(region.full_range.end);
+        } else {
+            // Hide markers - add marker boundaries for hiding
+            boundaries.push(region.full_range.start);
+            boundaries.push(region.marker_range.end);
             boundaries.push(region.content_range.start);
             boundaries.push(region.content_range.end);
             boundaries.push(region.full_range.end);
@@ -186,6 +224,8 @@ pub fn compute_render_spans(buffer: &Buffer, cursor_offset: usize) -> Vec<Render
 
         // Check if this range is hidden (inside a marker area when cursor is outside)
         let mut is_hidden = false;
+
+        // Check inline styled regions
         for region in &styled_regions {
             let cursor_inside =
                 cursor_offset >= region.full_range.start && cursor_offset <= region.full_range.end;
@@ -206,12 +246,33 @@ pub fn compute_render_spans(buffer: &Buffer, cursor_offset: usize) -> Vec<Render
             }
         }
 
+        // Check block regions
+        if !is_hidden {
+            for region in &block_regions {
+                let cursor_on_line = cursor_offset >= region.full_range.start
+                    && cursor_offset < region.full_range.end;
+
+                if !cursor_on_line {
+                    // Markers are hidden - check if this byte range is in the marker area
+                    let in_marker =
+                        start >= region.marker_range.start && end <= region.marker_range.end;
+
+                    if in_marker {
+                        is_hidden = true;
+                        break;
+                    }
+                }
+            }
+        }
+
         if is_hidden {
             continue;
         }
 
         // Compute merged style for this range
         let mut style = TextStyle::default();
+
+        // Apply inline styles
         for region in &styled_regions {
             let cursor_inside =
                 cursor_offset >= region.full_range.start && cursor_offset <= region.full_range.end;
@@ -223,6 +284,26 @@ pub fn compute_render_spans(buffer: &Buffer, cursor_offset: usize) -> Vec<Render
             };
 
             if style_range.start <= start && end <= style_range.end {
+                style = style.merge(&region.style);
+            }
+        }
+
+        // Apply block styles (headings, etc.)
+        for region in &block_regions {
+            let cursor_on_line =
+                cursor_offset >= region.full_range.start && cursor_offset < region.full_range.end;
+
+            // Determine which range to use for styling
+            let style_range = if cursor_on_line {
+                // When cursor is on line, style the entire line (excluding trailing newline)
+                region.full_range.start..region.content_range.end
+            } else {
+                // When cursor is elsewhere, only style the content
+                region.content_range.clone()
+            };
+
+            // Apply style if this span overlaps the style range
+            if start < style_range.end && end > style_range.start {
                 style = style.merge(&region.style);
             }
         }
@@ -242,12 +323,25 @@ pub fn compute_render_spans(buffer: &Buffer, cursor_offset: usize) -> Vec<Render
 
 /// A styled region found in the AST.
 #[derive(Debug, Clone)]
-struct StyledRegion {
+pub struct StyledRegion {
     /// The full range including markers (e.g., "**bold**")
-    full_range: Range<usize>,
+    pub full_range: Range<usize>,
     /// The content range without markers (e.g., "bold")
-    content_range: Range<usize>,
+    pub content_range: Range<usize>,
     /// The style to apply
+    pub style: TextStyle,
+}
+
+/// A block-level region with line-based marker visibility.
+#[derive(Debug, Clone)]
+struct BlockRegion {
+    /// The full range of the block (entire line/lines)
+    full_range: Range<usize>,
+    /// The marker range to hide (e.g., "# " for headings)
+    marker_range: Range<usize>,
+    /// The content range (text after marker)
+    content_range: Range<usize>,
+    /// The style to apply to content
     style: TextStyle,
 }
 
@@ -279,6 +373,84 @@ fn collect_inline_styles(
             break;
         }
     }
+}
+
+/// Walk the tree and collect block-level regions (headings, lists, blockquotes).
+fn collect_block_regions(
+    tree: &MarkdownTree,
+    text: &str,
+    cursor: &mut MarkdownCursor,
+    regions: &mut Vec<BlockRegion>,
+) {
+    loop {
+        let node = cursor.node();
+        let kind = node.kind();
+
+        // Handle ATX headings (# Heading)
+        if kind.starts_with("atx_heading") || kind == "atx_heading" {
+            if let Some(region) = extract_heading_region(&node, text) {
+                regions.push(region);
+            }
+        }
+
+        // Recurse into children
+        if cursor.goto_first_child() {
+            collect_block_regions(tree, text, cursor, regions);
+            cursor.goto_parent();
+        }
+
+        if !cursor.goto_next_sibling() {
+            break;
+        }
+    }
+}
+
+/// Extract a BlockRegion from a heading node.
+fn extract_heading_region(node: &Node, text: &str) -> Option<BlockRegion> {
+    let full_start = node.start_byte();
+    let full_end = node.end_byte();
+
+    // Find the heading level marker (atx_h1_marker, atx_h2_marker, etc.)
+    let mut marker_end = full_start;
+    let mut heading_level: u8 = 1;
+
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i as u32) {
+            let child_kind = child.kind();
+            if child_kind.starts_with("atx_h") && child_kind.ends_with("_marker") {
+                // Extract level from marker name (atx_h1_marker -> 1)
+                if let Some(level_char) = child_kind.chars().nth(5) {
+                    if let Some(level) = level_char.to_digit(10) {
+                        heading_level = level as u8;
+                    }
+                }
+                marker_end = child.end_byte();
+                break;
+            }
+        }
+    }
+
+    // Skip the space after the marker
+    let content_start = if marker_end < text.len() && text.as_bytes().get(marker_end) == Some(&b' ')
+    {
+        marker_end + 1
+    } else {
+        marker_end
+    };
+
+    // Content ends before the trailing newline (if any)
+    let content_end = if full_end > 0 && text.as_bytes().get(full_end - 1) == Some(&b'\n') {
+        full_end - 1
+    } else {
+        full_end
+    };
+
+    Some(BlockRegion {
+        full_range: full_start..full_end,
+        marker_range: full_start..content_start, // includes "# "
+        content_range: content_start..content_end,
+        style: TextStyle::heading(heading_level),
+    })
 }
 
 /// Collect styled regions from an inline tree node.
@@ -586,5 +758,122 @@ mod tests {
         assert_eq!(visual_to_buffer_offset(&spans, 6), 6); // first *
         assert_eq!(visual_to_buffer_offset(&spans, 8), 8); // 'b' in bold
         assert_eq!(visual_to_buffer_offset(&spans, 14), 14); // space after **
+    }
+
+    fn print_tree(buf: &Buffer) {
+        let tree = buf.tree().unwrap();
+        let text = buf.text();
+
+        fn print_node(node: &tree_sitter::Node, text: &str, depth: usize) {
+            let indent = "  ".repeat(depth);
+            let content = &text[node.start_byte()..node.end_byte()];
+            let preview: String = content.chars().take(40).collect();
+            eprintln!(
+                "{}{}: {:?} [{}-{}]",
+                indent,
+                node.kind(),
+                preview,
+                node.start_byte(),
+                node.end_byte()
+            );
+            for i in 0..node.child_count() {
+                if let Some(child) = node.child(i as u32) {
+                    print_node(&child, text, depth + 1);
+                }
+            }
+        }
+
+        eprintln!("\nBlock tree:");
+        print_node(&tree.block_tree().root_node(), &text, 0);
+    }
+
+    #[test]
+    fn test_debug_heading_structure() {
+        let buf: Buffer = "# Heading\n\nText".parse().unwrap();
+        print_tree(&buf);
+    }
+
+    #[test]
+    fn test_debug_list_structure() {
+        let buf: Buffer = "- Item 1\n- Item 2\n  - Nested".parse().unwrap();
+        print_tree(&buf);
+    }
+
+    #[test]
+    fn test_debug_blockquote_structure() {
+        let buf: Buffer = "> Quote line 1\n> Quote line 2".parse().unwrap();
+        print_tree(&buf);
+    }
+
+    #[test]
+    fn test_debug_code_block_structure() {
+        let buf: Buffer = "```rust\nfn main() {}\n```".parse().unwrap();
+        print_tree(&buf);
+    }
+
+    #[test]
+    fn test_debug_mixed_blocks() {
+        let buf: Buffer = "# Heading\n\nParagraph text.\n\n- List item\n\n> Quote"
+            .parse()
+            .unwrap();
+        print_tree(&buf);
+    }
+
+    #[test]
+    fn test_heading_cursor_outside() {
+        // When cursor is outside the heading line, "# " should be hidden
+        let buf: Buffer = "# Heading\n\nText".parse().unwrap();
+        // Cursor at "Text" (offset 11)
+        let spans = compute_render_spans(&buf, 12);
+
+        // Should have: "Heading" (bold, no #) + "\n\n" + "Text"
+        // The "# " marker should be hidden
+        assert!(
+            !spans.iter().any(|s| s.text.contains("#")),
+            "Heading marker should be hidden when cursor is outside"
+        );
+
+        // Find the heading text
+        let heading_span = spans.iter().find(|s| s.text.contains("Heading")).unwrap();
+        assert!(heading_span.style.bold, "Heading should be bold");
+        assert_eq!(
+            heading_span.style.heading_level, 1,
+            "Should be heading level 1"
+        );
+    }
+
+    #[test]
+    fn test_heading_cursor_inside() {
+        // When cursor is on the heading line, "# " should be visible
+        let buf: Buffer = "# Heading\n\nText".parse().unwrap();
+        // Cursor inside heading (offset 5, in "Heading")
+        let spans = compute_render_spans(&buf, 5);
+
+        // Should show "# Heading" with markers visible
+        let full_text: String = spans.iter().map(|s| s.text.as_str()).collect();
+        assert!(
+            full_text.contains("# "),
+            "Heading marker should be visible when cursor is on line"
+        );
+
+        // The heading content should still be styled
+        let heading_span = spans.iter().find(|s| s.text.contains("Heading")).unwrap();
+        assert!(heading_span.style.bold, "Heading should be bold");
+    }
+
+    #[test]
+    fn test_heading_level_2() {
+        let buf: Buffer = "## Second Level\n\nText".parse().unwrap();
+        // Cursor outside
+        let spans = compute_render_spans(&buf, 20);
+
+        // "## " should be hidden
+        assert!(
+            !spans.iter().any(|s| s.text.contains("#")),
+            "Heading markers should be hidden"
+        );
+
+        let heading_span = spans.iter().find(|s| s.text.contains("Second")).unwrap();
+        assert_eq!(heading_span.style.heading_level, 2);
     }
 }

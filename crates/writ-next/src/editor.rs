@@ -4,6 +4,8 @@ use gpui::{
     Window, canvas, div, point, prelude::*, px,
 };
 
+use crate::block_view::BlockView;
+use crate::blocks::extract_blocks;
 use crate::buffer::Buffer;
 use crate::cursor::Cursor;
 use crate::render::{
@@ -157,6 +159,8 @@ impl Editor {
                         color: Some(theme.foreground.into()),
                     });
                 }
+                // Headings are bold (font size requires per-line rendering, TODO later)
+                // The heading_level field is already used for bold via TextStyle::heading()
 
                 highlights.push((start..end, highlight));
             }
@@ -181,16 +185,17 @@ impl Focusable for Editor {
 impl Render for Editor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.global::<Theme>();
-        let (text, highlights) = self.build_styled_text(theme);
-        let visual_cursor_pos = self.visual_cursor_position();
-
-        let cursor_color = theme.purple;
         let text_color = theme.foreground;
 
-        // Create the styled text with highlights
-        let display_text: SharedString = text.clone().into();
-        let styled_text = StyledText::new(display_text.clone()).with_highlights(highlights);
-        let text_layout = styled_text.layout().clone();
+        // Extract blocks from the buffer
+        let blocks = extract_blocks(&self.buffer);
+        let buffer_text = self.buffer.text();
+
+        // Build block views
+        let block_views: Vec<_> = blocks
+            .iter()
+            .map(|block| BlockView::new(block, &buffer_text))
+            .collect();
 
         div()
             .id("editor")
@@ -201,65 +206,6 @@ impl Render for Editor {
             .font_family("Iosevka Aile")
             .text_color(text_color)
             .cursor(CursorStyle::IBeam)
-            .child(styled_text)
-            .child(
-                canvas(
-                    {
-                        let text_layout = text_layout.clone();
-                        move |_bounds, _window, _cx| {
-                            // Calculate cursor position from layout
-                            text_layout.position_for_index(visual_cursor_pos)
-                        }
-                    },
-                    move |_bounds, cursor_pos, window: &mut Window, cx| {
-                        if let Some(pos) = cursor_pos {
-                            // Get text metrics
-                            let text_style = window.text_style();
-                            let font_size = text_style.font_size.to_pixels(window.rem_size());
-                            let line_height = text_style
-                                .line_height
-                                .to_pixels(font_size.into(), window.rem_size());
-
-                            // Paint cursor glyph
-                            let cursor_char: SharedString = "\u{258F}".into(); // LEFT ONE EIGHTH BLOCK
-                            let cursor_font_size = font_size * 1.4;
-                            let cursor_run = TextRun {
-                                len: cursor_char.len(),
-                                font: text_style.font(),
-                                color: cursor_color.into(),
-                                background_color: None,
-                                underline: None,
-                                strikethrough: None,
-                            };
-
-                            let shaped_cursor = window.text_system().shape_line(
-                                cursor_char,
-                                cursor_font_size,
-                                &[cursor_run],
-                                None,
-                            );
-
-                            // Center cursor vertically
-                            let cursor_height = cursor_font_size * 1.2;
-                            let y_offset = (line_height - cursor_height) / 2.0;
-                            let cursor_pos = point(pos.x, pos.y + y_offset);
-                            let _ = shaped_cursor.paint(cursor_pos, cursor_height, window, cx);
-                        }
-                    },
-                )
-                .absolute()
-                .size_full(),
-            )
-            .on_mouse_down(MouseButton::Left, {
-                let text_layout = text_layout.clone();
-                let text_len = text.len();
-                cx.listener(move |editor, event: &MouseDownEvent, window, cx| {
-                    let index = match text_layout.index_for_position(event.position) {
-                        Ok(idx) => idx,
-                        Err(idx) => idx.min(text_len),
-                    };
-                    editor.on_click(index, window, cx);
-                })
-            })
+            .children(block_views)
     }
 }

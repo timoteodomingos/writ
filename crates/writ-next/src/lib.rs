@@ -1,4 +1,6 @@
 pub mod args;
+pub mod block_view;
+pub mod blocks;
 pub mod buffer;
 pub mod cursor;
 pub mod editor;
