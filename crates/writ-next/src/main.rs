@@ -11,6 +11,10 @@ use writ_next::{
     window::{CloseWindow, Quit, window_shadow},
 };
 
+fn load_file(file: &std::path::Path) -> String {
+    std::fs::read_to_string(file).unwrap_or_default()
+}
+
 pub struct Root {
     focus_handle: FocusHandle,
     editor: Entity<Editor>,
@@ -50,6 +54,7 @@ fn main() {
     let args = Args::parse()
         .validate()
         .expect("Failed to validate arguments");
+    let content = load_file(&args.file);
 
     let app = Application::new().with_http_client(http::Client::new());
 
@@ -85,10 +90,8 @@ fn main() {
                 let focus_handle = cx.focus_handle();
                 focus_handle.focus(window);
 
-                // Create editor with sample content
-                let editor = cx.new(|cx| {
-                    Editor::new("# Welcome to writ-next\n\nThis is **bold** and *italic* text.\n\nType here to edit!", cx)
-                });
+                // Create editor with file content
+                let editor = cx.new(|cx| Editor::new(&content, cx));
 
                 cx.new(|_| Root {
                     focus_handle,

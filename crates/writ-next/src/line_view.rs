@@ -468,6 +468,20 @@ impl IntoElement for LineView<'_> {
                 })
                 .collect();
 
+            // Extract hidden marker regions for visual-to-buffer conversion
+            // Each entry is (opening_start, opening_end, closing_start, closing_end)
+            let hidden_regions: Vec<_> = self
+                .inline_styles
+                .iter()
+                .map(|region| {
+                    let opening_start = region.full_range.start.max(content_range.start);
+                    let opening_end = region.content_range.start.min(content_range.end);
+                    let closing_start = region.content_range.end.max(content_range.start);
+                    let closing_end = region.full_range.end.min(content_range.end);
+                    (opening_start, opening_end, closing_start, closing_end)
+                })
+                .collect();
+
             line_div = line_div.on_mouse_down(
                 MouseButton::Left,
                 move |event: &MouseDownEvent, window, cx| {
@@ -476,8 +490,37 @@ impl IntoElement for LineView<'_> {
                         Err(idx) => idx,
                     };
 
-                    // Convert visual index to buffer offset
-                    let buffer_offset = content_range.start + visual_index;
+                    // Convert visual index to buffer offset, accounting for hidden markers
+                    let buffer_offset = {
+                        if content_range.start >= content_range.end {
+                            content_range.start
+                        } else {
+                            let mut buffer_pos = content_range.start;
+                            let mut visible_count = 0usize;
+
+                            while buffer_pos < content_range.end && visible_count < visual_index {
+                                // Check if this position is inside a hidden marker region
+                                let mut is_hidden = false;
+                                for &(opening_start, opening_end, closing_start, closing_end) in
+                                    &hidden_regions
+                                {
+                                    if (buffer_pos >= opening_start && buffer_pos < opening_end)
+                                        || (buffer_pos >= closing_start && buffer_pos < closing_end)
+                                    {
+                                        is_hidden = true;
+                                        break;
+                                    }
+                                }
+
+                                if !is_hidden {
+                                    visible_count += 1;
+                                }
+                                buffer_pos += 1;
+                            }
+
+                            buffer_pos.min(content_range.end)
+                        }
+                    };
                     let buffer_offset = buffer_offset.min(line_range.end);
 
                     // Check for Ctrl/Cmd+click on a link
