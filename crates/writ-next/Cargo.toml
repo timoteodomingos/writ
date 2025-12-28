@@ -1,0 +1,22 @@
+[package]
+name = "writ-next"
+version = "0.1.0"
+description = "A Typora-style GPUI markdown editor"
+authors = ["Wilfred Denton <wilfred@hey.com>"]
+license = "MIT"
+edition = "2024"
+
+[[bin]]
+name = "writ-next"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = "1.0.100"
+clap = { version = "4.5.53", features = ["derive"] }
+futures = "0.3"
+gpui = "0.2.2"
+ropey = "1.6.1"
+smol = "2"
+tree-sitter = "0.25"
+tree-sitter-md = "0.5"
+ureq = { version = "3", features = ["rustls"] }
