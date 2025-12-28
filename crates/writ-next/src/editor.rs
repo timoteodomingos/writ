@@ -103,6 +103,16 @@ impl Editor {
                 self.cursor = Cursor::new(self.cursor.offset + 4);
                 cx.notify();
             }
+            "v" if keystroke.modifiers.control || keystroke.modifiers.platform => {
+                // Paste from clipboard
+                if let Some(clipboard_item) = cx.read_from_clipboard() {
+                    if let Some(text) = clipboard_item.text() {
+                        self.buffer.insert(self.cursor.offset, &text);
+                        self.cursor = Cursor::new(self.cursor.offset + text.len());
+                        cx.notify();
+                    }
+                }
+            }
             _ => {
                 // Insert printable characters
                 if let Some(key_char) = &keystroke.key_char {
@@ -127,6 +137,7 @@ impl Render for Editor {
         let text_color = theme.foreground;
         let code_color = theme.green;
         let cursor_color = theme.purple;
+        let link_color = theme.cyan;
         let cursor_offset = self.cursor.offset;
 
         // Extract lines from the buffer
@@ -155,6 +166,7 @@ impl Render for Editor {
                     code_color,
                     text_color,
                     cursor_color,
+                    link_color,
                 )
                 .on_click(on_click.clone())
             })
@@ -166,6 +178,7 @@ impl Render for Editor {
             .key_context("Editor")
             .on_key_down(cx.listener(Self::on_key_down))
             .size_full()
+            .overflow_scroll()
             .font_family("Iosevka Aile")
             .text_color(text_color)
             .cursor(CursorStyle::IBeam)

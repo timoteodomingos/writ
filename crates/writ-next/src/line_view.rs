@@ -5,7 +5,7 @@ use std::rc::Rc;
 
 use gpui::{
     App, FontStyle, FontWeight, HighlightStyle, IntoElement, MouseButton, MouseDownEvent, Rgba,
-    SharedString, StyledText, TextRun, Window, canvas, div, point, prelude::*, px, rems,
+    SharedString, StyledText, TextRun, Window, canvas, div, img, point, prelude::*, px, rems,
 };
 
 use crate::lines::{LineInfo, LineKind};
@@ -28,6 +28,7 @@ pub struct LineView<'a> {
     code_color: Rgba,
     text_color: Rgba,
     cursor_color: Rgba,
+    link_color: Rgba,
     /// Callback when line is clicked
     on_click: Option<ClickCallback>,
 }
@@ -42,6 +43,7 @@ impl<'a> LineView<'a> {
         code_color: Rgba,
         text_color: Rgba,
         cursor_color: Rgba,
+        link_color: Rgba,
     ) -> Self {
         Self {
             line,
@@ -51,6 +53,7 @@ impl<'a> LineView<'a> {
             code_color,
             text_color,
             cursor_color,
+            link_color,
             on_click: None,
         }
     }
@@ -195,6 +198,14 @@ impl<'a> LineView<'a> {
                             color: Some(self.text_color.into()),
                         });
                     }
+                    if region.link_url.is_some() {
+                        highlight.color = Some(self.link_color.into());
+                        highlight.underline = Some(gpui::UnderlineStyle {
+                            thickness: px(1.0),
+                            color: Some(self.link_color.into()),
+                            wavy: false,
+                        });
+                    }
                 }
             }
 
@@ -311,6 +322,76 @@ impl IntoElement for LineView<'_> {
         let line_number = self.line.line_number;
         let line_range = self.line.range.clone();
 
+        // Handle image-only lines specially
+        if let Some(ref image_url) = self.line.image_url {
+            let alt_text = self.line.image_alt.clone().unwrap_or_default();
+            let url = image_url.clone();
+
+            if self.cursor_on_line() {
+                // Cursor on line: show text AND image
+                let (display_text, highlights) = self.build_styled_content();
+                let visual_cursor_pos = self.compute_visual_cursor_pos(&display_text);
+
+                let display_text = if display_text.is_empty() {
+                    " ".to_string()
+                } else {
+                    display_text
+                };
+
+                let shared_text: SharedString = display_text.into();
+                let styled_text = StyledText::new(shared_text).with_highlights(highlights);
+                let text_layout = styled_text.layout().clone();
+
+                let mut line_div =
+                    div()
+                        .id(("line", line_number))
+                        .relative()
+                        .child(img(url.clone()).max_w_full().with_fallback(move || {
+                            div().child(alt_text.clone()).into_any_element()
+                        }))
+                        .child(styled_text);
+
+                // Add cursor overlay
+                if let Some(cursor_pos) = visual_cursor_pos {
+                    line_div = line_div.child(self.render_cursor(cursor_pos, text_layout.clone()));
+                }
+
+                // Add click handler for cursor positioning
+                if let Some(ref on_click) = self.on_click {
+                    let on_click = on_click.clone();
+                    let layout_for_click = text_layout;
+                    let content_range = self.content_range();
+
+                    line_div = line_div.on_mouse_down(
+                        MouseButton::Left,
+                        move |event: &MouseDownEvent, window, cx| {
+                            let visual_index =
+                                match layout_for_click.index_for_position(event.position) {
+                                    Ok(idx) => idx,
+                                    Err(idx) => idx,
+                                };
+                            let buffer_offset = content_range.start + visual_index;
+                            let buffer_offset = buffer_offset.min(line_range.end);
+                            on_click(buffer_offset, window, cx);
+                        },
+                    );
+                }
+
+                return line_div;
+            } else {
+                // Cursor not on line: show only the image, hide text
+                return div()
+                    .id(("line", line_number))
+                    .w_full()
+                    .overflow_hidden()
+                    .child(
+                        img(url).max_w_full().with_fallback(move || {
+                            div().child(alt_text.clone()).into_any_element()
+                        }),
+                    );
+            }
+        }
+
         // Build styled content
         let (display_text, highlights) = self.build_styled_content();
         let visual_cursor_pos = self.compute_visual_cursor_pos(&display_text);
@@ -375,6 +456,18 @@ impl IntoElement for LineView<'_> {
             let layout_for_click = text_layout;
             let content_range = self.content_range();
 
+            // Extract link regions for Ctrl/Cmd+click handling
+            let link_regions: Vec<_> = self
+                .inline_styles
+                .iter()
+                .filter_map(|region| {
+                    region
+                        .link_url
+                        .as_ref()
+                        .map(|url| (region.content_range.clone(), url.clone()))
+                })
+                .collect();
+
             line_div = line_div.on_mouse_down(
                 MouseButton::Left,
                 move |event: &MouseDownEvent, window, cx| {
@@ -386,6 +479,17 @@ impl IntoElement for LineView<'_> {
                     // Convert visual index to buffer offset
                     let buffer_offset = content_range.start + visual_index;
                     let buffer_offset = buffer_offset.min(line_range.end);
+
+                    // Check for Ctrl/Cmd+click on a link
+                    if event.modifiers.control || event.modifiers.platform {
+                        for (range, url) in &link_regions {
+                            if buffer_offset >= range.start && buffer_offset <= range.end {
+                                // Open the URL
+                                let _ = open::that(url);
+                                return;
+                            }
+                        }
+                    }
 
                     on_click(buffer_offset, window, cx);
                 },

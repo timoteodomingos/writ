@@ -330,6 +330,8 @@ pub struct StyledRegion {
     pub content_range: Range<usize>,
     /// The style to apply
     pub style: TextStyle,
+    /// URL for links (None for non-link regions)
+    pub link_url: Option<String>,
 }
 
 /// A block-level region with line-based marker visibility.
@@ -541,6 +543,7 @@ fn extract_emphasis_region(node: Node, _text: &str, style: TextStyle) -> Option<
         full_range: full_start..full_end,
         content_range: content_start..content_end,
         style,
+        link_url: None,
     })
 }
 
@@ -569,6 +572,7 @@ fn extract_code_span_region(node: Node, _text: &str) -> Option<StyledRegion> {
         full_range: full_start..full_end,
         content_range: content_start..content_end,
         style: TextStyle::code(),
+        link_url: None,
     })
 }
 

@@ -15,6 +15,7 @@ anyhow = "1.0.100"
 clap = { version = "4.5.53", features = ["derive"] }
 futures = "0.3"
 gpui = "0.2.2"
+open = "5"
 ropey = "1.6.1"
 smol = "2"
 # Use same revision as Zed - works with tree-sitter 0.23
