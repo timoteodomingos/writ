@@ -5,10 +5,10 @@ use gpui::{
     prelude::*,
 };
 
-use crate::block_view::{BlockView, ClickCallback};
-use crate::blocks::extract_blocks;
 use crate::buffer::Buffer;
 use crate::cursor::Cursor;
+use crate::line_view::{ClickCallback, LineView};
+use crate::lines::{extract_inline_styles, extract_lines};
 use crate::theme::Theme;
 
 /// The main editor component.
@@ -93,6 +93,7 @@ impl Editor {
                 cx.notify();
             }
             "enter" => {
+                // Insert newline and move cursor after it (to the new line)
                 self.buffer.insert(self.cursor.offset, "\n");
                 self.cursor = Cursor::new(self.cursor.offset + 1);
                 cx.notify();
@@ -128,8 +129,8 @@ impl Render for Editor {
         let cursor_color = theme.purple;
         let cursor_offset = self.cursor.offset;
 
-        // Extract blocks from the buffer
-        let blocks = extract_blocks(&self.buffer);
+        // Extract lines from the buffer
+        let lines = extract_lines(&self.buffer);
         let buffer_text = self.buffer.text();
 
         // Create click callback that updates cursor position
@@ -141,19 +142,19 @@ impl Render for Editor {
             });
         });
 
-        // Build block views with click handling
-        let block_views: Vec<_> = blocks
+        // Build line views with click handling
+        let line_views: Vec<_> = lines
             .iter()
-            .enumerate()
-            .map(|(idx, block)| {
-                BlockView::new(
-                    block,
+            .map(|line| {
+                let inline_styles = extract_inline_styles(&self.buffer, line);
+                LineView::new(
+                    line,
                     &buffer_text,
                     cursor_offset,
+                    inline_styles,
                     code_color,
                     text_color,
                     cursor_color,
-                    idx,
                 )
                 .on_click(on_click.clone())
             })
@@ -168,6 +169,6 @@ impl Render for Editor {
             .font_family("Iosevka Aile")
             .text_color(text_color)
             .cursor(CursorStyle::IBeam)
-            .children(block_views)
+            .children(line_views)
     }
 }
