@@ -1,4 +1,4 @@
-use gpui::{rgb, Global, Rgba};
+use gpui::{Global, Rgba, rgb, rgba};
 
 #[allow(dead_code)]
 pub struct Theme {
@@ -22,7 +22,7 @@ pub fn dracula() -> Theme {
     Theme {
         background: rgb(0x282A36),
         current_line: rgb(0x6272A4),
-        selection: rgb(0x44475A),
+        selection: rgba(0x44475A99), // Semi-transparent selection
         foreground: rgb(0xF8F8F2),
         comment: rgb(0x6272A4),
         red: rgb(0xFF5555),

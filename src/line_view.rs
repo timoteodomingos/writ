@@ -5,15 +5,20 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gpui::{
-    App, Font, FontStyle, FontWeight, Hsla, IntoElement, MouseButton, MouseDownEvent, Rgba,
-    SharedString, StyledText, TextRun, Window, canvas, div, img, point, prelude::*, px, rems,
+    App, Font, FontStyle, FontWeight, Hsla, IntoElement, MouseButton, MouseDownEvent,
+    MouseMoveEvent, Rgba, SharedString, StyledText, TextRun, Window, canvas, div, img, point,
+    prelude::*, px, rems,
 };
 
 use crate::lines::{LineInfo, LineKind};
 use crate::render::StyledRegion;
 
-/// Callback type for click events - receives the buffer offset where the click occurred.
-pub type ClickCallback = Rc<dyn Fn(usize, &mut Window, &mut App)>;
+/// Callback type for click events - receives the buffer offset where the click occurred,
+/// and whether shift was held (for extending selection).
+pub type ClickCallback = Rc<dyn Fn(usize, bool, &mut Window, &mut App)>;
+
+/// Callback type for drag events - receives the buffer offset during mouse drag.
+pub type DragCallback = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 
 /// Represents a resolved image source for rendering.
 enum ImageSource {
@@ -35,6 +40,9 @@ pub struct LineView<'a> {
     text_color: Rgba,
     cursor_color: Rgba,
     link_color: Rgba,
+    selection_color: Rgba,
+    /// Selection range in buffer offsets (None if collapsed/no selection)
+    selection_range: Option<Range<usize>>,
     /// Font for regular text
     text_font: Font,
     /// Font for inline code
@@ -43,6 +51,8 @@ pub struct LineView<'a> {
     base_path: Option<PathBuf>,
     /// Callback when line is clicked
     on_click: Option<ClickCallback>,
+    /// Callback when mouse is dragged over line (with button pressed)
+    on_drag: Option<DragCallback>,
 }
 
 impl<'a> LineView<'a> {
@@ -55,6 +65,8 @@ impl<'a> LineView<'a> {
         text_color: Rgba,
         cursor_color: Rgba,
         link_color: Rgba,
+        selection_color: Rgba,
+        selection_range: Option<Range<usize>>,
         text_font: Font,
         code_font: Font,
         base_path: Option<PathBuf>,
@@ -67,16 +79,25 @@ impl<'a> LineView<'a> {
             text_color,
             cursor_color,
             link_color,
+            selection_color,
+            selection_range,
             text_font,
             code_font,
             base_path,
             on_click: None,
+            on_drag: None,
         }
     }
 
     /// Set the click callback for this line.
     pub fn on_click(mut self, callback: ClickCallback) -> Self {
         self.on_click = Some(callback);
+        self
+    }
+
+    /// Set the drag callback for this line.
+    pub fn on_drag(mut self, callback: DragCallback) -> Self {
+        self.on_drag = Some(callback);
         self
     }
 
@@ -120,15 +141,26 @@ impl<'a> LineView<'a> {
         }
     }
 
-    /// Get the content range, accounting for hidden markers.
+    /// Check if selection intersects this line.
+    fn selection_on_line(&self) -> bool {
+        if let Some(ref sel) = self.selection_range {
+            let line_range = &self.line.range;
+            // Selection intersects if it overlaps with line range
+            sel.start < line_range.end && sel.end > line_range.start
+        } else {
+            false
+        }
+    }
+
+    /// Get the content range, accounting for hidden block markers (like # for headings).
     fn content_range(&self) -> Range<usize> {
         let range = &self.line.range;
 
-        // If cursor is on this line, show markers; otherwise hide them
-        if self.cursor_on_line() {
+        // Block markers are shown when cursor is on line OR selection is on line
+        if self.cursor_on_line() || self.selection_on_line() {
             range.clone()
         } else if let Some(marker_range) = &self.line.marker_range {
-            // Hide the marker
+            // Hide the block marker
             marker_range.end..range.end
         } else {
             range.clone()
@@ -166,18 +198,25 @@ impl<'a> LineView<'a> {
         // Collect all boundary points from inline styles
         let mut boundaries: Vec<usize> = vec![content_range.start, content_range.end];
 
+        // If selection is on this line, show ALL inline markers
+        // Otherwise, only show markers for regions where cursor is inside
+        let show_all_markers = self.selection_on_line();
+
         for region in &self.inline_styles {
             // Only include boundaries within our content range
             if region.full_range.end > content_range.start
                 && region.full_range.start < content_range.end
             {
+                // Check if cursor is inside this specific region
                 let cursor_inside = self.cursor_offset >= region.full_range.start
                     && self.cursor_offset <= region.full_range.end;
 
-                if cursor_inside {
+                if show_all_markers || cursor_inside {
+                    // Show full range including markers
                     boundaries.push(region.full_range.start.max(content_range.start));
                     boundaries.push(region.full_range.end.min(content_range.end));
                 } else {
+                    // Hide markers, show content range boundaries
                     boundaries.push(region.full_range.start.max(content_range.start));
                     boundaries.push(region.content_range.start.max(content_range.start));
                     boundaries.push(region.content_range.end.min(content_range.end));
@@ -200,21 +239,23 @@ impl<'a> LineView<'a> {
                 continue;
             }
 
-            // Check if this range should be hidden (inline marker when cursor outside)
+            // Check if this range should be hidden (inline marker when cursor outside region)
             let mut is_hidden = false;
-            for region in &self.inline_styles {
-                let cursor_inside = self.cursor_offset >= region.full_range.start
-                    && self.cursor_offset <= region.full_range.end;
+            if !show_all_markers {
+                for region in &self.inline_styles {
+                    let cursor_inside = self.cursor_offset >= region.full_range.start
+                        && self.cursor_offset <= region.full_range.end;
 
-                if !cursor_inside {
-                    let in_opening =
-                        start >= region.full_range.start && end <= region.content_range.start;
-                    let in_closing =
-                        start >= region.content_range.end && end <= region.full_range.end;
+                    if !cursor_inside {
+                        let in_opening =
+                            start >= region.full_range.start && end <= region.content_range.start;
+                        let in_closing =
+                            start >= region.content_range.end && end <= region.full_range.end;
 
-                    if in_opening || in_closing {
-                        is_hidden = true;
-                        break;
+                        if in_opening || in_closing {
+                            is_hidden = true;
+                            break;
+                        }
                     }
                 }
             }
@@ -236,10 +277,12 @@ impl<'a> LineView<'a> {
             let mut is_link = false;
 
             for region in &self.inline_styles {
+                // Check if cursor is inside this specific region
                 let cursor_inside = self.cursor_offset >= region.full_range.start
                     && self.cursor_offset <= region.full_range.end;
 
-                let style_range = if cursor_inside {
+                // Use full_range when showing markers (selection or cursor inside), content_range otherwise
+                let style_range = if show_all_markers || cursor_inside {
                     &region.full_range
                 } else {
                     &region.content_range
@@ -338,16 +381,14 @@ impl<'a> LineView<'a> {
             return Some(0);
         }
 
+        // If selection is on line, all markers are shown - direct mapping
+        if self.selection_on_line() {
+            let visual_pos = self.cursor_offset.saturating_sub(content_range.start);
+            return Some(visual_pos.min(display_text.len()));
+        }
+
         // Calculate how much text is hidden before the cursor
         let mut hidden_before_cursor = 0usize;
-
-        // Account for hidden block marker
-        if !self.cursor_on_line()
-            && let Some(marker_range) = &self.line.marker_range
-            && self.cursor_offset > marker_range.end
-        {
-            hidden_before_cursor += marker_range.end - marker_range.start;
-        }
 
         // Account for hidden inline markers
         for region in &self.inline_styles {
@@ -376,6 +417,156 @@ impl<'a> LineView<'a> {
         let visual_pos = buffer_pos_in_content.saturating_sub(hidden_before_cursor);
 
         Some(visual_pos.min(display_text.len()))
+    }
+
+    /// Convert a buffer offset to a visual position, accounting for hidden markers.
+    fn buffer_to_visual_pos(&self, buffer_offset: usize, display_text: &str) -> usize {
+        let content_range = self.content_range();
+
+        if content_range.start >= content_range.end {
+            return 0;
+        }
+
+        // Clamp buffer_offset to content range
+        let clamped_offset = buffer_offset.clamp(content_range.start, content_range.end);
+
+        // If selection is on line, all markers are shown - direct mapping
+        if self.selection_on_line() {
+            let visual_pos = clamped_offset.saturating_sub(content_range.start);
+            return visual_pos.min(display_text.len());
+        }
+
+        // Calculate how much text is hidden before this offset
+        let mut hidden_before = 0usize;
+
+        // Account for hidden inline markers
+        for region in &self.inline_styles {
+            // Opening marker hidden
+            let opening_start = region.full_range.start.max(content_range.start);
+            let opening_end = region.content_range.start.min(content_range.end);
+            if opening_end > opening_start && clamped_offset > opening_end {
+                hidden_before += opening_end - opening_start;
+            }
+
+            // Closing marker hidden
+            let closing_start = region.content_range.end.max(content_range.start);
+            let closing_end = region.full_range.end.min(content_range.end);
+            if closing_end > closing_start && clamped_offset > closing_end {
+                hidden_before += closing_end - closing_start;
+            }
+        }
+
+        let buffer_pos_in_content = clamped_offset.saturating_sub(content_range.start);
+        let visual_pos = buffer_pos_in_content.saturating_sub(hidden_before);
+
+        visual_pos.min(display_text.len())
+    }
+
+    /// Compute the visual selection range for this line.
+    /// Returns None if selection doesn't intersect this line.
+    fn compute_visual_selection_range(&self, display_text: &str) -> Option<Range<usize>> {
+        let selection = self.selection_range.as_ref()?;
+        let line_range = &self.line.range;
+
+        // Check if selection intersects this line
+        if selection.end <= line_range.start || selection.start >= line_range.end {
+            return None;
+        }
+
+        // Clamp selection to line bounds
+        let sel_start = selection.start.max(line_range.start);
+        let sel_end = selection.end.min(line_range.end);
+
+        // Convert to visual positions
+        let visual_start = self.buffer_to_visual_pos(sel_start, display_text);
+        let visual_end = self.buffer_to_visual_pos(sel_end, display_text);
+
+        if visual_start < visual_end {
+            Some(visual_start..visual_end)
+        } else {
+            None
+        }
+    }
+
+    /// Render the selection overlay.
+    fn render_selection(
+        &self,
+        visual_range: Range<usize>,
+        text_layout: gpui::TextLayout,
+    ) -> impl IntoElement {
+        let selection_color = self.selection_color;
+
+        canvas(
+            move |bounds, _window, _cx| {
+                let start_pos = text_layout.position_for_index(visual_range.start);
+                let end_pos = text_layout.position_for_index(visual_range.end);
+                (start_pos, end_pos, bounds)
+            },
+            move |_bounds, data, window: &mut Window, _cx| {
+                let (start_opt, end_opt, _bounds) = data;
+                if let (Some(start), Some(end)) = (start_opt, end_opt) {
+                    let text_style = window.text_style();
+                    let font_size = text_style.font_size.to_pixels(window.rem_size());
+                    let line_height = text_style
+                        .line_height
+                        .to_pixels(font_size.into(), window.rem_size());
+
+                    // Check if selection spans multiple visual lines (wrapped text)
+                    if start.y == end.y {
+                        // Single line selection
+                        let rect = gpui::Bounds {
+                            origin: point(start.x, start.y),
+                            size: gpui::Size {
+                                width: end.x - start.x,
+                                height: line_height,
+                            },
+                        };
+                        window.paint_quad(gpui::fill(rect, selection_color));
+                    } else {
+                        // Multi-line selection (wrapped text)
+                        // Use a large width to ensure we cover to the edge
+                        // The parent div clips, so this is safe
+                        let full_width = px(10000.0);
+
+                        // First line: from start.x to end of line
+                        let first_rect = gpui::Bounds {
+                            origin: point(start.x, start.y),
+                            size: gpui::Size {
+                                width: full_width,
+                                height: line_height,
+                            },
+                        };
+                        window.paint_quad(gpui::fill(first_rect, selection_color));
+
+                        // Middle lines: full width
+                        let mut y = start.y + line_height;
+                        while y < end.y {
+                            let mid_rect = gpui::Bounds {
+                                origin: point(px(0.0), y),
+                                size: gpui::Size {
+                                    width: full_width,
+                                    height: line_height,
+                                },
+                            };
+                            window.paint_quad(gpui::fill(mid_rect, selection_color));
+                            y += line_height;
+                        }
+
+                        // Last line: from start to end.x
+                        let last_rect = gpui::Bounds {
+                            origin: point(px(0.0), end.y),
+                            size: gpui::Size {
+                                width: end.x,
+                                height: line_height,
+                            },
+                        };
+                        window.paint_quad(gpui::fill(last_rect, selection_color));
+                    }
+                }
+            },
+        )
+        .absolute()
+        .size_full()
     }
 
     /// Render the cursor overlay.
@@ -509,7 +700,7 @@ impl IntoElement for LineView<'_> {
                                 };
                             let buffer_offset = content_range.start + visual_index;
                             let buffer_offset = buffer_offset.min(line_range.end);
-                            on_click(buffer_offset, window, cx);
+                            on_click(buffer_offset, event.modifiers.shift, window, cx);
                         },
                     );
                 }
@@ -554,6 +745,9 @@ impl IntoElement for LineView<'_> {
             display_text
         };
 
+        // Compute selection range before converting display_text
+        let visual_selection = self.compute_visual_selection_range(&display_text);
+
         let shared_text: SharedString = display_text.into();
         let styled_text = StyledText::new(shared_text).with_runs(runs);
         let text_layout = styled_text.layout().clone();
@@ -589,7 +783,13 @@ impl IntoElement for LineView<'_> {
             _ => line_base(line_number).relative(),
         };
 
+        // Add styled text first so its layout is prepainted before overlays
         line_div = line_div.child(styled_text);
+
+        // Add selection overlay (positioned absolutely, so appears behind text visually)
+        if let Some(sel_range) = visual_selection {
+            line_div = line_div.child(self.render_selection(sel_range, text_layout.clone()));
+        }
 
         // Add cursor overlay if cursor is on this line
         if let Some(cursor_pos) = visual_cursor_pos {
@@ -599,7 +799,7 @@ impl IntoElement for LineView<'_> {
         // Add click handler
         if let Some(ref on_click) = self.on_click {
             let on_click = on_click.clone();
-            let layout_for_click = text_layout;
+            let layout_for_click = text_layout.clone();
             let content_range = self.content_range();
 
             // Extract link regions for Ctrl/Cmd+click handling
@@ -680,9 +880,37 @@ impl IntoElement for LineView<'_> {
                         }
                     }
 
-                    on_click(buffer_offset, window, cx);
+                    on_click(buffer_offset, event.modifiers.shift, window, cx);
                 },
             );
+        }
+
+        // Add drag handler for mouse move with button pressed
+        if let Some(ref on_drag) = self.on_drag {
+            let on_drag = on_drag.clone();
+            let layout_for_drag = text_layout;
+            let line_range = self.line.range.clone();
+
+            line_div = line_div.on_mouse_move(move |event: &MouseMoveEvent, window, cx| {
+                // Only handle drag when left button is pressed
+                if event.pressed_button != Some(MouseButton::Left) {
+                    return;
+                }
+
+                let visual_index = match layout_for_drag.index_for_position(event.position) {
+                    Ok(idx) => idx,
+                    Err(idx) => idx,
+                };
+
+                // Simple mapping: visual index to buffer offset
+                // Note: This doesn't perfectly account for hidden markers, but avoids
+                // the jumping issue when markers are revealed during drag. The offset
+                // will be slightly off when markers are hidden, but the re-render will
+                // correct it on the next frame.
+                let buffer_offset = (line_range.start + visual_index).min(line_range.end);
+
+                on_drag(buffer_offset, window, cx);
+            });
         }
 
         line_div
