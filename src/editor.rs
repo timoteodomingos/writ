@@ -65,17 +65,26 @@ impl Editor {
         }
     }
 
+    /// Sync dirty state from buffer to FileInfo global.
+    /// Call this after any buffer modification.
+    fn sync_dirty_state(&self, cx: &mut Context<Self>) {
+        let file_info = cx.global::<FileInfo>();
+        let buffer_dirty = self.buffer.is_dirty();
+        if file_info.dirty != buffer_dirty {
+            cx.set_global(FileInfo {
+                path: file_info.path.clone(),
+                dirty: buffer_dirty,
+            });
+        }
+    }
+
     /// Save the buffer to the file.
     fn save(&mut self, cx: &mut Context<Self>) {
         let file_info = cx.global::<FileInfo>();
         let content = self.buffer.text();
         if std::fs::write(&file_info.path, &content).is_ok() {
             self.buffer.mark_clean();
-            // Update FileInfo immediately so title bar updates right away
-            cx.set_global(FileInfo {
-                path: file_info.path.clone(),
-                dirty: false,
-            });
+            self.sync_dirty_state(cx);
             cx.notify();
         }
     }
@@ -91,12 +100,15 @@ impl Editor {
                 if !self.selection.is_collapsed() {
                     // Delete selection
                     let range = self.selection.range();
-                    self.buffer.delete(range.clone());
+                    let cursor_before = self.cursor().offset;
+                    self.buffer.delete(range.clone(), cursor_before);
                     self.selection = Selection::new(range.start, range.start);
                     cx.notify();
                 } else if self.cursor().offset > 0 {
+                    let cursor_before = self.cursor().offset;
                     let new_cursor = self.cursor().move_left(&self.buffer);
-                    self.buffer.delete(new_cursor.offset..self.cursor().offset);
+                    self.buffer
+                        .delete(new_cursor.offset..cursor_before, cursor_before);
                     self.selection = Selection::new(new_cursor.offset, new_cursor.offset);
                     cx.notify();
                 }
@@ -105,12 +117,15 @@ impl Editor {
                 if !self.selection.is_collapsed() {
                     // Delete selection
                     let range = self.selection.range();
-                    self.buffer.delete(range.clone());
+                    let cursor_before = self.cursor().offset;
+                    self.buffer.delete(range.clone(), cursor_before);
                     self.selection = Selection::new(range.start, range.start);
                     cx.notify();
                 } else if self.cursor().offset < self.buffer.len_bytes() {
+                    let cursor_before = self.cursor().offset;
                     let next = self.cursor().move_right(&self.buffer);
-                    self.buffer.delete(self.cursor().offset..next.offset);
+                    self.buffer
+                        .delete(cursor_before..next.offset, cursor_before);
                     cx.notify();
                 }
             }
@@ -154,27 +169,29 @@ impl Editor {
             }
             "enter" => {
                 // Delete selection first if any
+                let cursor_before = self.cursor().offset;
                 let insert_pos = if !self.selection.is_collapsed() {
                     let range = self.selection.range();
-                    self.buffer.delete(range.clone());
+                    self.buffer.delete(range.clone(), cursor_before);
                     range.start
                 } else {
-                    self.cursor().offset
+                    cursor_before
                 };
-                self.buffer.insert(insert_pos, "\n");
+                self.buffer.insert(insert_pos, "\n", insert_pos);
                 self.selection = Selection::new(insert_pos + 1, insert_pos + 1);
                 cx.notify();
             }
             "tab" => {
                 // Delete selection first if any
+                let cursor_before = self.cursor().offset;
                 let insert_pos = if !self.selection.is_collapsed() {
                     let range = self.selection.range();
-                    self.buffer.delete(range.clone());
+                    self.buffer.delete(range.clone(), cursor_before);
                     range.start
                 } else {
-                    self.cursor().offset
+                    cursor_before
                 };
-                self.buffer.insert(insert_pos, "    ");
+                self.buffer.insert(insert_pos, "    ", insert_pos);
                 self.selection = Selection::new(insert_pos + 4, insert_pos + 4);
                 cx.notify();
             }
@@ -195,9 +212,10 @@ impl Editor {
                 // Cut selection to clipboard
                 if !self.selection.is_collapsed() {
                     let range = self.selection.range();
+                    let cursor_before = self.cursor().offset;
                     let text = &self.buffer.text()[range.clone()];
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.to_string()));
-                    self.buffer.delete(range.clone());
+                    self.buffer.delete(range.clone(), cursor_before);
                     self.selection = Selection::new(range.start, range.start);
                     cx.notify();
                 }
@@ -207,16 +225,39 @@ impl Editor {
                 if let Some(clipboard_item) = cx.read_from_clipboard()
                     && let Some(text) = clipboard_item.text()
                 {
+                    let cursor_before = self.cursor().offset;
                     let insert_pos = if !self.selection.is_collapsed() {
                         let range = self.selection.range();
-                        self.buffer.delete(range.clone());
+                        self.buffer.delete(range.clone(), cursor_before);
                         range.start
                     } else {
-                        self.cursor().offset
+                        cursor_before
                     };
-                    self.buffer.insert(insert_pos, &text);
+                    self.buffer.insert(insert_pos, &text, insert_pos);
                     let new_pos = insert_pos + text.len();
                     self.selection = Selection::new(new_pos, new_pos);
+                    cx.notify();
+                }
+            }
+            "z" if keystroke.modifiers.control || keystroke.modifiers.platform => {
+                if keystroke.modifiers.shift {
+                    // Redo: Ctrl+Shift+Z
+                    if let Some(cursor_pos) = self.buffer.redo() {
+                        self.selection = Selection::new(cursor_pos, cursor_pos);
+                        cx.notify();
+                    }
+                } else {
+                    // Undo: Ctrl+Z
+                    if let Some(cursor_pos) = self.buffer.undo() {
+                        self.selection = Selection::new(cursor_pos, cursor_pos);
+                        cx.notify();
+                    }
+                }
+            }
+            "y" if keystroke.modifiers.control => {
+                // Redo: Ctrl+Y (alternative)
+                if let Some(cursor_pos) = self.buffer.redo() {
+                    self.selection = Selection::new(cursor_pos, cursor_pos);
                     cx.notify();
                 }
             }
@@ -227,14 +268,15 @@ impl Editor {
             _ => {
                 // Insert printable characters, replacing selection if any
                 if let Some(key_char) = &keystroke.key_char {
+                    let cursor_before = self.cursor().offset;
                     let insert_pos = if !self.selection.is_collapsed() {
                         let range = self.selection.range();
-                        self.buffer.delete(range.clone());
+                        self.buffer.delete(range.clone(), cursor_before);
                         range.start
                     } else {
-                        self.cursor().offset
+                        cursor_before
                     };
-                    self.buffer.insert(insert_pos, key_char);
+                    self.buffer.insert(insert_pos, key_char, insert_pos);
                     let new_pos = insert_pos + key_char.len();
                     self.selection = Selection::new(new_pos, new_pos);
                     cx.notify();
@@ -244,6 +286,9 @@ impl Editor {
 
         // Scroll cursor into view after any cursor movement
         self.scroll_cursor_into_view();
+
+        // Sync dirty state to FileInfo global so title bar updates
+        self.sync_dirty_state(cx);
     }
 }
 
@@ -274,14 +319,6 @@ impl Render for Editor {
         // Get the base path for resolving relative image paths
         let file_info = cx.global::<FileInfo>();
         let base_path: Option<PathBuf> = file_info.path.parent().map(|p| p.to_path_buf());
-
-        // Sync dirty state from buffer to FileInfo global
-        if file_info.dirty != self.buffer.is_dirty() {
-            cx.set_global(FileInfo {
-                path: file_info.path.clone(),
-                dirty: self.buffer.is_dirty(),
-            });
-        }
 
         // Extract lines from the buffer
         let lines = extract_lines(&self.buffer);

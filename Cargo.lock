@@ -5692,6 +5692,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "undo"
+version = "0.52.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1dfbb202cb07dd2a685c765aa040db18d8a0dbe7079cf57c275833521f67653"
+dependencies = [
+ "serde",
+ "slab",
+]
+
+[[package]]
 name = "unicase"
 version = "2.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6731,6 +6741,7 @@ dependencies = [
  "smol",
  "tree-sitter",
  "tree-sitter-md",
+ "undo",
  "ureq",
 ]
 
