@@ -3,7 +3,7 @@ use std::rc::Rc;
 
 use gpui::{
     App, Context, CursorStyle, FocusHandle, Focusable, IntoElement, KeyDownEvent, ScrollHandle,
-    Window, div, prelude::*,
+    Window, div, prelude::*, px,
 };
 
 use crate::buffer::Buffer;
@@ -191,6 +191,15 @@ impl Render for Editor {
             })
             .collect();
 
+        // Inner container with max-width, centered
+        let content = div()
+            .id("editor-content")
+            .max_w(px(800.0))
+            .w_full()
+            .mx_auto()
+            .children(line_views);
+
+        // Outer scrollable container that fills the window
         div()
             .id("editor")
             .track_focus(&self.focus_handle)
@@ -202,6 +211,6 @@ impl Render for Editor {
             .font_family("Iosevka Aile")
             .text_color(text_color)
             .cursor(CursorStyle::IBeam)
-            .children(line_views)
+            .child(content)
     }
 }
