@@ -1,6 +1,7 @@
 use ropey::Rope;
 use std::ops::Range;
 use std::str::FromStr;
+use tree_sitter::{InputEdit, Point};
 
 use crate::parser::{MarkdownParser, MarkdownTree};
 
@@ -58,39 +59,95 @@ impl Buffer {
         self.tree.as_ref()
     }
 
+    /// Convert a byte offset to a tree-sitter Point (row, column).
+    fn byte_to_point(&self, byte_offset: usize) -> Point {
+        let line = self.byte_to_line(byte_offset);
+        let line_start_byte = self.line_to_byte(line);
+        let column = byte_offset - line_start_byte;
+        Point::new(line, column)
+    }
+
     /// Insert text at a byte offset.
     pub fn insert(&mut self, byte_offset: usize, text: &str) {
+        // Build the edit description before modifying the rope
+        let start_point = self.byte_to_point(byte_offset);
+        let edit = InputEdit {
+            start_byte: byte_offset,
+            old_end_byte: byte_offset,
+            new_end_byte: byte_offset + text.len(),
+            start_position: start_point,
+            old_end_position: start_point,
+            new_end_position: self.compute_new_end_point(start_point, text),
+        };
+
         // Convert byte offset to char offset for rope
         let char_offset = self.text.byte_to_char(byte_offset);
         self.text.insert(char_offset, text);
-        self.reparse();
+        self.reparse(edit);
     }
 
     /// Delete a range of bytes.
     pub fn delete(&mut self, byte_range: Range<usize>) {
+        // Build the edit description before modifying the rope
+        let start_point = self.byte_to_point(byte_range.start);
+        let old_end_point = self.byte_to_point(byte_range.end);
+        let edit = InputEdit {
+            start_byte: byte_range.start,
+            old_end_byte: byte_range.end,
+            new_end_byte: byte_range.start,
+            start_position: start_point,
+            old_end_position: old_end_point,
+            new_end_position: start_point,
+        };
+
         // Convert byte offsets to char offsets for rope
         let char_start = self.text.byte_to_char(byte_range.start);
         let char_end = self.text.byte_to_char(byte_range.end);
         self.text.remove(char_start..char_end);
-        self.reparse();
+        self.reparse(edit);
     }
 
     /// Replace a range of bytes with new text.
     pub fn replace(&mut self, byte_range: Range<usize>, text: &str) {
+        // Build the edit description before modifying the rope
+        let start_point = self.byte_to_point(byte_range.start);
+        let old_end_point = self.byte_to_point(byte_range.end);
+        let edit = InputEdit {
+            start_byte: byte_range.start,
+            old_end_byte: byte_range.end,
+            new_end_byte: byte_range.start + text.len(),
+            start_position: start_point,
+            old_end_position: old_end_point,
+            new_end_position: self.compute_new_end_point(start_point, text),
+        };
+
         let char_start = self.text.byte_to_char(byte_range.start);
         let char_end = self.text.byte_to_char(byte_range.end);
         self.text.remove(char_start..char_end);
         self.text.insert(char_start, text);
-        self.reparse();
+        self.reparse(edit);
     }
 
-    /// Re-parse the document after an edit.
-    ///
-    /// For now this does a full reparse. We can optimize with incremental
-    /// parsing later using tree-sitter's edit API.
-    fn reparse(&mut self) {
+    /// Compute the end point after inserting text at a given start point.
+    fn compute_new_end_point(&self, start: Point, text: &str) -> Point {
+        let newlines: Vec<_> = text.match_indices('\n').collect();
+        if newlines.is_empty() {
+            Point::new(start.row, start.column + text.len())
+        } else {
+            let last_newline_pos = newlines.last().unwrap().0;
+            let column = text.len() - last_newline_pos - 1;
+            Point::new(start.row + newlines.len(), column)
+        }
+    }
+
+    /// Re-parse the document after an edit using incremental parsing.
+    fn reparse(&mut self, edit: InputEdit) {
+        // Update the old tree with edit info so tree-sitter can reuse unchanged parts
+        if let Some(ref mut tree) = self.tree {
+            tree.edit(&edit);
+        }
         let text = self.text.to_string();
-        self.tree = self.parser.parse(text.as_bytes(), None);
+        self.tree = self.parser.parse(text.as_bytes(), self.tree.as_ref());
     }
 
     /// Get the line number (0-indexed) for a byte offset.
