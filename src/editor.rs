@@ -2,8 +2,8 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui::{
-    App, Context, CursorStyle, FocusHandle, Focusable, IntoElement, KeyDownEvent, ScrollHandle,
-    Window, div, prelude::*,
+    App, Context, CursorStyle, FocusHandle, Focusable, Font, IntoElement, KeyDownEvent,
+    ScrollHandle, Window, div, font, prelude::*,
 };
 
 use crate::buffer::Buffer;
@@ -149,10 +149,13 @@ impl Render for Editor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = cx.global::<Theme>();
         let text_color = theme.foreground;
-        let code_color = theme.green;
         let cursor_color = theme.purple;
         let link_color = theme.cyan;
         let cursor_offset = self.cursor.offset;
+
+        // Create fonts for text and code
+        let text_font: Font = font("Iosevka Aile");
+        let code_font: Font = font("Iosevka");
 
         // Get the base path for resolving relative image paths
         let file_info = cx.global::<FileInfo>();
@@ -181,10 +184,11 @@ impl Render for Editor {
                     &buffer_text,
                     cursor_offset,
                     inline_styles,
-                    code_color,
                     text_color,
                     cursor_color,
                     link_color,
+                    text_font.clone(),
+                    code_font.clone(),
                     base_path.clone(),
                 )
                 .on_click(on_click.clone())

@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gpui::{
-    App, FontStyle, FontWeight, HighlightStyle, IntoElement, MouseButton, MouseDownEvent, Rgba,
+    App, Font, FontStyle, FontWeight, Hsla, IntoElement, MouseButton, MouseDownEvent, Rgba,
     SharedString, StyledText, TextRun, Window, canvas, div, img, point, prelude::*, px, rems,
 };
 
@@ -32,10 +32,13 @@ pub struct LineView<'a> {
     /// Inline styles for this line (bold, italic, code, etc.)
     inline_styles: Vec<StyledRegion>,
     /// Theme colors
-    code_color: Rgba,
     text_color: Rgba,
     cursor_color: Rgba,
     link_color: Rgba,
+    /// Font for regular text
+    text_font: Font,
+    /// Font for inline code
+    code_font: Font,
     /// Base path for resolving relative image paths (directory containing the markdown file)
     base_path: Option<PathBuf>,
     /// Callback when line is clicked
@@ -49,10 +52,11 @@ impl<'a> LineView<'a> {
         text: &'a str,
         cursor_offset: usize,
         inline_styles: Vec<StyledRegion>,
-        code_color: Rgba,
         text_color: Rgba,
         cursor_color: Rgba,
         link_color: Rgba,
+        text_font: Font,
+        code_font: Font,
         base_path: Option<PathBuf>,
     ) -> Self {
         Self {
@@ -60,10 +64,11 @@ impl<'a> LineView<'a> {
             text,
             cursor_offset,
             inline_styles,
-            code_color,
             text_color,
             cursor_color,
             link_color,
+            text_font,
+            code_font,
             base_path,
             on_click: None,
         }
@@ -130,8 +135,25 @@ impl<'a> LineView<'a> {
         }
     }
 
-    /// Build the display text and highlights.
-    fn build_styled_content(&self) -> (String, Vec<(Range<usize>, HighlightStyle)>) {
+    /// Check if this line should have bold styling (headings).
+    fn is_line_bold(&self) -> bool {
+        matches!(self.line.kind, LineKind::Heading(_))
+    }
+
+    /// Get the base text font with line-level styling (bold for headings).
+    fn line_font(&self) -> Font {
+        if self.is_line_bold() {
+            Font {
+                weight: FontWeight::BOLD,
+                ..self.text_font.clone()
+            }
+        } else {
+            self.text_font.clone()
+        }
+    }
+
+    /// Build the display text and text runs with proper fonts.
+    fn build_styled_content(&self) -> (String, Vec<TextRun>) {
         let content_range = self.content_range();
 
         if content_range.start >= content_range.end {
@@ -139,7 +161,7 @@ impl<'a> LineView<'a> {
         }
 
         let mut display_text = String::new();
-        let mut highlights = Vec::new();
+        let mut runs: Vec<TextRun> = Vec::new();
 
         // Collect all boundary points from inline styles
         let mut boundaries: Vec<usize> = vec![content_range.start, content_range.end];
@@ -202,13 +224,16 @@ impl<'a> LineView<'a> {
             }
 
             // Add text
-            let display_start = display_text.len();
-            display_text.push_str(&self.text[start..end]);
-            let display_end = display_text.len();
+            let span_text = &self.text[start..end];
+            let span_len = span_text.len();
+            display_text.push_str(span_text);
 
-            // Compute merged style
-            let mut has_style = false;
-            let mut highlight = HighlightStyle::default();
+            // Compute merged style for this span
+            let mut is_bold = false;
+            let mut is_italic = false;
+            let mut is_code = false;
+            let mut is_strikethrough = false;
+            let mut is_link = false;
 
             for region in &self.inline_styles {
                 let cursor_inside = self.cursor_offset >= region.full_range.start
@@ -221,39 +246,83 @@ impl<'a> LineView<'a> {
                 };
 
                 if style_range.start <= start && end <= style_range.end {
-                    has_style = true;
                     if region.style.bold {
-                        highlight.font_weight = Some(FontWeight::BOLD);
+                        is_bold = true;
                     }
                     if region.style.italic {
-                        highlight.font_style = Some(FontStyle::Italic);
+                        is_italic = true;
                     }
                     if region.style.code {
-                        highlight.color = Some(self.code_color.into());
+                        is_code = true;
                     }
                     if region.style.strikethrough {
-                        highlight.strikethrough = Some(gpui::StrikethroughStyle {
-                            thickness: px(1.0),
-                            color: Some(self.text_color.into()),
-                        });
+                        is_strikethrough = true;
                     }
                     if region.link_url.is_some() {
-                        highlight.color = Some(self.link_color.into());
-                        highlight.underline = Some(gpui::UnderlineStyle {
-                            thickness: px(1.0),
-                            color: Some(self.link_color.into()),
-                            wavy: false,
-                        });
+                        is_link = true;
                     }
                 }
             }
 
-            if has_style {
-                highlights.push((display_start..display_end, highlight));
-            }
+            // Build the font for this run
+            let base_font = if is_code {
+                self.code_font.clone()
+            } else {
+                self.text_font.clone()
+            };
+
+            let font = Font {
+                weight: if is_bold || self.is_line_bold() {
+                    FontWeight::BOLD
+                } else {
+                    base_font.weight
+                },
+                style: if is_italic {
+                    FontStyle::Italic
+                } else {
+                    base_font.style
+                },
+                ..base_font
+            };
+
+            // Determine text color
+            let color: Hsla = if is_link {
+                self.link_color.into()
+            } else {
+                self.text_color.into()
+            };
+
+            // Build underline/strikethrough
+            let underline = if is_link {
+                Some(gpui::UnderlineStyle {
+                    thickness: px(1.0),
+                    color: Some(self.link_color.into()),
+                    wavy: false,
+                })
+            } else {
+                None
+            };
+
+            let strikethrough = if is_strikethrough {
+                Some(gpui::StrikethroughStyle {
+                    thickness: px(1.0),
+                    color: Some(self.text_color.into()),
+                })
+            } else {
+                None
+            };
+
+            runs.push(TextRun {
+                len: span_len,
+                font,
+                color,
+                background_color: None,
+                underline,
+                strikethrough,
+            });
         }
 
-        (display_text, highlights)
+        (display_text, runs)
     }
 
     /// Compute the visual cursor position within the displayed text.
@@ -390,17 +459,26 @@ impl IntoElement for LineView<'_> {
 
             if self.cursor_on_line() {
                 // Cursor on line: show text AND image
-                let (display_text, highlights) = self.build_styled_content();
+                let (display_text, mut runs) = self.build_styled_content();
                 let visual_cursor_pos = self.compute_visual_cursor_pos(&display_text);
 
                 let display_text = if display_text.is_empty() {
+                    // Add a run for the placeholder space
+                    runs.push(TextRun {
+                        len: 1,
+                        font: self.line_font(),
+                        color: self.text_color.into(),
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    });
                     " ".to_string()
                 } else {
                     display_text
                 };
 
                 let shared_text: SharedString = display_text.into();
-                let styled_text = StyledText::new(shared_text).with_highlights(highlights);
+                let styled_text = StyledText::new(shared_text).with_runs(runs);
                 let text_layout = styled_text.layout().clone();
 
                 // Show text first (with cursor), then image below
@@ -446,20 +524,38 @@ impl IntoElement for LineView<'_> {
         }
 
         // Build styled content
-        let (display_text, highlights) = self.build_styled_content();
+        let (display_text, mut runs) = self.build_styled_content();
         let visual_cursor_pos = self.compute_visual_cursor_pos(&display_text);
 
         // For blank lines, we need some content for the cursor to attach to
         let display_text = if display_text.is_empty() && self.cursor_on_line() {
+            // Add a run for the placeholder space
+            runs.push(TextRun {
+                len: 1,
+                font: self.line_font(),
+                color: self.text_color.into(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            });
             " ".to_string() // Placeholder for cursor positioning
         } else if display_text.is_empty() {
+            // Add a run for the zero-width space
+            runs.push(TextRun {
+                len: "\u{200B}".len(),
+                font: self.line_font(),
+                color: self.text_color.into(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            });
             "\u{200B}".to_string() // Zero-width space to maintain line height
         } else {
             display_text
         };
 
         let shared_text: SharedString = display_text.into();
-        let styled_text = StyledText::new(shared_text).with_highlights(highlights);
+        let styled_text = StyledText::new(shared_text).with_runs(runs);
         let text_layout = styled_text.layout().clone();
 
         // Base div with line-specific styling
