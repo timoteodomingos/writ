@@ -160,7 +160,7 @@ pub fn compute_render_spans(buffer: &Buffer, cursor_offset: usize) -> Vec<Render
 
     // Reset cursor and collect block regions
     let mut block_cursor = tree.walk();
-    collect_block_regions(tree, &text, &mut block_cursor, &mut block_regions);
+    collect_block_regions(&text, &mut block_cursor, &mut block_regions);
 
     // Collect all boundary points where styles might change
     // Include both full_range boundaries (for marker visibility) and content_range boundaries
@@ -378,26 +378,21 @@ fn collect_inline_styles(
 }
 
 /// Walk the tree and collect block-level regions (headings, lists, blockquotes).
-fn collect_block_regions(
-    tree: &MarkdownTree,
-    text: &str,
-    cursor: &mut MarkdownCursor,
-    regions: &mut Vec<BlockRegion>,
-) {
+fn collect_block_regions(text: &str, cursor: &mut MarkdownCursor, regions: &mut Vec<BlockRegion>) {
     loop {
         let node = cursor.node();
         let kind = node.kind();
 
         // Handle ATX headings (# Heading)
-        if kind.starts_with("atx_heading") || kind == "atx_heading" {
-            if let Some(region) = extract_heading_region(&node, text) {
-                regions.push(region);
-            }
+        if (kind.starts_with("atx_heading") || kind == "atx_heading")
+            && let Some(region) = extract_heading_region(&node, text)
+        {
+            regions.push(region);
         }
 
         // Recurse into children
         if cursor.goto_first_child() {
-            collect_block_regions(tree, text, cursor, regions);
+            collect_block_regions(text, cursor, regions);
             cursor.goto_parent();
         }
 
@@ -421,10 +416,10 @@ fn extract_heading_region(node: &Node, text: &str) -> Option<BlockRegion> {
             let child_kind = child.kind();
             if child_kind.starts_with("atx_h") && child_kind.ends_with("_marker") {
                 // Extract level from marker name (atx_h1_marker -> 1)
-                if let Some(level_char) = child_kind.chars().nth(5) {
-                    if let Some(level) = level_char.to_digit(10) {
-                        heading_level = level as u8;
-                    }
+                if let Some(level_char) = child_kind.chars().nth(5)
+                    && let Some(level) = level_char.to_digit(10)
+                {
+                    heading_level = level as u8;
                 }
                 marker_end = child.end_byte();
                 break;

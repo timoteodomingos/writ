@@ -6,19 +6,21 @@ authors = ["Wilfred Denton <wilfred@hey.com>"]
 license = "MIT"
 edition = "2024"
 
+[lints.clippy]
+too_many_arguments = "allow"
+
 [[bin]]
 name = "writ"
 path = "src/main.rs"
 
 [dependencies]
-anyhow = "1.0.100"
-clap = { version = "4.5.53", features = ["derive"] }
+anyhow = "1"
+clap = { version = "4.5", features = ["derive"] }
 futures = "0.3"
-gpui = "0.2.2"
+gpui = "0.2"
 open = "5"
-ropey = "1.6.1"
+ropey = "1.6"
 smol = "2"
-# Use same revision as Zed - works with tree-sitter 0.23
 tree-sitter = "0.26"
 tree-sitter-md = "0.5"
 ureq = { version = "3", features = ["rustls"] }

@@ -116,12 +116,12 @@ impl Editor {
             }
             "v" if keystroke.modifiers.control || keystroke.modifiers.platform => {
                 // Paste from clipboard
-                if let Some(clipboard_item) = cx.read_from_clipboard() {
-                    if let Some(text) = clipboard_item.text() {
-                        self.buffer.insert(self.cursor.offset, &text);
-                        self.cursor = Cursor::new(self.cursor.offset + text.len());
-                        cx.notify();
-                    }
+                if let Some(clipboard_item) = cx.read_from_clipboard()
+                    && let Some(text) = clipboard_item.text()
+                {
+                    self.buffer.insert(self.cursor.offset, &text);
+                    self.cursor = Cursor::new(self.cursor.offset + text.len());
+                    cx.notify();
                 }
             }
             _ => {

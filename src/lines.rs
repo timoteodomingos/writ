@@ -253,13 +253,13 @@ fn extract_code_span_region(node: &Node) -> Option<StyledRegion> {
     let mut content_end = full_end;
 
     for i in 0..node.child_count() {
-        if let Some(child) = node.child(i as u32) {
-            if child.kind() == "code_span_delimiter" {
-                if child.start_byte() == full_start {
-                    content_start = child.end_byte();
-                } else if child.end_byte() == full_end {
-                    content_end = child.start_byte();
-                }
+        if let Some(child) = node.child(i as u32)
+            && child.kind() == "code_span_delimiter"
+        {
+            if child.start_byte() == full_start {
+                content_start = child.end_byte();
+            } else if child.end_byte() == full_end {
+                content_end = child.start_byte();
             }
         }
     }
@@ -386,7 +386,7 @@ fn determine_line_kind(tree: &MarkdownTree, text: &str, range: &Range<usize>) ->
                 "atx_heading" => {
                     let line_text = &text[range.clone()];
                     let level = line_text.chars().take_while(|&c| c == '#').count() as u8;
-                    return LineKind::Heading(level.min(6).max(1));
+                    return LineKind::Heading(level.clamp(1, 6));
                 }
                 "block_quote" => return LineKind::BlockQuote,
                 "list_item" => {
@@ -423,7 +423,7 @@ fn determine_line_kind(tree: &MarkdownTree, text: &str, range: &Range<usize>) ->
             "atx_heading" => {
                 let line_text = &text[range.clone()];
                 let level = line_text.chars().take_while(|&c| c == '#').count() as u8;
-                LineKind::Heading(level.min(6).max(1))
+                LineKind::Heading(level.clamp(1, 6))
             }
             "list_item" => {
                 let line_text = &text[range.clone()];
@@ -524,15 +524,13 @@ fn determine_line_context(
             // Find the "- " or "1. " prefix
             let line_text = &text[range.clone()];
             let trimmed_start = line_text.len() - line_text.trim_start().len();
-            let marker_len = if line_text.trim_start().starts_with("- ") {
-                2
-            } else if line_text.trim_start().starts_with("* ") {
+            let trimmed = line_text.trim_start();
+            let marker_len = if trimmed.starts_with("- ") || trimmed.starts_with("* ") {
                 2
             } else {
                 // Ordered list: find "N. "
-                let rest = line_text.trim_start();
-                let digits = rest.chars().take_while(|c| c.is_ascii_digit()).count();
-                if rest.chars().nth(digits) == Some('.') {
+                let digits = trimmed.chars().take_while(|c| c.is_ascii_digit()).count();
+                if trimmed.chars().nth(digits) == Some('.') {
                     digits + 2 // "N. "
                 } else {
                     0
@@ -582,10 +580,10 @@ fn detect_image_only_line(
         }
 
         for i in 0..node.child_count() {
-            if let Some(child) = node.child(i as u32) {
-                if let Some(inline) = find_inline_in_range(child, range) {
-                    return Some(inline);
-                }
+            if let Some(child) = node.child(i as u32)
+                && let Some(inline) = find_inline_in_range(child, range)
+            {
+                return Some(inline);
             }
         }
         None
@@ -1090,10 +1088,10 @@ mod tests {
                 return Some(node);
             }
             for i in 0..node.child_count() {
-                if let Some(child) = node.child(i as u32) {
-                    if let Some(inline) = find_inline(child) {
-                        return Some(inline);
-                    }
+                if let Some(child) = node.child(i as u32)
+                    && let Some(inline) = find_inline(child)
+                {
+                    return Some(inline);
                 }
             }
             None
@@ -1149,10 +1147,10 @@ mod tests {
                 return Some(node);
             }
             for i in 0..node.child_count() {
-                if let Some(child) = node.child(i as u32) {
-                    if let Some(inline) = find_inline(child) {
-                        return Some(inline);
-                    }
+                if let Some(child) = node.child(i as u32)
+                    && let Some(inline) = find_inline(child)
+                {
+                    return Some(inline);
                 }
             }
             None

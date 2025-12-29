@@ -273,12 +273,11 @@ impl<'a> LineView<'a> {
         let mut hidden_before_cursor = 0usize;
 
         // Account for hidden block marker
-        if !self.cursor_on_line() {
-            if let Some(marker_range) = &self.line.marker_range {
-                if self.cursor_offset > marker_range.end {
-                    hidden_before_cursor += marker_range.end - marker_range.start;
-                }
-            }
+        if !self.cursor_on_line()
+            && let Some(marker_range) = &self.line.marker_range
+            && self.cursor_offset > marker_range.end
+        {
+            hidden_before_cursor += marker_range.end - marker_range.start;
         }
 
         // Account for hidden inline markers
