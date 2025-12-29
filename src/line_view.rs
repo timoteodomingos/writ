@@ -403,10 +403,12 @@ impl IntoElement for LineView<'_> {
                 let styled_text = StyledText::new(shared_text).with_highlights(highlights);
                 let text_layout = styled_text.layout().clone();
 
+                // Show text first (with cursor), then image below
+                // This ensures scrolling to this line shows the editable text
                 let mut line_div = line_base(line_number)
                     .relative()
-                    .child(create_image(&image_source, alt_text.clone()))
-                    .child(styled_text);
+                    .child(styled_text)
+                    .child(create_image(&image_source, alt_text.clone()));
 
                 // Add cursor overlay
                 if let Some(cursor_pos) = visual_cursor_pos {
