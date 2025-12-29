@@ -353,6 +353,15 @@ impl<'a> LineView<'a> {
     }
 }
 
+/// Create a base line div with common styling (max-width, centered).
+fn line_base(line_number: usize) -> gpui::Stateful<gpui::Div> {
+    div()
+        .id(("line", line_number))
+        .max_w(px(800.0))
+        .w_full()
+        .mx_auto()
+}
+
 impl IntoElement for LineView<'_> {
     type Element = gpui::Stateful<gpui::Div>;
 
@@ -394,8 +403,7 @@ impl IntoElement for LineView<'_> {
                 let styled_text = StyledText::new(shared_text).with_highlights(highlights);
                 let text_layout = styled_text.layout().clone();
 
-                let mut line_div = div()
-                    .id(("line", line_number))
+                let mut line_div = line_base(line_number)
                     .relative()
                     .child(create_image(&image_source, alt_text.clone()))
                     .child(styled_text);
@@ -429,9 +437,7 @@ impl IntoElement for LineView<'_> {
                 return line_div;
             } else {
                 // Cursor not on line: show only the image, hide text
-                return div()
-                    .id(("line", line_number))
-                    .w_full()
+                return line_base(line_number)
                     .overflow_hidden()
                     .child(create_image(&image_source, alt_text));
             }
@@ -457,8 +463,7 @@ impl IntoElement for LineView<'_> {
         // Base div with line-specific styling
         let mut line_div = match &self.line.kind {
             LineKind::Heading(level) => {
-                let base = div()
-                    .id(("line", line_number))
+                let base = line_base(line_number)
                     .relative()
                     .font_weight(FontWeight::BOLD);
                 match level {
@@ -471,21 +476,19 @@ impl IntoElement for LineView<'_> {
                 }
             }
             LineKind::BlockQuote => {
-                div()
-                    .id(("line", line_number))
+                line_base(line_number)
                     .relative()
                     .pl_3()
                     .border_l_2()
                     .border_color(gpui::rgb(0x6272a4)) // Dracula comment color
             }
             LineKind::CodeBlock { .. } => {
-                div()
-                    .id(("line", line_number))
+                line_base(line_number)
                     .relative()
                     .pl_2()
                     .bg(gpui::rgb(0x282a36)) // Dracula background, slightly different
             }
-            _ => div().id(("line", line_number)).relative(),
+            _ => line_base(line_number).relative(),
         };
 
         line_div = line_div.child(styled_text);
