@@ -5,19 +5,23 @@ use gpui::{
 };
 use writ::{
     args::Args,
-    editor::{Editor, EditorState},
+    editor::Editor,
     http, theme,
     title_bar::FileInfo,
     window::{CloseWindow, Quit, window_shadow},
 };
 
+fn load_file(file: &std::path::Path) -> String {
+    std::fs::read_to_string(file).unwrap_or_default()
+}
+
 pub struct Root {
-    editor: Entity<Editor>,
     focus_handle: FocusHandle,
+    editor: Entity<Editor>,
 }
 
 impl Render for Root {
-    fn render(&mut self, _window: &mut Window, _ct: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         window_shadow().child(
             div()
                 .id("root")
@@ -34,13 +38,16 @@ impl Render for Root {
                 .flex()
                 .flex_col()
                 .size_full()
+                .bg(cx.global::<theme::Theme>().background)
                 .child(self.editor.clone()),
         )
     }
 }
 
-fn load_file(file: &std::path::Path) -> String {
-    std::fs::read_to_string(file).unwrap_or_default()
+impl Focusable for Root {
+    fn focus_handle(&self, _cx: &gpui::App) -> FocusHandle {
+        self.focus_handle.clone()
+    }
 }
 
 fn main() {
@@ -80,15 +87,15 @@ fn main() {
             };
 
             cx.open_window(window_options, |window, cx| {
-                let document = writ::document::Document::from_markdown(&content);
-                let state = EditorState::new_at_end(document);
-                let editor = cx.new(|cx| Editor::new(state, cx));
-                // Focus the editor so it receives keyboard input
-                editor.focus_handle(cx).focus(window);
                 let focus_handle = cx.focus_handle();
+                focus_handle.focus(window);
+
+                // Create editor with file content
+                let editor = cx.new(|cx| Editor::new(&content, cx));
+
                 cx.new(|_| Root {
-                    editor,
                     focus_handle,
+                    editor,
                 })
             })
             .expect("Failed to open window");

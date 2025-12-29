@@ -1,12 +1,12 @@
 use gpui::{
-    AnyElement, App, Bounds, BoxShadow, CursorStyle, Decorations, HitboxBehavior, Hsla,
-    MouseButton, Pixels, Point, ReadGlobal, ResizeEdge, Size, Window, actions, canvas, div, point,
-    prelude::*, px,
+    actions, canvas, div, point, prelude::*, px, AnyElement, App, Bounds, BoxShadow, CursorStyle,
+    Decorations, HitboxBehavior, Hsla, MouseButton, Pixels, Point, ReadGlobal, ResizeEdge, Size,
+    Window,
 };
 
 use crate::{theme::Theme, title_bar::title_bar};
 
-actions!(window, [CloseWindow, Quit, SaveFile]);
+actions!(window, [CloseWindow, Quit]);
 
 #[derive(IntoElement, Default)]
 pub struct WindowShadow {

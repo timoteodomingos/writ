@@ -1,4 +1,4 @@
-use gpui::{Global, Rgba, rgb};
+use gpui::{rgb, Global, Rgba};
 
 #[allow(dead_code)]
 pub struct Theme {

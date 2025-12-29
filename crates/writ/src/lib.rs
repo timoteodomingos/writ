@@ -1,7 +1,12 @@
 pub mod args;
-pub mod document;
+pub mod buffer;
+pub mod cursor;
 pub mod editor;
 pub mod http;
+pub mod line_view;
+pub mod lines;
+pub mod parser;
+pub mod render;
 pub mod theme;
 pub mod title_bar;
 pub mod window;

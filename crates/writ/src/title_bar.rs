@@ -1,6 +1,6 @@
 use gpui::{
-    App, ClickEvent, ElementId, Fill, Global, MouseButton, ReadGlobal, Window, div, prelude::*,
-    rems,
+    div, prelude::*, rems, App, ClickEvent, ElementId, Fill, Global, MouseButton, ReadGlobal,
+    Window,
 };
 
 use crate::theme::Theme;

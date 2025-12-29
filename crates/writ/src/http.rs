@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use futures::{FutureExt, future::BoxFuture};
+use futures::{future::BoxFuture, FutureExt};
 use gpui::http_client::{
-    AsyncBody, HttpClient, Request, Response, Url,
     http::{HeaderValue, StatusCode},
+    AsyncBody, HttpClient, Request, Response, Url,
 };
 
 pub struct Client;

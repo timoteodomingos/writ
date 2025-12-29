@@ -1,4 +1,0 @@
-- first item
-  - nested item
-  - second nested
-- second item
