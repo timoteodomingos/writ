@@ -65,6 +65,21 @@ impl Editor {
         }
     }
 
+    /// Save the buffer to the file.
+    fn save(&mut self, cx: &mut Context<Self>) {
+        let file_info = cx.global::<FileInfo>();
+        let content = self.buffer.text();
+        if std::fs::write(&file_info.path, &content).is_ok() {
+            self.buffer.mark_clean();
+            // Update FileInfo immediately so title bar updates right away
+            cx.set_global(FileInfo {
+                path: file_info.path.clone(),
+                dirty: false,
+            });
+            cx.notify();
+        }
+    }
+
     /// Handle a key down event.
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
@@ -205,6 +220,10 @@ impl Editor {
                     cx.notify();
                 }
             }
+            "s" if keystroke.modifiers.control || keystroke.modifiers.platform => {
+                // Save file
+                self.save(cx);
+            }
             _ => {
                 // Insert printable characters, replacing selection if any
                 if let Some(key_char) = &keystroke.key_char {
@@ -255,6 +274,14 @@ impl Render for Editor {
         // Get the base path for resolving relative image paths
         let file_info = cx.global::<FileInfo>();
         let base_path: Option<PathBuf> = file_info.path.parent().map(|p| p.to_path_buf());
+
+        // Sync dirty state from buffer to FileInfo global
+        if file_info.dirty != self.buffer.is_dirty() {
+            cx.set_global(FileInfo {
+                path: file_info.path.clone(),
+                dirty: self.buffer.is_dirty(),
+            });
+        }
 
         // Extract lines from the buffer
         let lines = extract_lines(&self.buffer);

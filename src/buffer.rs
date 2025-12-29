@@ -17,6 +17,8 @@ pub struct Buffer {
     parser: MarkdownParser,
     /// The current parse tree (block + inline trees)
     tree: Option<MarkdownTree>,
+    /// Whether the buffer has unsaved changes
+    dirty: bool,
 }
 
 impl Buffer {
@@ -26,7 +28,18 @@ impl Buffer {
             text: Rope::new(),
             parser: MarkdownParser::default(),
             tree: None,
+            dirty: false,
         }
+    }
+
+    /// Check if the buffer has unsaved changes.
+    pub fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
+    /// Mark the buffer as clean (after saving).
+    pub fn mark_clean(&mut self) {
+        self.dirty = false;
     }
 
     /// Get the full text as a String.
@@ -83,6 +96,7 @@ impl Buffer {
         // Convert byte offset to char offset for rope
         let char_offset = self.text.byte_to_char(byte_offset);
         self.text.insert(char_offset, text);
+        self.dirty = true;
         self.reparse(edit);
     }
 
@@ -104,6 +118,7 @@ impl Buffer {
         let char_start = self.text.byte_to_char(byte_range.start);
         let char_end = self.text.byte_to_char(byte_range.end);
         self.text.remove(char_start..char_end);
+        self.dirty = true;
         self.reparse(edit);
     }
 
@@ -125,6 +140,7 @@ impl Buffer {
         let char_end = self.text.byte_to_char(byte_range.end);
         self.text.remove(char_start..char_end);
         self.text.insert(char_start, text);
+        self.dirty = true;
         self.reparse(edit);
     }
 
@@ -202,7 +218,12 @@ impl FromStr for Buffer {
         let mut parser = MarkdownParser::default();
         let tree = parser.parse(s.as_bytes(), None);
 
-        Ok(Self { text, parser, tree })
+        Ok(Self {
+            text,
+            parser,
+            tree,
+            dirty: false,
+        })
     }
 }
 
