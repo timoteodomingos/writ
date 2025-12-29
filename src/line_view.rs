@@ -822,17 +822,32 @@ impl IntoElement for LineView<'_> {
 
             // Extract hidden marker regions for visual-to-buffer conversion
             // Each entry is (opening_start, opening_end, closing_start, closing_end)
-            let hidden_regions: Vec<_> = self
-                .inline_styles
-                .iter()
-                .map(|region| {
-                    let opening_start = region.full_range.start.max(content_range.start);
-                    let opening_end = region.content_range.start.min(content_range.end);
-                    let closing_start = region.content_range.end.max(content_range.start);
-                    let closing_end = region.full_range.end.min(content_range.end);
-                    (opening_start, opening_end, closing_start, closing_end)
-                })
-                .collect();
+            // Markers are visible (not hidden) if:
+            // - selection is on line (show_all_markers), OR
+            // - cursor is inside that specific region
+            let show_all_markers = self.selection_on_line();
+            let cursor_offset = self.cursor_offset;
+            let hidden_regions: Vec<(usize, usize, usize, usize)> = if show_all_markers {
+                Vec::new()
+            } else {
+                self.inline_styles
+                    .iter()
+                    .filter_map(|region| {
+                        // If cursor is inside this region, its markers are visible
+                        let cursor_inside = cursor_offset >= region.full_range.start
+                            && cursor_offset <= region.full_range.end;
+                        if cursor_inside {
+                            None // Not hidden
+                        } else {
+                            let opening_start = region.full_range.start.max(content_range.start);
+                            let opening_end = region.content_range.start.min(content_range.end);
+                            let closing_start = region.content_range.end.max(content_range.start);
+                            let closing_end = region.full_range.end.min(content_range.end);
+                            Some((opening_start, opening_end, closing_start, closing_end))
+                        }
+                    })
+                    .collect()
+            };
 
             line_div = line_div.on_mouse_down(
                 MouseButton::Left,
