@@ -262,18 +262,33 @@ impl Render for Editor {
 
         // Create click callback that updates cursor position
         let entity = cx.entity().clone();
-        let on_click: ClickCallback = Rc::new(move |buffer_offset, shift_held, _window, cx| {
-            entity.update(cx, |editor, cx| {
-                if shift_held {
-                    // Extend selection to click position
-                    editor.selection = editor.selection.extend_to(buffer_offset);
-                } else {
-                    // Collapse selection to click position
-                    editor.selection = Selection::new(buffer_offset, buffer_offset);
-                }
-                cx.notify();
+        let on_click: ClickCallback =
+            Rc::new(move |buffer_offset, shift_held, click_count, _window, cx| {
+                entity.update(cx, |editor, cx| {
+                    if shift_held {
+                        // Extend selection to click position
+                        editor.selection = editor.selection.extend_to(buffer_offset);
+                    } else {
+                        match click_count {
+                            2 => {
+                                // Double-click: select word
+                                editor.selection =
+                                    Selection::select_word_at(buffer_offset, &editor.buffer);
+                            }
+                            3 => {
+                                // Triple-click: select line
+                                editor.selection =
+                                    Selection::select_line_at(buffer_offset, &editor.buffer);
+                            }
+                            _ => {
+                                // Single click: collapse selection to click position
+                                editor.selection = Selection::new(buffer_offset, buffer_offset);
+                            }
+                        }
+                    }
+                    cx.notify();
+                });
             });
-        });
 
         // Create drag callback that extends selection during mouse drag
         let entity = cx.entity().clone();

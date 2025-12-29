@@ -241,6 +241,70 @@ impl Selection {
             head: buffer.len_bytes(),
         }
     }
+
+    /// Select the word at the given offset.
+    /// A word is a sequence of alphanumeric characters or underscores.
+    pub fn select_word_at(offset: usize, buffer: &Buffer) -> Self {
+        let text = buffer.text();
+        let len = text.len();
+
+        if len == 0 || offset >= len {
+            return Self::new(offset.min(len), offset.min(len));
+        }
+
+        // Helper to check if a character is part of a word
+        let is_word_char = |c: char| c.is_alphanumeric() || c == '_';
+
+        // Find the character at offset
+        let char_at_offset = text[offset..].chars().next();
+
+        // If we're on a non-word character, just select that character
+        if let Some(c) = char_at_offset
+            && !is_word_char(c)
+        {
+            // Find end of this character
+            let char_end = offset + c.len_utf8();
+            return Self::new(offset, char_end.min(len));
+        }
+
+        // Find word start (scan backward)
+        let mut start = offset;
+        for (i, c) in text[..offset].char_indices().rev() {
+            if is_word_char(c) {
+                start = i;
+            } else {
+                break;
+            }
+        }
+
+        // Find word end (scan forward)
+        let mut end = offset;
+        for (i, c) in text[offset..].char_indices() {
+            if is_word_char(c) {
+                end = offset + i + c.len_utf8();
+            } else {
+                break;
+            }
+        }
+
+        Self::new(start, end)
+    }
+
+    /// Select the entire line at the given offset.
+    pub fn select_line_at(offset: usize, buffer: &Buffer) -> Self {
+        let line = buffer.byte_to_line(offset);
+        let line_start = buffer.line_to_byte(line);
+
+        // Find line end (including newline if present)
+        let line_count = buffer.line_count();
+        let line_end = if line + 1 < line_count {
+            buffer.line_to_byte(line + 1)
+        } else {
+            buffer.len_bytes()
+        };
+
+        Self::new(line_start, line_end)
+    }
 }
 
 #[cfg(test)]
@@ -372,5 +436,39 @@ mod tests {
         let sel = Selection::select_all(&buf);
         assert_eq!(sel.anchor, 0);
         assert_eq!(sel.head, 11);
+    }
+
+    #[test]
+    fn test_selection_select_word_at() {
+        let buf: Buffer = "hello world test".parse().unwrap();
+
+        // Click in middle of "hello"
+        let sel = Selection::select_word_at(2, &buf);
+        assert_eq!(sel.range(), 0..5); // "hello"
+
+        // Click in middle of "world"
+        let sel = Selection::select_word_at(8, &buf);
+        assert_eq!(sel.range(), 6..11); // "world"
+
+        // Click on space (non-word char)
+        let sel = Selection::select_word_at(5, &buf);
+        assert_eq!(sel.range(), 5..6); // just the space
+    }
+
+    #[test]
+    fn test_selection_select_line_at() {
+        let buf: Buffer = "line one\nline two\nline three".parse().unwrap();
+
+        // Click on first line
+        let sel = Selection::select_line_at(3, &buf);
+        assert_eq!(sel.range(), 0..9); // "line one\n"
+
+        // Click on second line
+        let sel = Selection::select_line_at(12, &buf);
+        assert_eq!(sel.range(), 9..18); // "line two\n"
+
+        // Click on last line (no trailing newline)
+        let sel = Selection::select_line_at(22, &buf);
+        assert_eq!(sel.range(), 18..28); // "line three"
     }
 }

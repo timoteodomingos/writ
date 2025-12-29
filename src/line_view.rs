@@ -14,8 +14,8 @@ use crate::lines::{LineInfo, LineKind};
 use crate::render::StyledRegion;
 
 /// Callback type for click events - receives the buffer offset where the click occurred,
-/// and whether shift was held (for extending selection).
-pub type ClickCallback = Rc<dyn Fn(usize, bool, &mut Window, &mut App)>;
+/// whether shift was held (for extending selection), and the click count (1=single, 2=double, 3=triple).
+pub type ClickCallback = Rc<dyn Fn(usize, bool, usize, &mut Window, &mut App)>;
 
 /// Callback type for drag events - receives the buffer offset during mouse drag.
 pub type DragCallback = Rc<dyn Fn(usize, &mut Window, &mut App)>;
@@ -700,7 +700,13 @@ impl IntoElement for LineView<'_> {
                                 };
                             let buffer_offset = content_range.start + visual_index;
                             let buffer_offset = buffer_offset.min(line_range.end);
-                            on_click(buffer_offset, event.modifiers.shift, window, cx);
+                            on_click(
+                                buffer_offset,
+                                event.modifiers.shift,
+                                event.click_count,
+                                window,
+                                cx,
+                            );
                         },
                     );
                 }
@@ -880,7 +886,13 @@ impl IntoElement for LineView<'_> {
                         }
                     }
 
-                    on_click(buffer_offset, event.modifiers.shift, window, cx);
+                    on_click(
+                        buffer_offset,
+                        event.modifiers.shift,
+                        event.click_count,
+                        window,
+                        cx,
+                    );
                 },
             );
         }
