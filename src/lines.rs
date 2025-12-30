@@ -142,10 +142,11 @@ fn collect_markers_recursive(
     }
 
     // Check if this node is a marker on our line
-    if node.start_byte() >= line_start && node.start_byte() < line_end {
-        if let Some(marker) = MarkerInfo::from_node(node, text) {
-            markers.push(marker);
-        }
+    if node.start_byte() >= line_start
+        && node.start_byte() < line_end
+        && let Some(marker) = MarkerInfo::from_node(node, text)
+    {
+        markers.push(marker);
     }
 
     // Recurse into children
@@ -206,7 +207,7 @@ pub enum LineKind {
 /// Compute LineKind from markers.
 fn compute_kind_from_markers(markers: &[MarkerInfo]) -> LineKind {
     // Check for specific marker types in reverse order (innermost first)
-    for marker in markers.iter().rev() {
+    if let Some(marker) = markers.iter().next_back() {
         match &marker.kind {
             MarkerKind::Heading(level) => return LineKind::Heading(*level),
             MarkerKind::TaskList { checked } => {
@@ -343,7 +344,7 @@ pub fn extract_lines(buffer: &Buffer) -> Vec<LineInfo> {
             };
 
             // Compute all marker-derived fields
-            let kind = compute_line_kind(tree.as_deref(), &text, &range, &markers);
+            let kind = compute_line_kind(tree, &text, &range, &markers);
             let marker_range = compute_marker_range(&markers);
             let has_border = compute_has_border(&markers);
             let substitution = compute_substitution(&markers);
