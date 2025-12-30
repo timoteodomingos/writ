@@ -2,6 +2,40 @@
 
 A hybrid markdown editor that seamlessly combines raw text editing with live inline rendering.
 
+## Install
+
+```bash
+cargo install writ
+```
+
+## Usage
+
+```bash
+writ --file path/to/document.md
+```
+
+Fonts can be configured via command line arguments or environment variables:
+
+```bash
+writ --file doc.md --text-font "Iosevka Aile" --code-font "Iosevka"
+```
+
+```bash
+WRIT_TEXT_FONT="Iosevka Aile" WRIT_CODE_FONT="Iosevka" writ --file doc.md
+```
+
+The default fonts are platform-specific: Segoe UI and Consolas on Windows, the system font and Menlo on macOS, and Liberation Sans and Liberation Mono on Linux.
+
+## Development
+
+```bash
+git clone https://github.com/wilfred/writ
+cd writ
+cargo run --release -- --file path/to/document.md
+```
+
+The `--release` flag is recommended even during development. Debug builds are noticeably slower due to the volume of text layout and rendering work on every frame.
+
 ## Features
 
 ### Inline Rendering
