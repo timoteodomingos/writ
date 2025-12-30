@@ -1,6 +1,7 @@
 pub mod buffer;
 pub mod config;
 pub mod cursor;
+pub mod demo;
 pub mod editor;
 pub mod highlight;
 pub mod http;

@@ -23,9 +23,13 @@ const DEFAULT_CODE_FONT: &str = "Liberation Mono";
 #[derive(Parser, Debug, Clone)]
 #[command(version, about, long_about = None)]
 pub struct Config {
-    /// File to open
-    #[arg(short, long)]
-    pub file: PathBuf,
+    /// File to open (not required in demo mode)
+    #[arg(short, long, required_unless_present = "demo")]
+    pub file: Option<PathBuf>,
+
+    /// Run in demo mode with scripted input
+    #[arg(long)]
+    pub demo: bool,
 
     /// Font for regular text
     #[arg(long, env = "WRIT_TEXT_FONT", default_value = DEFAULT_TEXT_FONT)]

@@ -469,6 +469,69 @@ impl Editor {
         // Sync dirty state to FileInfo global so title bar updates
         self.sync_dirty_state(cx);
     }
+
+    // =========================================================================
+    // Demo mode methods - public API for scripted input
+    // =========================================================================
+
+    /// Insert a single character (for demo mode).
+    pub fn demo_type_char(&mut self, c: char, window: &mut Window, cx: &mut Context<Self>) {
+        let cursor_pos = self.cursor().offset;
+        let s = c.to_string();
+        self.buffer.insert(cursor_pos, &s, cursor_pos);
+        let new_pos = cursor_pos + s.len();
+        self.selection = Selection::new(new_pos, new_pos);
+        self.scroll_anchor.scroll_to(window, cx);
+        cx.notify();
+    }
+
+    /// Press Enter (for demo mode).
+    pub fn demo_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let cursor_pos = self.cursor().offset;
+        self.buffer.insert(cursor_pos, "\n", cursor_pos);
+        let new_pos = cursor_pos + 1;
+        self.selection = Selection::new(new_pos, new_pos);
+        self.scroll_anchor.scroll_to(window, cx);
+        cx.notify();
+    }
+
+    /// Press Shift+Enter / smart enter (for demo mode).
+    pub fn demo_shift_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let cursor_pos = self.cursor().offset;
+        let insert_text = self.compute_smart_enter_text(cursor_pos);
+        self.buffer.insert(cursor_pos, &insert_text, cursor_pos);
+        let new_pos = cursor_pos + insert_text.len();
+        self.selection = Selection::new(new_pos, new_pos);
+        self.scroll_anchor.scroll_to(window, cx);
+        cx.notify();
+    }
+
+    /// Press Backspace (for demo mode).
+    pub fn demo_backspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.cursor().offset > 0 {
+            let cursor_before = self.cursor().offset;
+            let new_cursor = self.cursor().move_left(&self.buffer);
+            self.buffer
+                .delete(new_cursor.offset..cursor_before, cursor_before);
+            self.selection = Selection::new(new_cursor.offset, new_cursor.offset);
+            self.scroll_anchor.scroll_to(window, cx);
+            cx.notify();
+        }
+    }
+
+    /// Move cursor in a direction (for demo mode).
+    pub fn demo_move(&mut self, direction: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let new_cursor = match direction {
+            "left" => self.cursor().move_left(&self.buffer),
+            "right" => self.cursor().move_right(&self.buffer),
+            "up" => self.cursor().move_up(&self.buffer),
+            "down" => self.cursor().move_down(&self.buffer),
+            _ => return,
+        };
+        self.selection = Selection::new(new_cursor.offset, new_cursor.offset);
+        self.scroll_anchor.scroll_to(window, cx);
+        cx.notify();
+    }
 }
 
 impl Focusable for Editor {
