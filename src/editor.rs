@@ -3,7 +3,7 @@ use std::rc::Rc;
 
 use gpui::{
     App, Context, CursorStyle, FocusHandle, Focusable, Font, IntoElement, KeyDownEvent,
-    ScrollHandle, Window, div, font, prelude::*,
+    ScrollAnchor, ScrollHandle, Window, div, font, prelude::*,
 };
 
 use crate::buffer::Buffer;
@@ -25,6 +25,8 @@ pub struct Editor {
     focus_handle: FocusHandle,
     /// Scroll handle for scrolling cursor into view
     scroll_handle: ScrollHandle,
+    /// Scroll anchor for cursor line (scrolls cursor into view)
+    scroll_anchor: ScrollAnchor,
     /// Syntax highlighter for code blocks
     highlighter: Highlighter,
 }
@@ -35,11 +37,15 @@ impl Editor {
         let buffer: Buffer = content.parse().unwrap_or_default();
         let focus_handle = cx.focus_handle();
 
+        let scroll_handle = ScrollHandle::new();
+        let scroll_anchor = ScrollAnchor::for_handle(scroll_handle.clone());
+
         Self {
             buffer,
             selection: Selection::new(0, 0),
             focus_handle,
-            scroll_handle: ScrollHandle::new(),
+            scroll_handle,
+            scroll_anchor,
             highlighter: Highlighter::new(),
         }
     }
@@ -458,12 +464,7 @@ impl Editor {
         }
 
         // Scroll cursor into view after any cursor movement
-        // Use on_next_frame to ensure scroll happens after view is laid out with new content
-        let cursor_line = self.buffer.byte_to_line(self.selection.head);
-        let scroll_handle = self.scroll_handle.clone();
-        window.on_next_frame(move |_, _| {
-            scroll_handle.scroll_to_item(cursor_line);
-        });
+        self.scroll_anchor.scroll_to(window, cx);
 
         // Sync dirty state to FileInfo global so title bar updates
         self.sync_dirty_state(cx);
@@ -606,16 +607,19 @@ impl Render for Editor {
         };
 
         // Build line views with click and drag handling
+        // Skip fence lines when cursor is outside the code block (they're hidden)
         let line_views: Vec<_> = lines
             .iter()
             .enumerate()
-            .map(|(line_idx, line)| {
+            .filter_map(|(line_idx, line)| {
                 // For fence lines, check if cursor is in this code block
                 let is_fence = matches!(line.kind(), LineKind::CodeBlock { is_fence: true, .. });
                 let cursor_in_block = cursor_in_code_block_range(line_idx);
 
-                // Note: We don't skip fence lines anymore - they render as empty lines
-                // to maintain consistent line indexing for scroll_to_item
+                // Skip fence lines when cursor is outside the code block
+                if is_fence && !cursor_in_block {
+                    return None;
+                }
 
                 let inline_styles = extract_inline_styles(&self.buffer, line);
 
@@ -632,7 +636,14 @@ impl Render for Editor {
                 // Show block markers for fence lines when cursor is in the code block
                 let show_block_markers = is_fence && cursor_in_block;
 
-                LineView::new(
+                // Attach scroll anchor to the line containing the cursor
+                let line_scroll_anchor = if line_idx == cursor_line {
+                    Some(self.scroll_anchor.clone())
+                } else {
+                    None
+                };
+
+                let line_view = LineView::new(
                     line,
                     &buffer_text,
                     cursor_offset,
@@ -651,9 +662,12 @@ impl Render for Editor {
                     code_highlights,
                     show_block_markers,
                 )
+                .with_scroll_anchor(line_scroll_anchor)
                 .on_click(on_click.clone())
                 .on_drag(on_drag.clone())
-                .on_checkbox(on_checkbox.clone())
+                .on_checkbox(on_checkbox.clone());
+
+                Some(line_view)
             })
             .collect();
 

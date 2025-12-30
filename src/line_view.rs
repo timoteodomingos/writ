@@ -6,8 +6,8 @@ use std::rc::Rc;
 
 use gpui::{
     App, CursorStyle, Font, FontStyle, FontWeight, Hsla, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, Rgba, SharedString, StyledText, TextRun, Window, canvas, div, img, point,
-    prelude::*, px, rems,
+    MouseMoveEvent, Rgba, ScrollAnchor, SharedString, StyledText, TextRun, Window, canvas, div,
+    img, point, prelude::*, px, rems,
 };
 
 use crate::highlight::HighlightSpan;
@@ -68,6 +68,8 @@ pub struct LineView<'a> {
     on_checkbox: Option<CheckboxCallback>,
     /// Whether to force showing block markers (e.g., cursor is in code block)
     show_block_markers: bool,
+    /// Scroll anchor for cursor line (attached to line containing cursor)
+    scroll_anchor: Option<ScrollAnchor>,
 }
 
 impl<'a> LineView<'a> {
@@ -113,7 +115,14 @@ impl<'a> LineView<'a> {
             on_drag: None,
             on_checkbox: None,
             show_block_markers,
+            scroll_anchor: None,
         }
+    }
+
+    /// Set the scroll anchor for this line (used for cursor line).
+    pub fn with_scroll_anchor(mut self, anchor: Option<ScrollAnchor>) -> Self {
+        self.scroll_anchor = anchor;
+        self
     }
 
     /// Set the click callback for this line.
@@ -1220,6 +1229,7 @@ impl IntoElement for LineView<'_> {
             });
         }
 
-        line_div
+        // Attach scroll anchor if this is the cursor line
+        line_div.anchor_scroll(self.scroll_anchor)
     }
 }
