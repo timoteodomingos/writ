@@ -263,6 +263,18 @@ impl<'a> LineView<'a> {
         }
     }
 
+    /// Create a simple text run with the given properties.
+    fn text_run(&self, len: usize, font: Font, color: Rgba) -> TextRun {
+        TextRun {
+            len,
+            font,
+            color: color.into(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        }
+    }
+
     /// Get the base text font with line-level styling (bold for headings).
     fn line_font(&self) -> Font {
         if self.line.kind.is_bold() {
@@ -304,14 +316,7 @@ impl<'a> LineView<'a> {
         if leading_spaces > 0 {
             let whitespace = &line_text[..leading_spaces];
             display_text.push_str(whitespace);
-            runs.push(TextRun {
-                len: whitespace.len(),
-                font: self.code_font.clone(),
-                color: self.fence_color.into(),
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            });
+            runs.push(self.text_run(whitespace.len(), self.code_font.clone(), self.fence_color));
         }
 
         // Find the backticks
@@ -321,27 +326,17 @@ impl<'a> LineView<'a> {
         // Add backticks in fence color (comment)
         if !backticks.is_empty() {
             display_text.push_str(&backticks);
-            runs.push(TextRun {
-                len: backticks.len(),
-                font: self.code_font.clone(),
-                color: self.fence_color.into(),
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            });
+            runs.push(self.text_run(backticks.len(), self.code_font.clone(), self.fence_color));
         }
 
         // Add language in green
         if !language.is_empty() {
             display_text.push_str(language);
-            runs.push(TextRun {
-                len: language.len(),
-                font: self.code_font.clone(),
-                color: self.fence_lang_color.into(),
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            });
+            runs.push(self.text_run(
+                language.len(),
+                self.code_font.clone(),
+                self.fence_lang_color,
+            ));
         }
 
         (display_text, runs)
@@ -364,14 +359,7 @@ impl<'a> LineView<'a> {
         let whitespace = self.leading_whitespace();
         if !whitespace.is_empty() && self.checkbox_state().is_none() {
             display_text.push_str(whitespace);
-            runs.push(TextRun {
-                len: whitespace.len(),
-                font: self.text_font.clone(),
-                color: self.text_color.into(),
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            });
+            runs.push(self.text_run(whitespace.len(), self.text_font.clone(), self.text_color));
         }
 
         // Add marker substitution prefix if applicable (bullet, etc.)
@@ -380,14 +368,7 @@ impl<'a> LineView<'a> {
             && !prefix.is_empty()
         {
             display_text.push_str(prefix);
-            runs.push(TextRun {
-                len: prefix.len(),
-                font: self.text_font.clone(),
-                color: self.text_color.into(),
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            });
+            runs.push(self.text_run(prefix.len(), self.text_font.clone(), self.text_color));
         }
 
         if content_range.start >= content_range.end {
@@ -866,14 +847,7 @@ impl IntoElement for LineView<'_> {
 
                 let display_text = if display_text.is_empty() {
                     // Add a run for the placeholder space
-                    runs.push(TextRun {
-                        len: 1,
-                        font: self.line_font(),
-                        color: self.text_color.into(),
-                        background_color: None,
-                        underline: None,
-                        strikethrough: None,
-                    });
+                    runs.push(self.text_run(1, self.line_font(), self.text_color));
                     " ".to_string()
                 } else {
                     display_text
@@ -936,28 +910,10 @@ impl IntoElement for LineView<'_> {
         let visual_cursor_pos = self.compute_visual_cursor_pos(&display_text);
 
         // For blank lines, we need some content for the cursor to attach to
-        let display_text = if display_text.is_empty() && self.cursor_on_line() {
-            // Add a run for the placeholder space
-            runs.push(TextRun {
-                len: 1,
-                font: self.line_font(),
-                color: self.text_color.into(),
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            });
-            " ".to_string() // Placeholder for cursor positioning
-        } else if display_text.is_empty() {
-            // Add a run for a regular space to maintain line height
-            runs.push(TextRun {
-                len: 1,
-                font: self.line_font(),
-                color: self.text_color.into(),
-                background_color: None,
-                underline: None,
-                strikethrough: None,
-            });
-            " ".to_string() // Space to maintain line height
+        let display_text = if display_text.is_empty() {
+            // Add a run for the placeholder space (for cursor or to maintain line height)
+            runs.push(self.text_run(1, self.line_font(), self.text_color));
+            " ".to_string()
         } else {
             display_text
         };
