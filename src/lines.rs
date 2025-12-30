@@ -192,9 +192,13 @@ pub struct LineInfo {
     pub substitution: String,
     /// Continuation text for smart enter (e.g., "- " for list items)
     pub continuation: String,
+    /// Leading whitespace before the first marker (indentation)
+    pub leading_whitespace: String,
+    /// Whether this line is a checkbox (task list with marker hidden)
+    pub checkbox: Option<bool>,
 }
 
-// Keep LineKind for backwards compatibility during transition
+/// The kind of line (structural type).
 #[derive(Debug, Clone, PartialEq)]
 pub enum LineKind {
     /// Empty line
@@ -215,6 +219,31 @@ pub enum LineKind {
         language: Option<String>,
         is_fence: bool,
     },
+}
+
+impl LineKind {
+    /// Whether this line should be rendered in bold (headings).
+    pub fn is_bold(&self) -> bool {
+        matches!(self, LineKind::Heading(_))
+    }
+
+    /// Whether this line is inside a code block.
+    pub fn is_code_block(&self) -> bool {
+        matches!(self, LineKind::CodeBlock { .. })
+    }
+
+    /// Whether this line is a code fence (``` delimiter).
+    pub fn is_fence(&self) -> bool {
+        matches!(self, LineKind::CodeBlock { is_fence: true, .. })
+    }
+
+    /// Get heading level if this is a heading (1-6).
+    pub fn heading_level(&self) -> Option<u8> {
+        match self {
+            LineKind::Heading(level) => Some(*level),
+            _ => None,
+        }
+    }
 }
 
 /// Compute LineKind from markers.
@@ -311,6 +340,31 @@ fn compute_continuation(text: &str, line_range: &Range<usize>, markers: &[Marker
     format!("{}{}", leading, marker_text)
 }
 
+/// Compute leading whitespace (indentation before first marker).
+fn compute_leading_whitespace(
+    text: &str,
+    line_range: &Range<usize>,
+    markers: &[MarkerInfo],
+) -> String {
+    if let Some(first) = markers.first()
+        && first.range.start > line_range.start
+    {
+        return text[line_range.start..first.range.start].to_string();
+    }
+    String::new()
+}
+
+/// Compute checkbox state from markers.
+/// Returns Some(true) for checked, Some(false) for unchecked, None if not a task list.
+fn compute_checkbox(markers: &[MarkerInfo]) -> Option<bool> {
+    for marker in markers {
+        if let MarkerKind::TaskList { checked } = marker.kind {
+            return Some(checked);
+        }
+    }
+    None
+}
+
 /// Extract line information from a buffer using tree-sitter.
 pub fn extract_lines(buffer: &Buffer) -> Vec<LineInfo> {
     let text = buffer.text();
@@ -362,6 +416,8 @@ pub fn extract_lines(buffer: &Buffer) -> Vec<LineInfo> {
             let has_border = compute_has_border(&markers);
             let substitution = compute_substitution(&markers);
             let continuation = compute_continuation(&text, &range, &markers);
+            let leading_whitespace = compute_leading_whitespace(&text, &range, &markers);
+            let checkbox = compute_checkbox(&markers);
 
             LineInfo {
                 range,
@@ -373,6 +429,8 @@ pub fn extract_lines(buffer: &Buffer) -> Vec<LineInfo> {
                 has_border,
                 substitution,
                 continuation,
+                leading_whitespace,
+                checkbox,
             }
         })
         .collect()

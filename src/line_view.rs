@@ -224,73 +224,48 @@ impl<'a> LineView<'a> {
         !self.should_show_raw_markers() && self.line.has_border
     }
 
-    /// Get the substitution prefix for this line (combined from all layers).
-    fn get_marker_substitution(&self) -> Option<String> {
-        // Only substitute when not showing raw markers
-        if self.should_show_raw_markers() {
-            return None;
-        }
-
-        if self.line.substitution.is_empty() {
-            None
-        } else {
-            Some(self.line.substitution.clone())
-        }
-    }
-
     /// Get checkbox state if this line shows a clickable checkbox (when cursor is away).
     /// Returns Some(checked) where checked is true for ☑, false for ☐.
     fn checkbox_state(&self) -> Option<bool> {
-        match self.get_marker_substitution().as_deref() {
-            Some("☐ ") => Some(false),
-            Some("☑ ") => Some(true),
-            _ => None,
+        // Only show checkbox when not showing raw markers
+        if self.should_show_raw_markers() {
+            return None;
         }
+        self.line.checkbox
     }
 
     /// Get the non-checkbox part of the marker substitution.
     /// For checkbox lines, this returns None (checkbox rendered separately).
     /// For other lines, returns the full substitution.
-    fn get_non_checkbox_substitution(&self) -> Option<String> {
-        match self.get_marker_substitution().as_deref() {
-            Some("☐ ") | Some("☑ ") => None, // Checkbox rendered separately
-            other => other.map(|s| s.to_string()),
+    fn get_non_checkbox_substitution(&self) -> Option<&str> {
+        // Only substitute when not showing raw markers
+        if self.should_show_raw_markers() {
+            return None;
+        }
+        // If this is a checkbox line, don't return substitution (checkbox rendered separately)
+        if self.line.checkbox.is_some() {
+            return None;
+        }
+        if self.line.substitution.is_empty() {
+            None
+        } else {
+            Some(&self.line.substitution)
         }
     }
 
     /// Get leading whitespace (indentation before the first marker).
-    /// Returns empty string if no markers or showing raw markers.
+    /// Returns empty string if showing raw markers.
     fn leading_whitespace(&self) -> &str {
         if self.should_show_raw_markers() {
-            return "";
-        }
-
-        if let Some(ref marker_range) = self.line.marker_range {
-            let line_start = self.line.range.start;
-            if marker_range.start > line_start {
-                // There's whitespace before the first marker
-                &self.text[line_start..marker_range.start]
-            } else {
-                ""
-            }
-        } else {
             ""
+        } else {
+            &self.line.leading_whitespace
         }
-    }
-
-    /// Check if this line should have bold styling (headings).
-    fn is_line_bold(&self) -> bool {
-        matches!(self.line.kind, LineKind::Heading(_))
-    }
-
-    /// Check if this line is inside a code block (should use mono font).
-    fn is_code_block_line(&self) -> bool {
-        matches!(self.line.kind, LineKind::CodeBlock { .. })
     }
 
     /// Get the base text font with line-level styling (bold for headings).
     fn line_font(&self) -> Font {
-        if self.is_line_bold() {
+        if self.line.kind.is_bold() {
             Font {
                 weight: FontWeight::BOLD,
                 ..self.text_font.clone()
@@ -313,11 +288,6 @@ impl<'a> LineView<'a> {
             }
         }
         None
-    }
-
-    /// Check if this is a fence line (code block delimiter).
-    fn is_fence_line(&self) -> bool {
-        matches!(self.line.kind, LineKind::CodeBlock { is_fence: true, .. })
     }
 
     /// Build styled content for fence lines (``` with optional language).
@@ -380,7 +350,7 @@ impl<'a> LineView<'a> {
     /// Build the display text and text runs with proper fonts.
     fn build_styled_content(&self) -> (String, Vec<TextRun>) {
         // Handle fence lines specially when cursor is not on them
-        if self.is_fence_line() && !self.should_show_raw_markers() {
+        if self.line.kind.is_fence() && !self.should_show_raw_markers() {
             return self.build_fence_content();
         }
 
@@ -409,7 +379,7 @@ impl<'a> LineView<'a> {
         if let Some(prefix) = self.get_non_checkbox_substitution()
             && !prefix.is_empty()
         {
-            display_text.push_str(&prefix);
+            display_text.push_str(prefix);
             runs.push(TextRun {
                 len: prefix.len(),
                 font: self.text_font.clone(),
@@ -546,14 +516,14 @@ impl<'a> LineView<'a> {
 
             // Build the font for this run
             // Use code font for: inline code spans, or any line inside a code block
-            let base_font = if is_code || self.is_code_block_line() {
+            let base_font = if is_code || self.line.kind.is_code_block() {
                 self.code_font.clone()
             } else {
                 self.text_font.clone()
             };
 
             let font = Font {
-                weight: if is_bold || self.is_line_bold() {
+                weight: if is_bold || self.line.kind.is_bold() {
                     FontWeight::BOLD
                 } else {
                     base_font.weight
