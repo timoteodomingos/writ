@@ -43,12 +43,6 @@ impl Editor {
         }
     }
 
-    /// Scroll the cursor (selection head) line into view.
-    fn scroll_cursor_into_view(&self) {
-        let cursor_line = self.buffer.byte_to_line(self.selection.head);
-        self.scroll_handle.scroll_to_item(cursor_line);
-    }
-
     /// Get the buffer contents.
     pub fn text(&self) -> String {
         self.buffer.text()
@@ -259,7 +253,7 @@ impl Editor {
     }
 
     /// Handle a key down event.
-    fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
+    fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
         let keystroke = &event.keystroke;
         let extend = keystroke.modifiers.shift;
 
@@ -463,7 +457,12 @@ impl Editor {
         }
 
         // Scroll cursor into view after any cursor movement
-        self.scroll_cursor_into_view();
+        // Use on_next_frame to ensure scroll happens after view is laid out with new content
+        let cursor_line = self.buffer.byte_to_line(self.selection.head);
+        let scroll_handle = self.scroll_handle.clone();
+        window.on_next_frame(move |_, _| {
+            scroll_handle.scroll_to_item(cursor_line);
+        });
 
         // Sync dirty state to FileInfo global so title bar updates
         self.sync_dirty_state(cx);
@@ -484,6 +483,8 @@ impl Render for Editor {
         let link_color = theme.cyan;
         let selection_color = theme.selection;
         let border_color = theme.comment;
+        let fence_color = theme.comment;
+        let fence_lang_color = theme.green;
         let cursor_offset = self.selection.head;
         let selection_range = if self.selection.is_collapsed() {
             None
@@ -611,10 +612,8 @@ impl Render for Editor {
                 let is_fence = matches!(line.kind(), LineKind::CodeBlock { is_fence: true, .. });
                 let cursor_in_block = cursor_in_code_block_range(line_idx);
 
-                // Skip fence lines when cursor is not in that code block
-                if is_fence && !cursor_in_block {
-                    return None;
-                }
+                // Note: We don't skip fence lines anymore - they render as empty lines
+                // to maintain consistent line indexing for scroll_to_item
 
                 let inline_styles = extract_inline_styles(&self.buffer, line);
 
@@ -642,6 +641,8 @@ impl Render for Editor {
                         link_color,
                         selection_color,
                         border_color,
+                        fence_color,
+                        fence_lang_color,
                         selection_range.clone(),
                         text_font.clone(),
                         code_font.clone(),

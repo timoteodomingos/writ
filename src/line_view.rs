@@ -46,6 +46,10 @@ pub struct LineView<'a> {
     link_color: Rgba,
     selection_color: Rgba,
     border_color: Rgba,
+    /// Color for code fence backticks (comment color)
+    fence_color: Rgba,
+    /// Color for code fence language identifier (green)
+    fence_lang_color: Rgba,
     /// Selection range in buffer offsets (None if collapsed/no selection)
     selection_range: Option<Range<usize>>,
     /// Font for regular text
@@ -68,6 +72,7 @@ pub struct LineView<'a> {
 
 impl<'a> LineView<'a> {
     /// Create a new line view.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         line: &'a LineInfo,
         text: &'a str,
@@ -78,6 +83,8 @@ impl<'a> LineView<'a> {
         link_color: Rgba,
         selection_color: Rgba,
         border_color: Rgba,
+        fence_color: Rgba,
+        fence_lang_color: Rgba,
         selection_range: Option<Range<usize>>,
         text_font: Font,
         code_font: Font,
@@ -95,6 +102,8 @@ impl<'a> LineView<'a> {
             link_color,
             selection_color,
             border_color,
+            fence_color,
+            fence_lang_color,
             selection_range,
             text_font,
             code_font,
@@ -273,8 +282,75 @@ impl<'a> LineView<'a> {
         None
     }
 
+    /// Check if this is a fence line (code block delimiter).
+    fn is_fence_line(&self) -> bool {
+        matches!(self.line.kind(), LineKind::CodeBlock { is_fence: true, .. })
+    }
+
+    /// Build styled content for fence lines (``` with optional language).
+    /// Returns backticks in comment color and language in green.
+    fn build_fence_content(&self) -> (String, Vec<TextRun>) {
+        let line_text = &self.text[self.line.range.clone()];
+        let trimmed = line_text.trim_start();
+        let leading_spaces = line_text.len() - trimmed.len();
+
+        let mut display_text = String::new();
+        let mut runs: Vec<TextRun> = Vec::new();
+
+        // Add leading whitespace
+        if leading_spaces > 0 {
+            let whitespace = &line_text[..leading_spaces];
+            display_text.push_str(whitespace);
+            runs.push(TextRun {
+                len: whitespace.len(),
+                font: self.code_font.clone(),
+                color: self.fence_color.into(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            });
+        }
+
+        // Find the backticks
+        let backticks: String = trimmed.chars().take_while(|&c| c == '`').collect();
+        let language = trimmed[backticks.len()..].trim();
+
+        // Add backticks in fence color (comment)
+        if !backticks.is_empty() {
+            display_text.push_str(&backticks);
+            runs.push(TextRun {
+                len: backticks.len(),
+                font: self.code_font.clone(),
+                color: self.fence_color.into(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            });
+        }
+
+        // Add language in green
+        if !language.is_empty() {
+            display_text.push_str(language);
+            runs.push(TextRun {
+                len: language.len(),
+                font: self.code_font.clone(),
+                color: self.fence_lang_color.into(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            });
+        }
+
+        (display_text, runs)
+    }
+
     /// Build the display text and text runs with proper fonts.
     fn build_styled_content(&self) -> (String, Vec<TextRun>) {
+        // Handle fence lines specially when cursor is not on them
+        if self.is_fence_line() && !self.should_show_raw_markers() {
+            return self.build_fence_content();
+        }
+
         let content_range = self.content_range();
 
         let mut display_text = String::new();
@@ -866,16 +942,16 @@ impl IntoElement for LineView<'_> {
             });
             " ".to_string() // Placeholder for cursor positioning
         } else if display_text.is_empty() {
-            // Add a run for the zero-width space
+            // Add a run for a regular space to maintain line height
             runs.push(TextRun {
-                len: "\u{200B}".len(),
+                len: 1,
                 font: self.line_font(),
                 color: self.text_color.into(),
                 background_color: None,
                 underline: None,
                 strikethrough: None,
             });
-            "\u{200B}".to_string() // Zero-width space to maintain line height
+            " ".to_string() // Space to maintain line height
         } else {
             display_text
         };

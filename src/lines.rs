@@ -49,7 +49,7 @@ impl LineLayer {
             } => "☑ ",
             LayerKind::ListItem { ordered: true, .. } => "", // Keep number visible
             LayerKind::Heading(_) => "",                     // No substitution for headings
-            LayerKind::CodeBlock { is_fence: true, .. } => "", // Hide fence entirely
+            LayerKind::CodeBlock { is_fence: true, .. } => "", // Fence lines rendered specially
             LayerKind::CodeBlock {
                 is_fence: false, ..
             } => "", // Code content, no marker
@@ -323,11 +323,8 @@ fn build_layers(tree: &MarkdownTree, text: &str, range: &Range<usize>) -> Vec<Li
 
         layers.push(LineLayer {
             kind: LayerKind::CodeBlock { language, is_fence },
-            marker_range: if is_fence {
-                range.clone()
-            } else {
-                range.start..range.start
-            },
+            // Fence lines don't hide their content - they're styled specially in line_view
+            marker_range: range.start..range.start,
         });
         return layers;
     }
