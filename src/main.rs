@@ -41,7 +41,7 @@ fn run_demo(editor: Entity<Editor>, cx: &mut gpui::App) {
             match step {
                 DemoStep::Type(text) => {
                     for c in text.chars() {
-                        run(&cx, EditorAction::Type(c));
+                        run(cx, EditorAction::Type(c));
                         Timer::after(timing.char_delay).await;
                     }
                 }
@@ -49,7 +49,7 @@ fn run_demo(editor: Entity<Editor>, cx: &mut gpui::App) {
                     Timer::after(Duration::from_millis(ms)).await;
                 }
                 DemoStep::Action(action) => {
-                    run(&cx, action);
+                    run(cx, action);
                     Timer::after(timing.key_delay).await;
                 }
             }
