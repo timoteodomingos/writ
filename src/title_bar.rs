@@ -1,9 +1,9 @@
 use gpui::{
-    div, prelude::*, rems, App, ClickEvent, ElementId, Fill, Global, MouseButton, ReadGlobal,
-    Window,
+    App, ClickEvent, ElementId, Fill, Global, MouseButton, ReadGlobal, Window, div, prelude::*,
+    rems,
 };
 
-use crate::theme::Theme;
+use crate::editor::EditorTheme;
 
 pub struct FileInfo {
     pub path: std::path::PathBuf,
@@ -29,8 +29,7 @@ fn traffic_light(
         .on_click(on_click)
 }
 
-pub fn title_bar(cx: &mut App) -> impl IntoElement {
-    let theme = Theme::global(cx);
+pub fn title_bar(theme: &EditorTheme, cx: &mut App) -> impl IntoElement {
     let file_info = FileInfo::global(cx);
     let file_name = file_info
         .path

@@ -10,7 +10,7 @@ use writ::{
     config::Config,
     demo::{DemoStep, DemoTiming, demo_script},
     editor::{Editor, EditorAction, EditorConfig, EditorTheme},
-    http, theme,
+    http,
     title_bar::FileInfo,
     window::{CloseWindow, Quit, window_shadow},
 };
@@ -70,11 +70,12 @@ fn run_demo(editor: Entity<Editor>, cx: &mut gpui::App) {
 pub struct Root {
     focus_handle: FocusHandle,
     editor: Entity<Editor>,
+    theme: EditorTheme,
 }
 
 impl Render for Root {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        window_shadow().child(
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        window_shadow(self.theme.clone()).child(
             div()
                 .id("root")
                 .track_focus(&self.focus_handle)
@@ -90,7 +91,7 @@ impl Render for Root {
                 .flex()
                 .flex_col()
                 .size_full()
-                .bg(cx.global::<theme::Theme>().background)
+                .bg(self.theme.background)
                 .child(self.editor.clone()),
         )
     }
@@ -121,7 +122,6 @@ fn main() {
     let app = Application::new().with_http_client(http::Client::new());
 
     app.run(move |cx| {
-        cx.set_global(theme::dracula());
         cx.set_global(FileInfo {
             path: file_path.clone(),
             dirty: false,
@@ -155,8 +155,9 @@ fn main() {
 
                 // Create editor config from CLI config
                 let cli_config = cx.global::<Config>();
+                let theme = EditorTheme::dracula();
                 let editor_config = EditorConfig {
-                    theme: EditorTheme::dracula(),
+                    theme: theme.clone(),
                     text_font: cli_config.text_font.clone(),
                     code_font: cli_config.code_font.clone(),
                     base_path: file_path.parent().map(|p| p.to_path_buf()),
@@ -177,6 +178,7 @@ fn main() {
                 cx.new(|_| Root {
                     focus_handle,
                     editor,
+                    theme,
                 })
             })
             .expect("Failed to open window");

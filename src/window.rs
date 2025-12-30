@@ -1,28 +1,30 @@
 use gpui::{
-    actions, canvas, div, point, prelude::*, px, AnyElement, App, Bounds, BoxShadow, CursorStyle,
-    Decorations, HitboxBehavior, Hsla, MouseButton, Pixels, Point, ReadGlobal, ResizeEdge, Size,
-    Window,
+    AnyElement, App, Bounds, BoxShadow, CursorStyle, Decorations, HitboxBehavior, Hsla,
+    MouseButton, Pixels, Point, ResizeEdge, Size, Window, actions, canvas, div, point, prelude::*,
+    px,
 };
 
-use crate::{theme::Theme, title_bar::title_bar};
+use crate::{editor::EditorTheme, title_bar::title_bar};
 
 actions!(window, [CloseWindow, Quit]);
 
-#[derive(IntoElement, Default)]
+#[derive(IntoElement)]
 pub struct WindowShadow {
     children: Vec<AnyElement>,
+    theme: EditorTheme,
 }
 
 impl WindowShadow {
-    pub fn new() -> Self {
+    pub fn new(theme: EditorTheme) -> Self {
         Self {
-            ..Default::default()
+            children: Vec::new(),
+            theme,
         }
     }
 }
 
-pub fn window_shadow() -> WindowShadow {
-    WindowShadow::new()
+pub fn window_shadow(theme: EditorTheme) -> WindowShadow {
+    WindowShadow::new(theme)
 }
 
 impl ParentElement for WindowShadow {
@@ -37,7 +39,7 @@ impl RenderOnce for WindowShadow {
         let rounding = px(10.0);
         let shadow_size = px(10.0);
         let border_size = px(1.0);
-        let theme = Theme::global(cx);
+        let theme = &self.theme;
         window.set_client_inset(shadow_size);
 
         div()
@@ -146,7 +148,7 @@ impl RenderOnce for WindowShadow {
                     .size_full()
                     .flex()
                     .flex_col()
-                    .child(title_bar(cx))
+                    .child(title_bar(theme, cx))
                     .children(self.children),
             )
     }
