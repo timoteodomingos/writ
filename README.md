@@ -68,10 +68,8 @@ Full selection support with click, drag, shift+arrow keys, double-click to selec
 
 writ can be embedded as a GPUI component in your own application. Add it as a dependency:
 
-```toml
-[dependencies]
-writ = "0.1"
-gpui = "0.1"
+```bash
+cargo add writ
 ```
 
 ### Basic Usage
