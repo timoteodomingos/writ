@@ -9,14 +9,14 @@ pub use theme::EditorTheme;
 use std::rc::Rc;
 
 use gpui::{
-    App, Context, CursorStyle, FocusHandle, Focusable, Font, IntoElement, KeyDownEvent, Rgba,
+    App, Context, CursorStyle, FocusHandle, Focusable, IntoElement, KeyDownEvent, Rgba,
     ScrollAnchor, ScrollHandle, Window, div, font, prelude::*,
 };
 
 use crate::buffer::Buffer;
 use crate::cursor::{Cursor, Selection};
 use crate::highlight::Highlighter;
-use crate::line_view::{CheckboxCallback, ClickCallback, DragCallback, LineView};
+use crate::line_view::{CheckboxCallback, ClickCallback, DragCallback, LineView, LineViewTheme};
 use crate::lines::{LineKind, extract_inline_styles, extract_lines};
 
 /// The main editor component.
@@ -633,23 +633,23 @@ impl Focusable for Editor {
 impl Render for Editor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.config.theme.clone();
-        let text_color = theme.foreground;
-        let cursor_color = theme.purple;
-        let link_color = theme.cyan;
-        let selection_color = theme.selection;
-        let border_color = theme.comment;
-        let fence_color = theme.comment;
-        let fence_lang_color = theme.green;
+        let line_theme = LineViewTheme {
+            text_color: theme.foreground,
+            cursor_color: theme.purple,
+            link_color: theme.cyan,
+            selection_color: theme.selection,
+            border_color: theme.comment,
+            fence_color: theme.comment,
+            fence_lang_color: theme.green,
+            text_font: font(&self.config.text_font),
+            code_font: font(&self.config.code_font),
+        };
         let cursor_offset = self.selection.head;
         let selection_range = if self.selection.is_collapsed() {
             None
         } else {
             Some(self.selection.range())
         };
-
-        // Get fonts from config
-        let text_font: Font = font(&self.config.text_font);
-        let code_font: Font = font(&self.config.code_font);
 
         // Get the base path for resolving relative image paths
         let base_path = self.config.base_path.clone();
@@ -816,16 +816,8 @@ impl Render for Editor {
                     &buffer_text,
                     cursor_offset,
                     inline_styles,
-                    text_color,
-                    cursor_color,
-                    link_color,
-                    selection_color,
-                    border_color,
-                    fence_color,
-                    fence_lang_color,
+                    line_theme.clone(),
                     selection_range.clone(),
-                    text_font.clone(),
-                    code_font.clone(),
                     base_path.clone(),
                     code_highlights,
                     show_block_markers,
@@ -852,8 +844,8 @@ impl Render for Editor {
             .overflow_scroll()
             .track_scroll(&self.scroll_handle)
             .px(self.config.padding_x)
-            .font(text_font.clone())
-            .text_color(text_color)
+            .font(line_theme.text_font.clone())
+            .text_color(line_theme.text_color)
             .cursor(CursorStyle::IBeam)
             .child(top_spacer)
             .children(line_views)

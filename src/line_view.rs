@@ -24,6 +24,20 @@ pub type DragCallback = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 /// Callback type for checkbox toggle - receives the line number where checkbox was clicked.
 pub type CheckboxCallback = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 
+/// Theme colors and fonts for rendering lines.
+#[derive(Clone)]
+pub struct LineViewTheme {
+    pub text_color: Rgba,
+    pub cursor_color: Rgba,
+    pub link_color: Rgba,
+    pub selection_color: Rgba,
+    pub border_color: Rgba,
+    pub fence_color: Rgba,
+    pub fence_lang_color: Rgba,
+    pub text_font: Font,
+    pub code_font: Font,
+}
+
 /// Represents a resolved image source for rendering.
 enum ImageSource {
     Url(String),
@@ -40,22 +54,10 @@ pub struct LineView<'a> {
     cursor_offset: usize,
     /// Inline styles for this line (bold, italic, code, etc.)
     inline_styles: Vec<StyledRegion>,
-    /// Theme colors
-    text_color: Rgba,
-    cursor_color: Rgba,
-    link_color: Rgba,
-    selection_color: Rgba,
-    border_color: Rgba,
-    /// Color for code fence backticks (comment color)
-    fence_color: Rgba,
-    /// Color for code fence language identifier (green)
-    fence_lang_color: Rgba,
+    /// Theme colors and fonts
+    theme: LineViewTheme,
     /// Selection range in buffer offsets (None if collapsed/no selection)
     selection_range: Option<Range<usize>>,
-    /// Font for regular text
-    text_font: Font,
-    /// Font for inline code
-    code_font: Font,
     /// Base path for resolving relative image paths (directory containing the markdown file)
     base_path: Option<PathBuf>,
     /// Syntax highlighting spans for code blocks (with pre-computed colors)
@@ -74,22 +76,13 @@ pub struct LineView<'a> {
 
 impl<'a> LineView<'a> {
     /// Create a new line view.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         line: &'a LineInfo,
         text: &'a str,
         cursor_offset: usize,
         inline_styles: Vec<StyledRegion>,
-        text_color: Rgba,
-        cursor_color: Rgba,
-        link_color: Rgba,
-        selection_color: Rgba,
-        border_color: Rgba,
-        fence_color: Rgba,
-        fence_lang_color: Rgba,
+        theme: LineViewTheme,
         selection_range: Option<Range<usize>>,
-        text_font: Font,
-        code_font: Font,
         base_path: Option<PathBuf>,
         code_highlights: Vec<(HighlightSpan, Rgba)>,
         show_block_markers: bool,
@@ -99,16 +92,8 @@ impl<'a> LineView<'a> {
             text,
             cursor_offset,
             inline_styles,
-            text_color,
-            cursor_color,
-            link_color,
-            selection_color,
-            border_color,
-            fence_color,
-            fence_lang_color,
+            theme,
             selection_range,
-            text_font,
-            code_font,
             base_path,
             code_highlights,
             on_click: None,
@@ -280,10 +265,10 @@ impl<'a> LineView<'a> {
         if self.line.kind.is_bold() {
             Font {
                 weight: FontWeight::BOLD,
-                ..self.text_font.clone()
+                ..self.theme.text_font.clone()
             }
         } else {
-            self.text_font.clone()
+            self.theme.text_font.clone()
         }
     }
 
@@ -316,7 +301,11 @@ impl<'a> LineView<'a> {
         if leading_spaces > 0 {
             let whitespace = &line_text[..leading_spaces];
             display_text.push_str(whitespace);
-            runs.push(self.text_run(whitespace.len(), self.code_font.clone(), self.fence_color));
+            runs.push(self.text_run(
+                whitespace.len(),
+                self.theme.code_font.clone(),
+                self.theme.fence_color,
+            ));
         }
 
         // Find the backticks
@@ -326,7 +315,11 @@ impl<'a> LineView<'a> {
         // Add backticks in fence color (comment)
         if !backticks.is_empty() {
             display_text.push_str(&backticks);
-            runs.push(self.text_run(backticks.len(), self.code_font.clone(), self.fence_color));
+            runs.push(self.text_run(
+                backticks.len(),
+                self.theme.code_font.clone(),
+                self.theme.fence_color,
+            ));
         }
 
         // Add language in green
@@ -334,8 +327,8 @@ impl<'a> LineView<'a> {
             display_text.push_str(language);
             runs.push(self.text_run(
                 language.len(),
-                self.code_font.clone(),
-                self.fence_lang_color,
+                self.theme.code_font.clone(),
+                self.theme.fence_lang_color,
             ));
         }
 
@@ -359,7 +352,11 @@ impl<'a> LineView<'a> {
         let whitespace = self.leading_whitespace();
         if !whitespace.is_empty() && self.checkbox_state().is_none() {
             display_text.push_str(whitespace);
-            runs.push(self.text_run(whitespace.len(), self.text_font.clone(), self.text_color));
+            runs.push(self.text_run(
+                whitespace.len(),
+                self.theme.text_font.clone(),
+                self.theme.text_color,
+            ));
         }
 
         // Add marker substitution prefix if applicable (bullet, etc.)
@@ -368,7 +365,11 @@ impl<'a> LineView<'a> {
             && !prefix.is_empty()
         {
             display_text.push_str(prefix);
-            runs.push(self.text_run(prefix.len(), self.text_font.clone(), self.text_color));
+            runs.push(self.text_run(
+                prefix.len(),
+                self.theme.text_font.clone(),
+                self.theme.text_color,
+            ));
         }
 
         if content_range.start >= content_range.end {
@@ -498,9 +499,9 @@ impl<'a> LineView<'a> {
             // Build the font for this run
             // Use code font for: inline code spans, or any line inside a code block
             let base_font = if is_code || self.line.kind.is_code_block() {
-                self.code_font.clone()
+                self.theme.code_font.clone()
             } else {
-                self.text_font.clone()
+                self.theme.text_font.clone()
             };
 
             let font = Font {
@@ -519,19 +520,19 @@ impl<'a> LineView<'a> {
 
             // Determine text color
             let color: Hsla = if is_link {
-                self.link_color.into()
+                self.theme.link_color.into()
             } else if let Some(highlight_color) = self.get_highlight_color_for_range(start, end) {
                 // Code block with syntax highlighting
                 highlight_color.into()
             } else {
-                self.text_color.into()
+                self.theme.text_color.into()
             };
 
             // Build underline/strikethrough
             let underline = if is_link {
                 Some(gpui::UnderlineStyle {
                     thickness: px(1.0),
-                    color: Some(self.link_color.into()),
+                    color: Some(self.theme.link_color.into()),
                     wavy: false,
                 })
             } else {
@@ -541,7 +542,7 @@ impl<'a> LineView<'a> {
             let strikethrough = if is_strikethrough {
                 Some(gpui::StrikethroughStyle {
                     thickness: px(1.0),
-                    color: Some(self.text_color.into()),
+                    color: Some(self.theme.text_color.into()),
                 })
             } else {
                 None
@@ -561,54 +562,32 @@ impl<'a> LineView<'a> {
     }
 
     /// Compute the visual cursor position within the displayed text.
+    /// Calculate hidden marker bytes before a given buffer offset.
+    fn hidden_bytes_before(&self, offset: usize, content_range: &Range<usize>) -> usize {
+        let mut hidden = 0usize;
+        for region in &self.inline_styles {
+            // Opening marker
+            let opening_start = region.full_range.start.max(content_range.start);
+            let opening_end = region.content_range.start.min(content_range.end);
+            if opening_end > opening_start && offset > opening_end {
+                hidden += opening_end - opening_start;
+            }
+            // Closing marker
+            let closing_start = region.content_range.end.max(content_range.start);
+            let closing_end = region.full_range.end.min(content_range.end);
+            if closing_end > closing_start && offset > closing_end {
+                hidden += closing_end - closing_start;
+            }
+        }
+        hidden
+    }
+
+    /// Compute the visual cursor position within the displayed text.
     fn compute_visual_cursor_pos(&self, display_text: &str) -> Option<usize> {
         if !self.cursor_on_line() {
             return None;
         }
-
-        let content_range = self.content_range();
-
-        // For empty lines, cursor is at position 0
-        if content_range.start >= content_range.end {
-            return Some(0);
-        }
-
-        // If selection is on line, all markers are shown - direct mapping
-        if self.selection_on_line() {
-            let visual_pos = self.cursor_offset.saturating_sub(content_range.start);
-            return Some(visual_pos.min(display_text.len()));
-        }
-
-        // Calculate how much text is hidden before the cursor
-        let mut hidden_before_cursor = 0usize;
-
-        // Account for hidden inline markers
-        for region in &self.inline_styles {
-            let cursor_inside = self.cursor_offset >= region.full_range.start
-                && self.cursor_offset <= region.full_range.end;
-
-            if !cursor_inside {
-                // Opening marker hidden
-                let opening_start = region.full_range.start.max(content_range.start);
-                let opening_end = region.content_range.start.min(content_range.end);
-                if opening_end > opening_start && self.cursor_offset > opening_end {
-                    hidden_before_cursor += opening_end - opening_start;
-                }
-
-                // Closing marker hidden
-                let closing_start = region.content_range.end.max(content_range.start);
-                let closing_end = region.full_range.end.min(content_range.end);
-                if closing_end > closing_start && self.cursor_offset > closing_end {
-                    hidden_before_cursor += closing_end - closing_start;
-                }
-            }
-        }
-
-        // Visual position = buffer position relative to content start, minus hidden chars
-        let buffer_pos_in_content = self.cursor_offset.saturating_sub(content_range.start);
-        let visual_pos = buffer_pos_in_content.saturating_sub(hidden_before_cursor);
-
-        Some(visual_pos.min(display_text.len()))
+        Some(self.buffer_to_visual_pos(self.cursor_offset, display_text))
     }
 
     /// Convert a buffer offset to a visual position, accounting for hidden markers.
@@ -619,7 +598,6 @@ impl<'a> LineView<'a> {
             return 0;
         }
 
-        // Clamp buffer_offset to content range
         let clamped_offset = buffer_offset.clamp(content_range.start, content_range.end);
 
         // If selection is on line, all markers are shown - direct mapping
@@ -628,28 +606,9 @@ impl<'a> LineView<'a> {
             return visual_pos.min(display_text.len());
         }
 
-        // Calculate how much text is hidden before this offset
-        let mut hidden_before = 0usize;
-
-        // Account for hidden inline markers
-        for region in &self.inline_styles {
-            // Opening marker hidden
-            let opening_start = region.full_range.start.max(content_range.start);
-            let opening_end = region.content_range.start.min(content_range.end);
-            if opening_end > opening_start && clamped_offset > opening_end {
-                hidden_before += opening_end - opening_start;
-            }
-
-            // Closing marker hidden
-            let closing_start = region.content_range.end.max(content_range.start);
-            let closing_end = region.full_range.end.min(content_range.end);
-            if closing_end > closing_start && clamped_offset > closing_end {
-                hidden_before += closing_end - closing_start;
-            }
-        }
-
+        let hidden = self.hidden_bytes_before(clamped_offset, &content_range);
         let buffer_pos_in_content = clamped_offset.saturating_sub(content_range.start);
-        let visual_pos = buffer_pos_in_content.saturating_sub(hidden_before);
+        let visual_pos = buffer_pos_in_content.saturating_sub(hidden);
 
         visual_pos.min(display_text.len())
     }
@@ -686,7 +645,7 @@ impl<'a> LineView<'a> {
         visual_range: Range<usize>,
         text_layout: gpui::TextLayout,
     ) -> impl IntoElement {
-        let selection_color = self.selection_color;
+        let selection_color = self.theme.selection_color;
 
         canvas(
             move |bounds, _window, _cx| {
@@ -763,7 +722,7 @@ impl<'a> LineView<'a> {
 
     /// Render the cursor overlay.
     fn render_cursor(&self, cursor_pos: usize, text_layout: gpui::TextLayout) -> impl IntoElement {
-        let cursor_color = self.cursor_color;
+        let cursor_color = self.theme.cursor_color;
 
         canvas(
             move |_bounds, _window, _cx| text_layout.position_for_index(cursor_pos),
@@ -847,7 +806,7 @@ impl IntoElement for LineView<'_> {
 
                 let display_text = if display_text.is_empty() {
                     // Add a run for the placeholder space
-                    runs.push(self.text_run(1, self.line_font(), self.text_color));
+                    runs.push(self.text_run(1, self.line_font(), self.theme.text_color));
                     " ".to_string()
                 } else {
                     display_text
@@ -912,7 +871,7 @@ impl IntoElement for LineView<'_> {
         // For blank lines, we need some content for the cursor to attach to
         let display_text = if display_text.is_empty() {
             // Add a run for the placeholder space (for cursor or to maintain line height)
-            runs.push(self.text_run(1, self.line_font(), self.text_color));
+            runs.push(self.text_run(1, self.line_font(), self.theme.text_color));
             " ".to_string()
         } else {
             display_text
@@ -946,7 +905,9 @@ impl IntoElement for LineView<'_> {
                 if self.should_show_raw_markers() {
                     base
                 } else {
-                    base.pl_3().border_l_2().border_color(self.border_color)
+                    base.pl_3()
+                        .border_l_2()
+                        .border_color(self.theme.border_color)
                 }
             }
             LineKind::CodeBlock { .. } => line_base(line_number).relative().text_size(rems(0.9)),
@@ -954,7 +915,9 @@ impl IntoElement for LineView<'_> {
                 let base = line_base(line_number).relative();
                 // Add blockquote border for list items inside blockquotes
                 if self.should_show_border() {
-                    base.pl_3().border_l_2().border_color(self.border_color)
+                    base.pl_3()
+                        .border_l_2()
+                        .border_color(self.theme.border_color)
                 } else {
                     base
                 }
@@ -965,7 +928,7 @@ impl IntoElement for LineView<'_> {
         if let Some(checked) = self.checkbox_state() {
             let on_checkbox = self.on_checkbox.clone();
             let line_num = self.line.line_number;
-            let check_color = self.text_color;
+            let check_color = self.theme.text_color;
 
             // Get leading whitespace for indentation (rendered before checkbox)
             let indent = self.leading_whitespace();
@@ -977,7 +940,7 @@ impl IntoElement for LineView<'_> {
             let mut checkbox_div = div()
                 .size(box_size)
                 .border_1()
-                .border_color(self.text_color)
+                .border_color(self.theme.text_color)
                 .cursor(CursorStyle::PointingHand)
                 .mr_2()
                 .ml(rems(indent_width)) // Add left margin for indentation
