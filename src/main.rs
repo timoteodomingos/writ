@@ -4,7 +4,7 @@ use gpui::{
     WindowBounds, WindowDecorations, WindowOptions, div, prelude::*, rems,
 };
 use writ::{
-    args::Args,
+    config::Config,
     editor::Editor,
     http, theme,
     title_bar::FileInfo,
@@ -51,19 +51,20 @@ impl Focusable for Root {
 }
 
 fn main() {
-    let args = Args::parse()
+    let config = Config::parse()
         .validate()
-        .expect("Failed to validate arguments");
-    let content = load_file(&args.file);
+        .expect("Failed to validate config");
+    let content = load_file(&config.file);
 
     let app = Application::new().with_http_client(http::Client::new());
 
     app.run(move |cx| {
         cx.set_global(theme::dracula());
         cx.set_global(FileInfo {
-            path: args.file,
+            path: config.file.clone(),
             dirty: false,
         });
+        cx.set_global(config);
         cx.bind_keys([
             KeyBinding::new("ctrl-w", CloseWindow, None),
             KeyBinding::new("cmd-w", CloseWindow, None),

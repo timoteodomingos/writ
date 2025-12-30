@@ -7,6 +7,7 @@ use gpui::{
 };
 
 use crate::buffer::Buffer;
+use crate::config::Config;
 use crate::cursor::{Cursor, Selection};
 use crate::highlight::Highlighter;
 use crate::line_view::{CheckboxCallback, ClickCallback, DragCallback, LineView};
@@ -492,19 +493,10 @@ impl Render for Editor {
             Some(self.selection.range())
         };
 
-        // Platform-specific font defaults
-        // Windows: Segoe UI / Consolas
-        // macOS: system font / Menlo
-        // Linux/other: Liberation Sans / Liberation Mono
-        #[cfg(target_os = "windows")]
-        let (text_font, code_font): (Font, Font) = (font("Segoe UI"), font("Consolas"));
-
-        #[cfg(target_os = "macos")]
-        let (text_font, code_font): (Font, Font) = (font(".AppleSystemUIFont"), font("Menlo"));
-
-        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
-        let (text_font, code_font): (Font, Font) =
-            (font("Liberation Sans"), font("Liberation Mono"));
+        // Get fonts from config
+        let config = cx.global::<Config>();
+        let text_font: Font = font(&config.text_font);
+        let code_font: Font = font(&config.code_font);
 
         // Get the base path for resolving relative image paths
         let file_info = cx.global::<FileInfo>();
