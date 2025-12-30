@@ -8,8 +8,8 @@ use gpui::{
 };
 use writ::{
     config::Config,
-    demo::{DemoAction, DemoTiming, demo_script},
-    editor::Editor,
+    demo::{DemoStep, DemoTiming, demo_script},
+    editor::{Editor, EditorAction},
     http, theme,
     title_bar::FileInfo,
     window::{CloseWindow, Quit, window_shadow},
@@ -19,62 +19,52 @@ fn load_file(file: &std::path::Path) -> String {
     std::fs::read_to_string(file).unwrap_or_default()
 }
 
-/// Run the demo script, scheduling actions with delays.
+/// Run the demo script sequentially, sleeping between events.
 fn run_demo(editor: Entity<Editor>, cx: &mut gpui::App) {
     let script = demo_script();
     let timing = DemoTiming::default();
 
-    // Flatten the script into individual timed events
-    let mut events: Vec<(Duration, DemoAction)> = Vec::new();
-    let mut current_delay = Duration::from_millis(500); // Initial delay before starting
-
-    for action in script {
-        match &action {
-            DemoAction::Type(text) => {
-                // Each character gets its own event
-                for c in text.chars() {
-                    events.push((current_delay, DemoAction::Type(c.to_string())));
-                    current_delay += timing.char_delay;
-                }
-            }
-            DemoAction::Wait(ms) => {
-                current_delay += Duration::from_millis(*ms);
-            }
-            _ => {
-                events.push((current_delay, action.clone()));
-                current_delay += timing.key_delay;
-            }
-        }
-    }
-
-    // Schedule each event
-    for (delay, action) in events {
-        let editor = editor.clone();
-        cx.spawn(async move |cx| {
-            Timer::after(delay).await;
+    cx.spawn(async move |cx| {
+        let run = |cx: &gpui::AsyncApp, action: EditorAction| {
             let _ = cx.update(|cx| {
-                if let Some(window_handle) = cx.windows().first().copied() {
-                    let _ = cx.update_window(window_handle, |_, window, cx| {
-                        editor.update(cx, |editor, cx| {
-                            match action {
-                                DemoAction::Type(s) => {
-                                    for c in s.chars() {
-                                        editor.demo_type_char(c, window, cx);
-                                    }
-                                }
-                                DemoAction::Enter => editor.demo_enter(window, cx),
-                                DemoAction::ShiftEnter => editor.demo_shift_enter(window, cx),
-                                DemoAction::Backspace => editor.demo_backspace(window, cx),
-                                DemoAction::Move(dir) => editor.demo_move(&dir, window, cx),
-                                DemoAction::Wait(_) => {} // Already handled in timing
-                            }
-                        });
+                if let Some(wh) = cx.windows().first().copied() {
+                    let _ = cx.update_window(wh, |_, window, cx| {
+                        editor.update(cx, |editor, cx| editor.execute(action, window, cx));
                     });
                 }
             });
-        })
-        .detach();
-    }
+        };
+
+        Timer::after(Duration::from_millis(500)).await;
+
+        for step in script {
+            match step {
+                DemoStep::Type(text) => {
+                    for c in text.chars() {
+                        run(&cx, EditorAction::Type(c));
+                        Timer::after(timing.char_delay).await;
+                    }
+                }
+                DemoStep::Wait(ms) => {
+                    Timer::after(Duration::from_millis(ms)).await;
+                }
+                DemoStep::Action(action) => {
+                    run(&cx, action);
+                    Timer::after(timing.key_delay).await;
+                }
+            }
+        }
+
+        Timer::after(Duration::from_millis(500)).await;
+        let _ = cx.update(|cx| {
+            if let Some(wh) = cx.windows().first().copied() {
+                let _ = cx.update_window(wh, |_, _, cx| {
+                    editor.update(cx, |editor, _| editor.set_input_blocked(false));
+                });
+            }
+        });
+    })
+    .detach();
 }
 
 pub struct Root {
@@ -168,6 +158,10 @@ fn main() {
 
                 // Start demo if in demo mode
                 if demo_mode {
+                    // Block user input during demo
+                    editor.update(cx, |editor, _| {
+                        editor.set_input_blocked(true);
+                    });
                     run_demo(editor.clone(), cx);
                 }
 

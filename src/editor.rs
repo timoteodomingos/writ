@@ -15,6 +15,30 @@ use crate::lines::{LineKind, extract_inline_styles, extract_lines};
 use crate::theme::Theme;
 use crate::title_bar::FileInfo;
 
+/// An editor action that can be executed programmatically.
+#[derive(Clone, Debug)]
+pub enum EditorAction {
+    /// Insert a character at the cursor.
+    Type(char),
+    /// Insert a newline.
+    Enter,
+    /// Smart enter - continues list items, blockquotes, etc.
+    ShiftEnter,
+    /// Delete the character before the cursor.
+    Backspace,
+    /// Move cursor in a direction.
+    Move(Direction),
+}
+
+/// Cursor movement direction.
+#[derive(Clone, Debug)]
+pub enum Direction {
+    Left,
+    Right,
+    Up,
+    Down,
+}
+
 /// The main editor component.
 pub struct Editor {
     /// The text buffer
@@ -29,6 +53,8 @@ pub struct Editor {
     scroll_anchor: ScrollAnchor,
     /// Syntax highlighter for code blocks
     highlighter: Highlighter,
+    /// Whether user input is blocked (for demo mode)
+    input_blocked: bool,
 }
 
 impl Editor {
@@ -47,6 +73,7 @@ impl Editor {
             scroll_handle,
             scroll_anchor,
             highlighter: Highlighter::new(),
+            input_blocked: false,
         }
     }
 
@@ -184,6 +211,69 @@ impl Editor {
         }
     }
 
+    // =========================================================================
+    // Core editing operations - used by both keyboard handler and execute()
+    // =========================================================================
+
+    /// Insert text at cursor, replacing selection if any.
+    fn insert_text(&mut self, text: &str) {
+        let cursor_before = self.cursor().offset;
+        let insert_pos = if !self.selection.is_collapsed() {
+            let range = self.selection.range();
+            self.buffer.delete(range.clone(), cursor_before);
+            range.start
+        } else {
+            cursor_before
+        };
+        self.buffer.insert(insert_pos, text, insert_pos);
+        let new_pos = insert_pos + text.len();
+        self.selection = Selection::new(new_pos, new_pos);
+    }
+
+    /// Delete backward (backspace behavior).
+    fn delete_backward(&mut self) {
+        if !self.selection.is_collapsed() {
+            self.delete_selection();
+        } else if self.cursor().offset > 0 {
+            let cursor_before = self.cursor().offset;
+            let new_cursor = self.cursor().move_left(&self.buffer);
+            self.buffer
+                .delete(new_cursor.offset..cursor_before, cursor_before);
+            self.selection = Selection::new(new_cursor.offset, new_cursor.offset);
+        }
+    }
+
+    /// Delete forward (delete key behavior).
+    fn delete_forward(&mut self) {
+        if !self.selection.is_collapsed() {
+            self.delete_selection();
+        } else if self.cursor().offset < self.buffer.len_bytes() {
+            let cursor_before = self.cursor().offset;
+            let next = self.cursor().move_right(&self.buffer);
+            self.buffer
+                .delete(cursor_before..next.offset, cursor_before);
+        }
+    }
+
+    /// Delete the current selection.
+    fn delete_selection(&mut self) {
+        let range = self.selection.range();
+        let cursor_before = self.cursor().offset;
+        self.buffer.delete(range.clone(), cursor_before);
+        self.selection = Selection::new(range.start, range.start);
+    }
+
+    /// Move cursor in a direction, optionally extending selection.
+    fn move_in_direction(&mut self, direction: Direction, extend: bool) {
+        let new_cursor = match direction {
+            Direction::Left => self.cursor().move_left(&self.buffer),
+            Direction::Right => self.cursor().move_right(&self.buffer),
+            Direction::Up => self.cursor().move_up(&self.buffer),
+            Direction::Down => self.cursor().move_down(&self.buffer),
+        };
+        self.move_cursor(new_cursor, extend);
+    }
+
     /// Compute syntax highlights for all code blocks in the document.
     ///
     /// This parses each code block once and returns all highlights with
@@ -261,62 +351,38 @@ impl Editor {
 
     /// Handle a key down event.
     fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // Block user input during demo mode
+        if self.input_blocked {
+            return;
+        }
+
         let keystroke = &event.keystroke;
         let extend = keystroke.modifiers.shift;
 
         // Handle special keys
         match keystroke.key.as_str() {
             "backspace" => {
-                if !self.selection.is_collapsed() {
-                    // Delete selection
-                    let range = self.selection.range();
-                    let cursor_before = self.cursor().offset;
-                    self.buffer.delete(range.clone(), cursor_before);
-                    self.selection = Selection::new(range.start, range.start);
-                    cx.notify();
-                } else if self.cursor().offset > 0 {
-                    let cursor_before = self.cursor().offset;
-                    let new_cursor = self.cursor().move_left(&self.buffer);
-                    self.buffer
-                        .delete(new_cursor.offset..cursor_before, cursor_before);
-                    self.selection = Selection::new(new_cursor.offset, new_cursor.offset);
-                    cx.notify();
-                }
+                self.delete_backward();
+                cx.notify();
             }
             "delete" => {
-                if !self.selection.is_collapsed() {
-                    // Delete selection
-                    let range = self.selection.range();
-                    let cursor_before = self.cursor().offset;
-                    self.buffer.delete(range.clone(), cursor_before);
-                    self.selection = Selection::new(range.start, range.start);
-                    cx.notify();
-                } else if self.cursor().offset < self.buffer.len_bytes() {
-                    let cursor_before = self.cursor().offset;
-                    let next = self.cursor().move_right(&self.buffer);
-                    self.buffer
-                        .delete(cursor_before..next.offset, cursor_before);
-                    cx.notify();
-                }
+                self.delete_forward();
+                cx.notify();
             }
             "left" => {
-                let new_cursor = self.cursor().move_left(&self.buffer);
-                self.move_cursor(new_cursor, extend);
+                self.move_in_direction(Direction::Left, extend);
                 cx.notify();
             }
             "right" => {
-                let new_cursor = self.cursor().move_right(&self.buffer);
-                self.move_cursor(new_cursor, extend);
+                self.move_in_direction(Direction::Right, extend);
                 cx.notify();
             }
             "up" => {
-                let new_cursor = self.cursor().move_up(&self.buffer);
-                self.move_cursor(new_cursor, extend);
+                self.move_in_direction(Direction::Up, extend);
                 cx.notify();
             }
             "down" => {
-                let new_cursor = self.cursor().move_down(&self.buffer);
-                self.move_cursor(new_cursor, extend);
+                self.move_in_direction(Direction::Down, extend);
                 cx.notify();
             }
             "home" => {
@@ -338,49 +404,23 @@ impl Editor {
                 cx.notify();
             }
             "enter" => {
-                // Delete selection first if any
-                let cursor_before = self.cursor().offset;
-                let insert_pos = if !self.selection.is_collapsed() {
-                    let range = self.selection.range();
-                    self.buffer.delete(range.clone(), cursor_before);
-                    range.start
+                if keystroke.modifiers.shift {
+                    let text = self.compute_smart_enter_text(self.cursor().offset);
+                    self.insert_text(&text);
                 } else {
-                    cursor_before
-                };
-
-                // Smart Enter (Shift+Enter): continue the current line type
-                let insert_text = if keystroke.modifiers.shift {
-                    self.compute_smart_enter_text(insert_pos)
-                } else {
-                    "\n".to_string()
-                };
-
-                self.buffer.insert(insert_pos, &insert_text, insert_pos);
-                let new_pos = insert_pos + insert_text.len();
-                self.selection = Selection::new(new_pos, new_pos);
+                    self.insert_text("\n");
+                }
                 cx.notify();
             }
             "tab" => {
-                // Delete selection first if any
-                let cursor_before = self.cursor().offset;
-                let insert_pos = if !self.selection.is_collapsed() {
-                    let range = self.selection.range();
-                    self.buffer.delete(range.clone(), cursor_before);
-                    range.start
-                } else {
-                    cursor_before
-                };
-                self.buffer.insert(insert_pos, "    ", insert_pos);
-                self.selection = Selection::new(insert_pos + 4, insert_pos + 4);
+                self.insert_text("    ");
                 cx.notify();
             }
             "a" if keystroke.modifiers.control || keystroke.modifiers.platform => {
-                // Select all
                 self.selection = Selection::select_all(&self.buffer);
                 cx.notify();
             }
             "c" if keystroke.modifiers.control || keystroke.modifiers.platform => {
-                // Copy selection to clipboard
                 if !self.selection.is_collapsed() {
                     let range = self.selection.range();
                     let text = &self.buffer.text()[range];
@@ -388,45 +428,29 @@ impl Editor {
                 }
             }
             "x" if keystroke.modifiers.control || keystroke.modifiers.platform => {
-                // Cut selection to clipboard
                 if !self.selection.is_collapsed() {
                     let range = self.selection.range();
-                    let cursor_before = self.cursor().offset;
-                    let text = &self.buffer.text()[range.clone()];
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.to_string()));
-                    self.buffer.delete(range.clone(), cursor_before);
-                    self.selection = Selection::new(range.start, range.start);
+                    let text = self.buffer.text()[range].to_string();
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
+                    self.delete_selection();
                     cx.notify();
                 }
             }
             "v" if keystroke.modifiers.control || keystroke.modifiers.platform => {
-                // Paste from clipboard, replacing selection if any
                 if let Some(clipboard_item) = cx.read_from_clipboard()
                     && let Some(text) = clipboard_item.text()
                 {
-                    let cursor_before = self.cursor().offset;
-                    let insert_pos = if !self.selection.is_collapsed() {
-                        let range = self.selection.range();
-                        self.buffer.delete(range.clone(), cursor_before);
-                        range.start
-                    } else {
-                        cursor_before
-                    };
-                    self.buffer.insert(insert_pos, &text, insert_pos);
-                    let new_pos = insert_pos + text.len();
-                    self.selection = Selection::new(new_pos, new_pos);
+                    self.insert_text(&text);
                     cx.notify();
                 }
             }
             "z" if keystroke.modifiers.control || keystroke.modifiers.platform => {
                 if keystroke.modifiers.shift {
-                    // Redo: Ctrl+Shift+Z
                     if let Some(cursor_pos) = self.buffer.redo() {
                         self.selection = Selection::new(cursor_pos, cursor_pos);
                         cx.notify();
                     }
                 } else {
-                    // Undo: Ctrl+Z
                     if let Some(cursor_pos) = self.buffer.undo() {
                         self.selection = Selection::new(cursor_pos, cursor_pos);
                         cx.notify();
@@ -434,30 +458,17 @@ impl Editor {
                 }
             }
             "y" if keystroke.modifiers.control => {
-                // Redo: Ctrl+Y (alternative)
                 if let Some(cursor_pos) = self.buffer.redo() {
                     self.selection = Selection::new(cursor_pos, cursor_pos);
                     cx.notify();
                 }
             }
             "s" if keystroke.modifiers.control || keystroke.modifiers.platform => {
-                // Save file
                 self.save(cx);
             }
             _ => {
-                // Insert printable characters, replacing selection if any
                 if let Some(key_char) = &keystroke.key_char {
-                    let cursor_before = self.cursor().offset;
-                    let insert_pos = if !self.selection.is_collapsed() {
-                        let range = self.selection.range();
-                        self.buffer.delete(range.clone(), cursor_before);
-                        range.start
-                    } else {
-                        cursor_before
-                    };
-                    self.buffer.insert(insert_pos, key_char, insert_pos);
-                    let new_pos = insert_pos + key_char.len();
-                    self.selection = Selection::new(new_pos, new_pos);
+                    self.insert_text(key_char);
                     cx.notify();
                 }
             }
@@ -470,65 +481,31 @@ impl Editor {
         self.sync_dirty_state(cx);
     }
 
-    // =========================================================================
-    // Demo mode methods - public API for scripted input
-    // =========================================================================
-
-    /// Insert a single character (for demo mode).
-    pub fn demo_type_char(&mut self, c: char, window: &mut Window, cx: &mut Context<Self>) {
-        let cursor_pos = self.cursor().offset;
-        let s = c.to_string();
-        self.buffer.insert(cursor_pos, &s, cursor_pos);
-        let new_pos = cursor_pos + s.len();
-        self.selection = Selection::new(new_pos, new_pos);
-        self.scroll_anchor.scroll_to(window, cx);
-        cx.notify();
+    /// Block user input (for demo mode).
+    pub fn set_input_blocked(&mut self, blocked: bool) {
+        self.input_blocked = blocked;
     }
 
-    /// Press Enter (for demo mode).
-    pub fn demo_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let cursor_pos = self.cursor().offset;
-        self.buffer.insert(cursor_pos, "\n", cursor_pos);
-        let new_pos = cursor_pos + 1;
-        self.selection = Selection::new(new_pos, new_pos);
-        self.scroll_anchor.scroll_to(window, cx);
-        cx.notify();
-    }
-
-    /// Press Shift+Enter / smart enter (for demo mode).
-    pub fn demo_shift_enter(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let cursor_pos = self.cursor().offset;
-        let insert_text = self.compute_smart_enter_text(cursor_pos);
-        self.buffer.insert(cursor_pos, &insert_text, cursor_pos);
-        let new_pos = cursor_pos + insert_text.len();
-        self.selection = Selection::new(new_pos, new_pos);
-        self.scroll_anchor.scroll_to(window, cx);
-        cx.notify();
-    }
-
-    /// Press Backspace (for demo mode).
-    pub fn demo_backspace(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if self.cursor().offset > 0 {
-            let cursor_before = self.cursor().offset;
-            let new_cursor = self.cursor().move_left(&self.buffer);
-            self.buffer
-                .delete(new_cursor.offset..cursor_before, cursor_before);
-            self.selection = Selection::new(new_cursor.offset, new_cursor.offset);
-            self.scroll_anchor.scroll_to(window, cx);
-            cx.notify();
+    /// Execute an editor action programmatically.
+    pub fn execute(&mut self, action: EditorAction, window: &mut Window, cx: &mut Context<Self>) {
+        match action {
+            EditorAction::Type(c) => {
+                self.insert_text(&c.to_string());
+            }
+            EditorAction::Enter => {
+                self.insert_text("\n");
+            }
+            EditorAction::ShiftEnter => {
+                let text = self.compute_smart_enter_text(self.cursor().offset);
+                self.insert_text(&text);
+            }
+            EditorAction::Backspace => {
+                self.delete_backward();
+            }
+            EditorAction::Move(direction) => {
+                self.move_in_direction(direction, false);
+            }
         }
-    }
-
-    /// Move cursor in a direction (for demo mode).
-    pub fn demo_move(&mut self, direction: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let new_cursor = match direction {
-            "left" => self.cursor().move_left(&self.buffer),
-            "right" => self.cursor().move_right(&self.buffer),
-            "up" => self.cursor().move_up(&self.buffer),
-            "down" => self.cursor().move_down(&self.buffer),
-            _ => return,
-        };
-        self.selection = Selection::new(new_cursor.offset, new_cursor.offset);
         self.scroll_anchor.scroll_to(window, cx);
         cx.notify();
     }
@@ -579,6 +556,10 @@ impl Render for Editor {
         let on_click: ClickCallback =
             Rc::new(move |buffer_offset, shift_held, click_count, _window, cx| {
                 entity.update(cx, |editor, cx| {
+                    // Block user input during demo mode
+                    if editor.input_blocked {
+                        return;
+                    }
                     if shift_held {
                         // Extend selection to click position
                         editor.selection = editor.selection.extend_to(buffer_offset);
@@ -608,6 +589,10 @@ impl Render for Editor {
         let entity = cx.entity().clone();
         let on_drag: DragCallback = Rc::new(move |buffer_offset, _window, cx| {
             entity.update(cx, |editor, cx| {
+                // Block user input during demo mode
+                if editor.input_blocked {
+                    return;
+                }
                 // Extend selection to drag position (keep anchor, move head)
                 editor.selection = editor.selection.extend_to(buffer_offset);
                 cx.notify();
@@ -618,6 +603,10 @@ impl Render for Editor {
         let entity = cx.entity().clone();
         let on_checkbox: CheckboxCallback = Rc::new(move |line_number, _window, cx| {
             entity.update(cx, |editor, cx| {
+                // Block user input during demo mode
+                if editor.input_blocked {
+                    return;
+                }
                 editor.toggle_checkbox(line_number, cx);
             });
         });

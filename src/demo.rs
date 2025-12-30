@@ -2,150 +2,148 @@
 
 use std::time::Duration;
 
-/// A single action in the demo script.
+use crate::editor::{Direction, EditorAction};
+
+/// A demo step: either an editor action or a wait.
 #[derive(Clone, Debug)]
-pub enum DemoAction {
-    /// Type a string of text (character by character with delay).
+pub enum DemoStep {
+    /// Execute an editor action.
+    Action(EditorAction),
+    /// Type a string (expands to multiple Type actions).
     Type(String),
-    /// Press Enter.
-    Enter,
-    /// Press Shift+Enter (smart enter).
-    ShiftEnter,
-    /// Press Backspace.
-    Backspace,
-    /// Move cursor: "left", "right", "up", "down".
-    Move(String),
     /// Wait for a duration (milliseconds).
     Wait(u64),
 }
 
 /// The demo script showing off writ's features.
-pub fn demo_script() -> Vec<DemoAction> {
-    use DemoAction::*;
+pub fn demo_script() -> Vec<DemoStep> {
+    use DemoStep::*;
+    use Direction::*;
+    use EditorAction as A;
 
     vec![
         // Start with a heading
         Type("# Welcome to writ".into()),
-        Enter,
-        Wait(800),
-        Enter,
+        Action(A::Enter),
+        Wait(500),
+        Action(A::Enter),
         // Explain what it is
         Type("A **hybrid** markdown editor with _inline_ rendering.".into()),
         Wait(600),
-        Enter,
+        Action(A::Enter),
         Wait(200),
-        Enter,
+        Action(A::Enter),
         Wait(500),
         // Lists
         Type("## Lists".into()),
-        Enter,
+        Action(A::Enter),
         Wait(500),
-        Enter,
+        Action(A::Enter),
         Type("- First item".into()),
-        ShiftEnter,
+        Action(A::ShiftEnter),
         Type("Second item".into()),
-        Enter,
+        Action(A::Enter),
         Type("    - Nested item".into()),
-        ShiftEnter,
+        Action(A::ShiftEnter),
         Type("Another nested".into()),
-        Enter,
+        Action(A::Enter),
         Type("- Back to top level".into()),
-        Enter,
+        Action(A::Enter),
         Wait(800),
-        Enter,
+        Action(A::Enter),
         // Task list
         Type("Tasks work too:".into()),
-        Enter,
+        Action(A::Enter),
         Type("- [ ] Learn writ".into()),
-        ShiftEnter,
+        Action(A::ShiftEnter),
         Type("Write documentation".into()),
-        ShiftEnter,
+        Action(A::ShiftEnter),
         Type("Record demo".into()),
-        Enter,
+        Action(A::Enter),
         Wait(1000),
-        Enter,
+        Action(A::Enter),
         // Blockquotes
         Type("## Blockquotes".into()),
-        Enter,
+        Action(A::Enter),
         Wait(500),
-        Enter,
+        Action(A::Enter),
         Type("> Blockquotes hide the `>` marker".into()),
-        ShiftEnter,
+        Action(A::ShiftEnter),
         Type("and show a border instead.".into()),
-        Enter,
+        Action(A::Enter),
         Wait(800),
-        Enter,
+        Action(A::Enter),
         // Nesting
         Type("## Nesting".into()),
-        Enter,
+        Action(A::Enter),
         Wait(500),
-        Enter,
+        Action(A::Enter),
         Type("> Nested structures work too:".into()),
-        Enter,
+        Action(A::Enter),
         Type("> ".into()),
-        Enter,
+        Action(A::Enter),
         Type("> - A list inside a blockquote".into()),
-        ShiftEnter,
+        Action(A::ShiftEnter),
         Type("With multiple items".into()),
-        ShiftEnter,
+        Action(A::ShiftEnter),
         Type("And more".into()),
-        Enter,
+        Action(A::Enter),
         Wait(800),
         // Move up to show the nested markers
-        Move("up".into()),
-        Move("up".into()),
+        Action(A::Move(Up)),
+        Action(A::Move(Up)),
         Wait(600),
         // Move back down
-        Move("down".into()),
-        Move("down".into()),
+        Action(A::Move(Down)),
+        Action(A::Move(Down)),
         Wait(500),
-        Enter,
+        Action(A::Enter),
         // Code blocks
         Type("## Code".into()),
-        Enter,
+        Action(A::Enter),
         Wait(500),
-        Enter,
+        Action(A::Enter),
         Type("Inline `code` uses a monospace font.".into()),
-        Enter,
-        Enter,
+        Action(A::Enter),
+        Action(A::Enter),
         Type("```rust".into()),
-        Enter,
+        Action(A::Enter),
         Type("fn main() {".into()),
-        Enter,
+        Action(A::Enter),
         Type("    println!(\"Hello, writ!\");".into()),
-        Enter,
+        Action(A::Enter),
         Type("}".into()),
-        Enter,
+        Action(A::Enter),
         Type("```".into()),
-        Enter,
+        Action(A::Enter),
         // Now cursor is outside the block - fences disappear
         Wait(1000),
         // Move back up into the code block to show fences reappearing
-        Move("up".into()),
+        Action(A::Move(Up)),
         Wait(400),
-        Move("up".into()),
+        Action(A::Move(Up)),
         Wait(800),
         // Move back down outside the block
-        Move("down".into()),
-        Move("down".into()),
+        Action(A::Move(Down)),
+        Action(A::Move(Down)),
         Wait(500),
-        Enter,
+        Action(A::Enter),
         // Links
         Type("## Links".into()),
-        Enter,
+        Action(A::Enter),
         Wait(500),
-        Enter,
+        Action(A::Enter),
         Type("Check out [the repo](https://github.com/wilfred/writ)!".into()),
         Wait(1000),
-        Enter,
-        Enter,
+        Action(A::Enter),
+        Action(A::Enter),
         // Finish
         Type("---".into()),
-        Enter,
-        Enter,
+        Action(A::Enter),
+        Action(A::Enter),
         Type("_That's writ!_".into()),
         Wait(500),
-        Enter,
+        Action(A::Enter),
     ]
 }
 
