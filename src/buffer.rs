@@ -124,6 +124,9 @@ impl BufferContent {
         }
         let text = self.text.to_string();
         self.tree = self.parser.parse(text.as_bytes(), self.tree.as_ref());
+
+        // Normalize ordered list numbering (silent, not through undo)
+        self.normalize_ordered_lists();
     }
 
     /// Convert a byte offset to a tree-sitter Point (row, column).
@@ -221,6 +224,148 @@ impl BufferContent {
         let char_start = self.text.byte_to_char(range.start);
         let char_end = self.text.byte_to_char(range.end);
         self.text.slice(char_start..char_end).to_string()
+    }
+
+    /// Normalize ordered list numbering throughout the buffer.
+    ///
+    /// This ensures all ordered list items have correct sequential numbers.
+    /// Each nested list numbers independently starting from 1.
+    /// This is called after every edit and on initial load.
+    ///
+    /// Changes are made directly to the rope (not through undo history).
+    pub fn normalize_ordered_lists(&mut self) {
+        let Some(tree) = &self.tree else { return };
+
+        // Collect all list_item nodes that are part of ordered lists
+        // We need to collect them first because we'll be modifying the buffer
+        let corrections = self.find_ordered_list_corrections(tree.block_tree().root_node());
+
+        if corrections.is_empty() {
+            return;
+        }
+
+        // Apply corrections in reverse order (from end to start) to preserve byte offsets
+        for (marker_range, correct_number) in corrections.into_iter().rev() {
+            let new_marker = format!("{}. ", correct_number);
+            let old_len = marker_range.end - marker_range.start;
+            let new_len = new_marker.len();
+
+            // Delete old marker
+            let char_start = self.text.byte_to_char(marker_range.start);
+            let char_end = self.text.byte_to_char(marker_range.end);
+            self.text.remove(char_start..char_end);
+
+            // Insert new marker
+            let char_offset = self.text.byte_to_char(marker_range.start);
+            self.text.insert(char_offset, &new_marker);
+
+            // Note: We could do incremental tree-sitter edits here, but since
+            // normalization typically changes few items, a full reparse is simpler.
+            // We'll reparse once at the end if any changes were made.
+            let _ = (old_len, new_len); // silence unused warnings
+        }
+
+        // Reparse after all corrections
+        let text = self.text.to_string();
+        self.tree = self.parser.parse(text.as_bytes(), None);
+    }
+
+    /// Find all ordered list items that need number correction.
+    /// Returns Vec<(marker_byte_range, correct_number)>
+    fn find_ordered_list_corrections(&self, root: tree_sitter::Node) -> Vec<(Range<usize>, usize)> {
+        let mut corrections = Vec::new();
+        self.collect_list_corrections(&root, &mut corrections);
+        corrections
+    }
+
+    /// Recursively collect corrections needed for ordered lists.
+    fn collect_list_corrections(
+        &self,
+        node: &tree_sitter::Node,
+        corrections: &mut Vec<(Range<usize>, usize)>,
+    ) {
+        if node.kind() == "list" {
+            // Check if this is an ordered list by looking at the first item's marker
+            let is_ordered = self.is_ordered_list(node);
+
+            if is_ordered {
+                // Number items sequentially within this list
+                let mut item_number = 1;
+                for i in 0..node.child_count() {
+                    if let Some(child) = node.child(i as u32) {
+                        if child.kind() == "list_item" {
+                            // Find the list_marker_decimal child
+                            if let Some((marker_range, current_number)) =
+                                self.extract_ordered_marker(&child)
+                            {
+                                if current_number != item_number {
+                                    corrections.push((marker_range, item_number));
+                                }
+                                item_number += 1;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Recurse into children to find nested lists
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i as u32) {
+                self.collect_list_corrections(&child, corrections);
+            }
+        }
+    }
+
+    /// Check if a list node is an ordered list.
+    fn is_ordered_list(&self, list_node: &tree_sitter::Node) -> bool {
+        // Look at the first list_item's marker type
+        for i in 0..list_node.child_count() {
+            if let Some(child) = list_node.child(i as u32) {
+                if child.kind() == "list_item" {
+                    // Check for list_marker_decimal (ordered) vs list_marker_minus/etc (unordered)
+                    for j in 0..child.child_count() {
+                        if let Some(marker) = child.child(j as u32) {
+                            return marker.kind().starts_with("list_marker_decimal")
+                                || marker.kind() == "list_marker_dot";
+                        }
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Extract the marker range and current number from an ordered list item.
+    /// Returns Some((byte_range_of_marker, current_number)) or None if not an ordered item.
+    fn extract_ordered_marker(
+        &self,
+        list_item: &tree_sitter::Node,
+    ) -> Option<(Range<usize>, usize)> {
+        for i in 0..list_item.child_count() {
+            if let Some(marker) = list_item.child(i as u32) {
+                // tree-sitter-md uses "list_marker_decimal" for ordered lists
+                if marker.kind().starts_with("list_marker_decimal")
+                    || marker.kind() == "list_marker_dot"
+                {
+                    let start = marker.start_byte();
+                    let end = marker.end_byte();
+                    let text = self.text();
+                    let marker_text = &text[start..end];
+
+                    // Parse the number from "N. " format
+                    let number: usize = marker_text
+                        .chars()
+                        .take_while(|c| c.is_ascii_digit())
+                        .collect::<String>()
+                        .parse()
+                        .unwrap_or(1);
+
+                    return Some((start..end, number));
+                }
+            }
+        }
+        None
     }
 }
 
@@ -397,7 +542,11 @@ impl FromStr for Buffer {
         let mut parser = MarkdownParser::default();
         let tree = parser.parse(s.as_bytes(), None);
 
-        let content = BufferContent { text, parser, tree };
+        let mut content = BufferContent { text, parser, tree };
+
+        // Normalize ordered list numbering on load
+        content.normalize_ordered_lists();
+
         let mut history = Record::new();
         // Mark initial state as saved
         history.set_saved();
@@ -587,4 +736,33 @@ mod tests {
         buf.redo();
         assert_eq!(buf.text(), "abcd");
     }
+
+    // ========== ORDERED LIST NORMALIZATION TESTS ==========
+
+    #[test]
+    fn test_ordered_list_normalization_on_load() {
+        // Load a file with wrong numbering - should be fixed
+        let buf: Buffer = "1. First\n5. Second\n9. Third\n".parse().unwrap();
+        assert_eq!(buf.text(), "1. First\n2. Second\n3. Third\n");
+    }
+
+    #[test]
+    fn test_ordered_list_correct_numbers_unchanged() {
+        // Already correct numbering should remain unchanged
+        let buf: Buffer = "1. First\n2. Second\n3. Third\n".parse().unwrap();
+        assert_eq!(buf.text(), "1. First\n2. Second\n3. Third\n");
+    }
+
+    #[test]
+    fn test_unordered_list_unchanged() {
+        // Unordered lists should not be affected
+        let buf: Buffer = "- First\n- Second\n- Third\n".parse().unwrap();
+        assert_eq!(buf.text(), "- First\n- Second\n- Third\n");
+    }
+
+    // Note: tree-sitter-md doesn't recognize nested ordered lists as separate list nodes.
+    // Indented "5. text" is parsed as paragraph continuation, not a nested list item.
+    // This is a tree-sitter-md grammar limitation. Nested unordered lists work fine
+    // because "-" is unambiguously a list marker, but "5." can look like a sentence.
+    // Our normalization works correctly for what tree-sitter recognizes as ordered lists.
 }

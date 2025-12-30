@@ -9,7 +9,7 @@ use gpui::{
 use crate::buffer::Buffer;
 use crate::cursor::{Cursor, Selection};
 use crate::highlight::Highlighter;
-use crate::line_view::{ClickCallback, DragCallback, LineView};
+use crate::line_view::{CheckboxCallback, ClickCallback, DragCallback, LineView};
 use crate::lines::{LineKind, extract_inline_styles, extract_lines};
 use crate::theme::Theme;
 use crate::title_bar::FileInfo;
@@ -69,6 +69,96 @@ impl Editor {
         }
     }
 
+    /// Compute the text to insert for Smart Enter (Shift+Enter).
+    ///
+    /// This continues the current line type at the same nesting level:
+    /// - Unordered list: `\n` + indentation + `- `
+    /// - Ordered list: `\n` + indentation + `1. ` (normalization fixes the number)
+    /// - Task list: `\n` + indentation + `- [ ] `
+    /// - Blockquote: `\n` + same `> ` prefix(es)
+    /// - Code block/regular text: just `\n`
+    fn compute_smart_enter_text(&self, cursor_pos: usize) -> String {
+        let lines = extract_lines(&self.buffer);
+        let cursor_line_idx = self.buffer.byte_to_line(cursor_pos);
+
+        // Find the line info for the current line
+        let Some(line_info) = lines.get(cursor_line_idx) else {
+            return "\n".to_string();
+        };
+
+        // Use the layer-based continuation - each layer contributes its continuation text
+        // Pass the buffer text so continuation can include leading indentation
+        let text = self.buffer.text();
+        let continuation = line_info.continuation(&text);
+        if continuation.is_empty() {
+            "\n".to_string()
+        } else {
+            format!("\n{}", continuation)
+        }
+    }
+
+    /// Toggle the checkbox on a given line.
+    ///
+    /// Finds `[ ]` or `[x]`/`[X]` in the line and toggles it.
+    /// The cursor stays where it was.
+    fn toggle_checkbox(&mut self, line_number: usize, cx: &mut Context<Self>) {
+        let lines = extract_lines(&self.buffer);
+        let Some(line) = lines.get(line_number) else {
+            return;
+        };
+
+        // Only toggle task list items
+        let LineKind::ListItem {
+            checked: Some(is_checked),
+            ..
+        } = line.kind()
+        else {
+            return;
+        };
+
+        // Find the checkbox pattern in the line
+        let buffer_text = self.buffer.text();
+        let line_text = &buffer_text[line.range.clone()];
+
+        // Find the position of [ ] or [x]/[X] in the line
+        let checkbox_pattern = if is_checked { "[x]" } else { "[ ]" };
+        let alt_pattern = if is_checked { "[X]" } else { "" };
+
+        let checkbox_offset = line_text.find(checkbox_pattern).or_else(|| {
+            if !alt_pattern.is_empty() {
+                line_text.find(alt_pattern)
+            } else {
+                None
+            }
+        });
+
+        let Some(relative_offset) = checkbox_offset else {
+            return;
+        };
+
+        // Calculate the absolute buffer position of the checkbox content (the x or space)
+        let checkbox_content_start = line.range.start + relative_offset + 1; // skip '['
+        let checkbox_content_end = checkbox_content_start + 1; // just the 'x' or ' '
+
+        // Toggle the content
+        let new_content = if is_checked { " " } else { "x" };
+        let cursor_before = self.cursor().offset;
+
+        self.buffer.replace(
+            checkbox_content_start..checkbox_content_end,
+            new_content,
+            cursor_before,
+        );
+
+        // Keep cursor where it was (don't update selection)
+        // The replace returns a new position, but we want to keep the old one
+        // unless the cursor was inside the checkbox area
+        self.selection = Selection::new(cursor_before, cursor_before);
+
+        self.sync_dirty_state(cx);
+        cx.notify();
+    }
+
     /// Sync dirty state from buffer to FileInfo global.
     /// Call this after any buffer modification.
     fn sync_dirty_state(&self, cx: &mut Context<Self>) {
@@ -111,7 +201,7 @@ impl Editor {
             if let LineKind::CodeBlock {
                 language: Some(ref lang),
                 is_fence: true,
-            } = lines[i].kind
+            } = lines[i].kind()
             {
                 let lang = lang.clone();
                 let block_start = i;
@@ -122,7 +212,7 @@ impl Editor {
                 let mut content_start_offset: Option<usize> = None;
 
                 while i < lines.len() {
-                    match &lines[i].kind {
+                    match &lines[i].kind() {
                         LineKind::CodeBlock { is_fence: true, .. } => {
                             // Closing fence - end of block
                             i += 1;
@@ -256,8 +346,17 @@ impl Editor {
                 } else {
                     cursor_before
                 };
-                self.buffer.insert(insert_pos, "\n", insert_pos);
-                self.selection = Selection::new(insert_pos + 1, insert_pos + 1);
+
+                // Smart Enter (Shift+Enter): continue the current line type
+                let insert_text = if keystroke.modifiers.shift {
+                    self.compute_smart_enter_text(insert_pos)
+                } else {
+                    "\n".to_string()
+                };
+
+                self.buffer.insert(insert_pos, &insert_text, insert_pos);
+                let new_pos = insert_pos + insert_text.len();
+                self.selection = Selection::new(new_pos, new_pos);
                 cx.notify();
             }
             "tab" => {
@@ -384,6 +483,7 @@ impl Render for Editor {
         let cursor_color = theme.purple;
         let link_color = theme.cyan;
         let selection_color = theme.selection;
+        let border_color = theme.comment;
         let cursor_offset = self.selection.head;
         let selection_range = if self.selection.is_collapsed() {
             None
@@ -447,19 +547,27 @@ impl Render for Editor {
             });
         });
 
+        // Create checkbox toggle callback
+        let entity = cx.entity().clone();
+        let on_checkbox: CheckboxCallback = Rc::new(move |line_number, _window, cx| {
+            entity.update(cx, |editor, cx| {
+                editor.toggle_checkbox(line_number, cx);
+            });
+        });
+
         // Find code block ranges (start_line_idx, end_line_idx) to determine if cursor is in a code block
         // For incomplete blocks (no closing fence), end is None
         let mut code_block_ranges: Vec<(usize, Option<usize>)> = Vec::new();
         {
             let mut i = 0;
             while i < lines.len() {
-                if let LineKind::CodeBlock { is_fence: true, .. } = lines[i].kind {
+                if let LineKind::CodeBlock { is_fence: true, .. } = lines[i].kind() {
                     let start = i;
                     i += 1;
                     let mut found_close = false;
                     // Find closing fence
                     while i < lines.len() {
-                        if let LineKind::CodeBlock { is_fence: true, .. } = lines[i].kind {
+                        if let LineKind::CodeBlock { is_fence: true, .. } = lines[i].kind() {
                             code_block_ranges.push((start, Some(i)));
                             i += 1;
                             found_close = true;
@@ -500,7 +608,7 @@ impl Render for Editor {
             .enumerate()
             .filter_map(|(line_idx, line)| {
                 // For fence lines, check if cursor is in this code block
-                let is_fence = matches!(line.kind, LineKind::CodeBlock { is_fence: true, .. });
+                let is_fence = matches!(line.kind(), LineKind::CodeBlock { is_fence: true, .. });
                 let cursor_in_block = cursor_in_code_block_range(line_idx);
 
                 // Skip fence lines when cursor is not in that code block
@@ -533,6 +641,7 @@ impl Render for Editor {
                         cursor_color,
                         link_color,
                         selection_color,
+                        border_color,
                         selection_range.clone(),
                         text_font.clone(),
                         code_font.clone(),
@@ -541,7 +650,8 @@ impl Render for Editor {
                         show_block_markers,
                     )
                     .on_click(on_click.clone())
-                    .on_drag(on_drag.clone()),
+                    .on_drag(on_drag.clone())
+                    .on_checkbox(on_checkbox.clone()),
                 )
             })
             .collect();

@@ -21,6 +21,9 @@ pub type ClickCallback = Rc<dyn Fn(usize, bool, usize, &mut Window, &mut App)>;
 /// Callback type for drag events - receives the buffer offset during mouse drag.
 pub type DragCallback = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 
+/// Callback type for checkbox toggle - receives the line number where checkbox was clicked.
+pub type CheckboxCallback = Rc<dyn Fn(usize, &mut Window, &mut App)>;
+
 /// Represents a resolved image source for rendering.
 enum ImageSource {
     Url(String),
@@ -42,6 +45,7 @@ pub struct LineView<'a> {
     cursor_color: Rgba,
     link_color: Rgba,
     selection_color: Rgba,
+    border_color: Rgba,
     /// Selection range in buffer offsets (None if collapsed/no selection)
     selection_range: Option<Range<usize>>,
     /// Font for regular text
@@ -56,6 +60,8 @@ pub struct LineView<'a> {
     on_click: Option<ClickCallback>,
     /// Callback when mouse is dragged over line (with button pressed)
     on_drag: Option<DragCallback>,
+    /// Callback when checkbox is clicked (for task list items)
+    on_checkbox: Option<CheckboxCallback>,
     /// Whether to force showing block markers (e.g., cursor is in code block)
     show_block_markers: bool,
 }
@@ -71,6 +77,7 @@ impl<'a> LineView<'a> {
         cursor_color: Rgba,
         link_color: Rgba,
         selection_color: Rgba,
+        border_color: Rgba,
         selection_range: Option<Range<usize>>,
         text_font: Font,
         code_font: Font,
@@ -87,6 +94,7 @@ impl<'a> LineView<'a> {
             cursor_color,
             link_color,
             selection_color,
+            border_color,
             selection_range,
             text_font,
             code_font,
@@ -94,6 +102,7 @@ impl<'a> LineView<'a> {
             code_highlights,
             on_click: None,
             on_drag: None,
+            on_checkbox: None,
             show_block_markers,
         }
     }
@@ -107,6 +116,12 @@ impl<'a> LineView<'a> {
     /// Set the drag callback for this line.
     pub fn on_drag(mut self, callback: DragCallback) -> Self {
         self.on_drag = Some(callback);
+        self
+    }
+
+    /// Set the checkbox toggle callback for this line.
+    pub fn on_checkbox(mut self, callback: CheckboxCallback) -> Self {
+        self.on_checkbox = Some(callback);
         self
     }
 
@@ -161,27 +176,74 @@ impl<'a> LineView<'a> {
         }
     }
 
+    /// Check if we should show raw markers (cursor/selection on line, or force show).
+    fn should_show_raw_markers(&self) -> bool {
+        self.cursor_on_line() || self.selection_on_line() || self.show_block_markers
+    }
+
     /// Get the content range, accounting for hidden block markers (like # for headings).
     fn content_range(&self) -> Range<usize> {
         let range = &self.line.range;
 
-        // Block markers are shown when:
-        // - cursor is on this line, OR
-        // - selection is on this line, OR
-        // - show_block_markers is set (e.g., cursor is in the same code block)
-        if self.cursor_on_line() || self.selection_on_line() || self.show_block_markers {
+        // Block markers are shown when cursor/selection is on line
+        if self.should_show_raw_markers() {
             range.clone()
-        } else if let Some(marker_range) = &self.line.marker_range {
-            // Hide the block marker
-            marker_range.end..range.end
+        } else if let Some(marker_range) = self.line.marker_range() {
+            // For ordered lists, don't hide the marker (no substitution available)
+            if matches!(self.line.kind(), LineKind::ListItem { ordered: true, .. }) {
+                range.clone()
+            } else {
+                // Hide the block marker
+                marker_range.end..range.end
+            }
         } else {
             range.clone()
         }
     }
 
+    /// Check if this line should show a border (has blockquote layer).
+    fn should_show_border(&self) -> bool {
+        !self.should_show_raw_markers() && self.line.has_border()
+    }
+
+    /// Get the substitution prefix for this line (combined from all layers).
+    fn get_marker_substitution(&self) -> Option<String> {
+        // Only substitute when not showing raw markers
+        if self.should_show_raw_markers() {
+            return None;
+        }
+
+        let substitution = self.line.substitution();
+        if substitution.is_empty() {
+            None
+        } else {
+            Some(substitution)
+        }
+    }
+
+    /// Get leading whitespace (indentation before the first marker).
+    /// Returns empty string if no markers or showing raw markers.
+    fn leading_whitespace(&self) -> &str {
+        if self.should_show_raw_markers() {
+            return "";
+        }
+
+        if let Some(marker_range) = self.line.marker_range() {
+            let line_start = self.line.range.start;
+            if marker_range.start > line_start {
+                // There's whitespace before the first marker
+                &self.text[line_start..marker_range.start]
+            } else {
+                ""
+            }
+        } else {
+            ""
+        }
+    }
+
     /// Check if this line should have bold styling (headings).
     fn is_line_bold(&self) -> bool {
-        matches!(self.line.kind, LineKind::Heading(_))
+        matches!(self.line.kind(), LineKind::Heading(_))
     }
 
     /// Get the base text font with line-level styling (bold for headings).
@@ -215,12 +277,41 @@ impl<'a> LineView<'a> {
     fn build_styled_content(&self) -> (String, Vec<TextRun>) {
         let content_range = self.content_range();
 
-        if content_range.start >= content_range.end {
-            return (String::new(), Vec::new());
-        }
-
         let mut display_text = String::new();
         let mut runs: Vec<TextRun> = Vec::new();
+
+        // Add leading whitespace (indentation) before the substitution prefix
+        let whitespace = self.leading_whitespace();
+        if !whitespace.is_empty() {
+            display_text.push_str(whitespace);
+            runs.push(TextRun {
+                len: whitespace.len(),
+                font: self.text_font.clone(),
+                color: self.text_color.into(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            });
+        }
+
+        // Add marker substitution prefix if applicable (bullet, checkbox, etc.)
+        if let Some(prefix) = self.get_marker_substitution() {
+            if !prefix.is_empty() {
+                display_text.push_str(&prefix);
+                runs.push(TextRun {
+                    len: prefix.len(),
+                    font: self.text_font.clone(),
+                    color: self.text_color.into(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                });
+            }
+        }
+
+        if content_range.start >= content_range.end {
+            return (display_text, runs);
+        }
 
         // Collect all boundary points from inline styles
         let mut boundaries: Vec<usize> = vec![content_range.start, content_range.end];
@@ -797,7 +888,7 @@ impl IntoElement for LineView<'_> {
         let text_layout = styled_text.layout().clone();
 
         // Base div with line-specific styling
-        let mut line_div = match &self.line.kind {
+        let mut line_div = match self.line.kind() {
             LineKind::Heading(level) => {
                 let base = line_base(line_number)
                     .relative()
@@ -812,16 +903,24 @@ impl IntoElement for LineView<'_> {
                 }
             }
             LineKind::BlockQuote => {
-                line_base(line_number)
-                    .relative()
-                    .pl_3()
-                    .border_l_2()
-                    .border_color(gpui::rgb(0x6272a4)) // Dracula comment color
+                let base = line_base(line_number).relative();
+                // Only show left border when cursor is away (hiding the > markers)
+                if self.should_show_raw_markers() {
+                    base
+                } else {
+                    base.pl_3().border_l_2().border_color(self.border_color)
+                }
             }
-            LineKind::CodeBlock { .. } => {
-                line_base(line_number).relative().bg(gpui::rgb(0x282a36)) // Dracula background, slightly different
+            LineKind::CodeBlock { .. } => line_base(line_number).relative(),
+            _ => {
+                let base = line_base(line_number).relative();
+                // Add blockquote border for list items inside blockquotes
+                if self.should_show_border() {
+                    base.pl_3().border_l_2().border_color(self.border_color)
+                } else {
+                    base
+                }
             }
-            _ => line_base(line_number).relative(),
         };
 
         // Add styled text first so its layout is prepainted before overlays
@@ -840,8 +939,17 @@ impl IntoElement for LineView<'_> {
         // Add click handler
         if let Some(ref on_click) = self.on_click {
             let on_click = on_click.clone();
+            let on_checkbox = self.on_checkbox.clone();
             let layout_for_click = text_layout.clone();
             let content_range = self.content_range();
+
+            // Check if this line has a checkbox that can be clicked
+            // We show checkbox when: task list item AND cursor/selection not on line
+            let checkbox_prefix_len = match self.get_marker_substitution().as_deref() {
+                Some("☐ ") | Some("☑ ") => Some(2), // checkbox symbol (2 bytes for ☐/☑) + space
+                _ => None,
+            };
+            let line_number = self.line.line_number;
 
             // Extract link regions for Ctrl/Cmd+click handling
             let link_regions: Vec<_> = self
@@ -891,6 +999,19 @@ impl IntoElement for LineView<'_> {
                         Ok(idx) => idx,
                         Err(idx) => idx,
                     };
+
+                    // Check for checkbox click (click on the checkbox prefix)
+                    if let Some(prefix_len) = checkbox_prefix_len {
+                        // The checkbox symbol is displayed at the start of the line
+                        // ☐ or ☑ is 3 bytes in UTF-8, plus 1 byte for space = 4 bytes total
+                        // But visual_index is character-based, so check if within first 2 chars
+                        if visual_index < prefix_len {
+                            if let Some(ref cb) = on_checkbox {
+                                cb(line_number, window, cx);
+                                return;
+                            }
+                        }
+                    }
 
                     // Convert visual index to buffer offset, accounting for hidden markers
                     let buffer_offset = {
