@@ -1014,7 +1014,7 @@ impl IntoElement for LineView<'_> {
                     base.pl_3().border_l_2().border_color(self.border_color)
                 }
             }
-            LineKind::CodeBlock { .. } => line_base(line_number).relative(),
+            LineKind::CodeBlock { .. } => line_base(line_number).relative().text_size(rems(0.9)),
             _ => {
                 let base = line_base(line_number).relative();
                 // Add blockquote border for list items inside blockquotes
