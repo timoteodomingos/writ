@@ -25,18 +25,18 @@ use tree_sitter::Node;
 // New tree-sitter based marker detection
 // ============================================================================
 
-/// Information about a marker found on a line.
+/// Information about a marker found on a line (internal use only).
 #[derive(Debug, Clone, PartialEq)]
-pub struct MarkerInfo {
+struct MarkerInfo {
     /// The type of marker
     pub kind: MarkerKind,
     /// Byte range of this marker in the buffer
     pub range: Range<usize>,
 }
 
-/// The type of a marker node.
+/// The type of a marker node (internal use only).
 #[derive(Debug, Clone, PartialEq)]
-pub enum MarkerKind {
+enum MarkerKind {
     /// Blockquote marker `> ` or continuation
     BlockQuote,
     /// Unordered list marker `- ` or `* `
@@ -117,7 +117,7 @@ impl MarkerInfo {
 
 /// Find all markers on a line by traversing the tree.
 /// Returns markers sorted by byte position.
-pub fn find_markers_on_line(
+fn find_markers_on_line(
     root: &Node,
     text: &str,
     line_start: usize,
@@ -157,6 +157,7 @@ fn collect_markers_recursive(
 }
 
 /// Information about a single line for rendering purposes.
+/// All marker-derived fields are pre-computed during line extraction.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LineInfo {
     /// Byte range of this line in the buffer (excluding the newline)
@@ -167,105 +168,16 @@ pub struct LineInfo {
     pub image_url: Option<String>,
     /// Alt text for image-only lines
     pub image_alt: Option<String>,
-}
-
-impl LineInfo {
-    /// Get markers on this line by querying the tree.
-    pub fn markers(&self, tree: &MarkdownTree, text: &str) -> Vec<MarkerInfo> {
-        find_markers_on_line(
-            &tree.block_tree().root_node(),
-            text,
-            self.range.start,
-            self.range.end,
-        )
-    }
-
-    /// Get the combined marker range by querying the tree.
-    pub fn marker_range_from_tree(&self, tree: &MarkdownTree, text: &str) -> Option<Range<usize>> {
-        let markers = self.markers(tree, text);
-        if markers.is_empty() {
-            return None;
-        }
-        Some(markers.first()?.range.start..markers.last()?.range.end)
-    }
-
-    /// Check if any marker adds a border (blockquotes).
-    pub fn has_border_from_tree(&self, tree: &MarkdownTree, text: &str) -> bool {
-        self.markers(tree, text).iter().any(|m| m.has_border())
-    }
-
-    /// Get the combined substitution text for all markers.
-    pub fn substitution_from_tree(&self, tree: &MarkdownTree, text: &str) -> String {
-        self.markers(tree, text)
-            .iter()
-            .map(|m| m.substitution())
-            .collect()
-    }
-
-    /// Get the combined continuation text for Smart Enter.
-    /// Includes leading indentation to maintain nesting level.
-    pub fn continuation_from_tree(&self, tree: &MarkdownTree, text: &str) -> String {
-        let markers = self.markers(tree, text);
-        if markers.is_empty() {
-            return String::new();
-        }
-
-        // Get leading whitespace (indentation before first marker)
-        let first_marker_start = markers
-            .first()
-            .map(|m| m.range.start)
-            .unwrap_or(self.range.start);
-        let leading_whitespace = if first_marker_start > self.range.start {
-            &text[self.range.start..first_marker_start]
-        } else {
-            ""
-        };
-
-        // Combine leading whitespace + all marker continuations
-        let marker_continuations: String = markers.iter().map(|m| m.continuation()).collect();
-        format!("{}{}", leading_whitespace, marker_continuations)
-    }
-
-    /// Get the line kind by querying the tree.
-    pub fn kind_from_tree(&self, tree: &MarkdownTree, text: &str) -> LineKind {
-        // Check for blank line first
-        if self.range.start == self.range.end {
-            return LineKind::Blank;
-        }
-
-        // Check if inside a code block
-        let root = tree.block_tree().root_node();
-        if let Some(code_block) = find_containing_code_block(&root, self.range.start) {
-            let line_text = &text[self.range.clone()];
-            let is_fence = line_text.trim_start().starts_with("```");
-            let language = extract_code_block_language(&code_block, text);
-            return LineKind::CodeBlock { language, is_fence };
-        }
-
-        // Get markers on this line
-        let markers = self.markers(tree, text);
-        if markers.is_empty() {
-            return LineKind::Paragraph;
-        }
-
-        // Return the innermost (last) marker's kind
-        match &markers.last().unwrap().kind {
-            MarkerKind::BlockQuote => LineKind::BlockQuote,
-            MarkerKind::UnorderedList => LineKind::ListItem {
-                ordered: false,
-                checked: None,
-            },
-            MarkerKind::OrderedList => LineKind::ListItem {
-                ordered: true,
-                checked: None,
-            },
-            MarkerKind::TaskList { checked } => LineKind::ListItem {
-                ordered: false,
-                checked: Some(*checked),
-            },
-            MarkerKind::Heading(level) => LineKind::Heading(*level),
-        }
-    }
+    /// The kind of line (heading, list item, etc.)
+    pub kind: LineKind,
+    /// Combined byte range of all markers on this line (to hide when cursor away)
+    pub marker_range: Option<Range<usize>>,
+    /// Whether this line should show a left border (blockquote)
+    pub has_border: bool,
+    /// Substitution text when markers are hidden (e.g., "• " for bullets)
+    pub substitution: String,
+    /// Continuation text for smart enter (e.g., "- " for list items)
+    pub continuation: String,
 }
 
 // Keep LineKind for backwards compatibility during transition
@@ -289,6 +201,100 @@ pub enum LineKind {
         language: Option<String>,
         is_fence: bool,
     },
+}
+
+/// Compute LineKind from markers.
+fn compute_kind_from_markers(markers: &[MarkerInfo]) -> LineKind {
+    // Check for specific marker types in reverse order (innermost first)
+    for marker in markers.iter().rev() {
+        match &marker.kind {
+            MarkerKind::Heading(level) => return LineKind::Heading(*level),
+            MarkerKind::TaskList { checked } => {
+                return LineKind::ListItem {
+                    ordered: false,
+                    checked: Some(*checked),
+                };
+            }
+            MarkerKind::UnorderedList => {
+                return LineKind::ListItem {
+                    ordered: false,
+                    checked: None,
+                };
+            }
+            MarkerKind::OrderedList => {
+                return LineKind::ListItem {
+                    ordered: true,
+                    checked: None,
+                };
+            }
+            MarkerKind::BlockQuote => return LineKind::BlockQuote,
+        }
+    }
+    LineKind::Paragraph
+}
+
+/// Compute LineKind for a line, checking for code blocks first.
+fn compute_line_kind(
+    tree: Option<&MarkdownTree>,
+    text: &str,
+    range: &Range<usize>,
+    markers: &[MarkerInfo],
+) -> LineKind {
+    // Check for empty line
+    if range.start == range.end {
+        return LineKind::Blank;
+    }
+
+    // Check for code block first
+    if let Some(tree) = tree {
+        let root = tree.block_tree().root_node();
+        if let Some(code_block) = find_containing_code_block(&root, range.start) {
+            let language = extract_code_block_language(&code_block, text);
+            let is_fence = code_block.start_byte() == range.start
+                || (range.end <= code_block.end_byte()
+                    && text[range.clone()].trim().starts_with("```"));
+            return LineKind::CodeBlock { language, is_fence };
+        }
+    }
+
+    compute_kind_from_markers(markers)
+}
+
+/// Compute the combined marker range (for hiding when cursor is away).
+fn compute_marker_range(markers: &[MarkerInfo]) -> Option<Range<usize>> {
+    if markers.is_empty() {
+        return None;
+    }
+    Some(markers.first()?.range.start..markers.last()?.range.end)
+}
+
+/// Compute whether line should show a left border.
+fn compute_has_border(markers: &[MarkerInfo]) -> bool {
+    markers.iter().any(|m| m.has_border())
+}
+
+/// Compute substitution text when markers are hidden.
+fn compute_substitution(markers: &[MarkerInfo]) -> String {
+    markers.iter().map(|m| m.substitution()).collect()
+}
+
+/// Compute continuation text for smart enter.
+fn compute_continuation(text: &str, line_range: &Range<usize>, markers: &[MarkerInfo]) -> String {
+    if markers.is_empty() {
+        return String::new();
+    }
+
+    // Leading whitespace before first marker
+    let first_start = markers.first().unwrap().range.start;
+    let leading = if first_start > line_range.start {
+        &text[line_range.start..first_start]
+    } else {
+        ""
+    };
+
+    // Each marker's continuation text
+    let marker_text: String = markers.iter().map(|m| m.continuation()).collect();
+    format!("{}{}", leading, marker_text)
 }
 
 /// Extract line information from a buffer using tree-sitter.
@@ -328,11 +334,31 @@ pub fn extract_lines(buffer: &Buffer) -> Vec<LineInfo> {
                 (None, None)
             };
 
+            // Find markers on this line
+            let markers = if let Some(tree) = &tree {
+                let root = tree.block_tree().root_node();
+                find_markers_on_line(&root, &text, range.start, range.end)
+            } else {
+                Vec::new()
+            };
+
+            // Compute all marker-derived fields
+            let kind = compute_line_kind(tree.as_deref(), &text, &range, &markers);
+            let marker_range = compute_marker_range(&markers);
+            let has_border = compute_has_border(&markers);
+            let substitution = compute_substitution(&markers);
+            let continuation = compute_continuation(&text, &range, &markers);
+
             LineInfo {
                 range,
                 line_number: line_num,
                 image_url,
                 image_alt,
+                kind,
+                marker_range,
+                has_border,
+                substitution,
+                continuation,
             }
         })
         .collect()
@@ -850,28 +876,22 @@ mod tests {
     }
 
     #[test]
-    fn test_continuation_from_tree_nested_list() {
+    fn test_continuation_nested_list() {
         let buf: Buffer = "- Item 1\n  - Nested\n".parse().unwrap();
-        let text = buf.text();
-        let tree = buf.tree().unwrap();
         let lines = extract_lines(&buf);
 
         // Line 1: "  - Nested" - should continue with "  - "
-        let continuation = lines[1].continuation_from_tree(&tree, &text);
-        assert_eq!(continuation, "  - ");
+        assert_eq!(lines[1].continuation, "  - ");
     }
 
     #[test]
-    fn test_kind_from_tree_nested_list() {
+    fn test_kind_nested_list() {
         let buf: Buffer = "- Item 1\n  - Nested\n".parse().unwrap();
-        let text = buf.text();
-        let tree = buf.tree().unwrap();
         let lines = extract_lines(&buf);
 
         // Line 1: "  - Nested" should be recognized as a list item
-        let kind = lines[1].kind_from_tree(&tree, &text);
         assert_eq!(
-            kind,
+            lines[1].kind,
             LineKind::ListItem {
                 ordered: false,
                 checked: None
@@ -880,30 +900,25 @@ mod tests {
     }
 
     #[test]
-    fn test_marker_range_from_tree_nested_list() {
+    fn test_marker_range_nested_list() {
         let buf: Buffer = "- Item 1\n  - Nested\n".parse().unwrap();
-        let text = buf.text();
-        let tree = buf.tree().unwrap();
         let lines = extract_lines(&buf);
 
         // Line 1: marker should be at bytes 11-13 (the "- "), not 9-13
-        let range = lines[1].marker_range_from_tree(&tree, &text);
-        assert_eq!(range, Some(11..13));
+        assert_eq!(lines[1].marker_range, Some(11..13));
     }
 
     // ========================================================================
-    // Tests using tree-based API
+    // Tests using pre-computed fields
     // ========================================================================
 
     #[test]
     fn test_empty_buffer() {
         let buf: Buffer = "".parse().unwrap();
         let lines = extract_lines(&buf);
-        let text = buf.text();
-        let tree = buf.tree().unwrap();
 
         assert_eq!(lines.len(), 1);
-        assert_eq!(lines[0].kind_from_tree(&tree, &text), LineKind::Blank);
+        assert_eq!(lines[0].kind, LineKind::Blank);
         assert_eq!(lines[0].range, 0..0);
     }
 
@@ -911,13 +926,11 @@ mod tests {
     fn test_single_newline() {
         let buf: Buffer = "\n".parse().unwrap();
         let lines = extract_lines(&buf);
-        let text = buf.text();
-        let tree = buf.tree().unwrap();
 
         assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].kind_from_tree(&tree, &text), LineKind::Blank);
+        assert_eq!(lines[0].kind, LineKind::Blank);
         assert_eq!(lines[0].range, 0..0);
-        assert_eq!(lines[1].kind_from_tree(&tree, &text), LineKind::Blank);
+        assert_eq!(lines[1].kind, LineKind::Blank);
         assert_eq!(lines[1].range, 1..1);
     }
 
@@ -925,17 +938,15 @@ mod tests {
     fn test_blank_line_between_paragraphs() {
         let buf: Buffer = "Hello\n\nWorld\n".parse().unwrap();
         let lines = extract_lines(&buf);
-        let text = buf.text();
-        let tree = buf.tree().unwrap();
 
         assert_eq!(lines.len(), 4);
-        assert_eq!(lines[0].kind_from_tree(&tree, &text), LineKind::Paragraph);
+        assert_eq!(lines[0].kind, LineKind::Paragraph);
         assert_eq!(lines[0].range, 0..5);
-        assert_eq!(lines[1].kind_from_tree(&tree, &text), LineKind::Blank);
+        assert_eq!(lines[1].kind, LineKind::Blank);
         assert_eq!(lines[1].range, 6..6);
-        assert_eq!(lines[2].kind_from_tree(&tree, &text), LineKind::Paragraph);
+        assert_eq!(lines[2].kind, LineKind::Paragraph);
         assert_eq!(lines[2].range, 7..12);
-        assert_eq!(lines[3].kind_from_tree(&tree, &text), LineKind::Blank);
+        assert_eq!(lines[3].kind, LineKind::Blank);
         assert_eq!(lines[3].range, 13..13);
     }
 
@@ -943,44 +954,38 @@ mod tests {
     fn test_heading_line() {
         let buf: Buffer = "# Hello\n".parse().unwrap();
         let lines = extract_lines(&buf);
-        let text = buf.text();
-        let tree = buf.tree().unwrap();
 
         assert_eq!(lines.len(), 2);
-        assert_eq!(lines[0].kind_from_tree(&tree, &text), LineKind::Heading(1));
+        assert_eq!(lines[0].kind, LineKind::Heading(1));
         // tree-sitter's atx_h1_marker is just "#", not "# "
-        assert_eq!(lines[0].marker_range_from_tree(&tree, &text), Some(0..1));
+        assert_eq!(lines[0].marker_range, Some(0..1));
     }
 
     #[test]
     fn test_heading_levels() {
         let buf: Buffer = "# H1\n## H2\n### H3\n".parse().unwrap();
         let lines = extract_lines(&buf);
-        let text = buf.text();
-        let tree = buf.tree().unwrap();
 
-        assert_eq!(lines[0].kind_from_tree(&tree, &text), LineKind::Heading(1));
-        assert_eq!(lines[1].kind_from_tree(&tree, &text), LineKind::Heading(2));
-        assert_eq!(lines[2].kind_from_tree(&tree, &text), LineKind::Heading(3));
+        assert_eq!(lines[0].kind, LineKind::Heading(1));
+        assert_eq!(lines[1].kind, LineKind::Heading(2));
+        assert_eq!(lines[2].kind, LineKind::Heading(3));
     }
 
     #[test]
     fn test_unordered_list() {
         let buf: Buffer = "- Item 1\n- Item 2\n".parse().unwrap();
         let lines = extract_lines(&buf);
-        let text = buf.text();
-        let tree = buf.tree().unwrap();
 
         assert_eq!(
-            lines[0].kind_from_tree(&tree, &text),
+            lines[0].kind,
             LineKind::ListItem {
                 ordered: false,
                 checked: None
             }
         );
-        assert_eq!(lines[0].marker_range_from_tree(&tree, &text), Some(0..2));
+        assert_eq!(lines[0].marker_range, Some(0..2));
         assert_eq!(
-            lines[1].kind_from_tree(&tree, &text),
+            lines[1].kind,
             LineKind::ListItem {
                 ordered: false,
                 checked: None
@@ -992,35 +997,31 @@ mod tests {
     fn test_ordered_list() {
         let buf: Buffer = "1. First\n2. Second\n".parse().unwrap();
         let lines = extract_lines(&buf);
-        let text = buf.text();
-        let tree = buf.tree().unwrap();
 
         assert_eq!(
-            lines[0].kind_from_tree(&tree, &text),
+            lines[0].kind,
             LineKind::ListItem {
                 ordered: true,
                 checked: None
             }
         );
-        assert_eq!(lines[0].marker_range_from_tree(&tree, &text), Some(0..3));
+        assert_eq!(lines[0].marker_range, Some(0..3));
     }
 
     #[test]
     fn test_task_list() {
         let buf: Buffer = "- [ ] Unchecked\n- [x] Checked\n".parse().unwrap();
         let lines = extract_lines(&buf);
-        let text = buf.text();
-        let tree = buf.tree().unwrap();
 
         assert_eq!(
-            lines[0].kind_from_tree(&tree, &text),
+            lines[0].kind,
             LineKind::ListItem {
                 ordered: false,
                 checked: Some(false)
             }
         );
         assert_eq!(
-            lines[1].kind_from_tree(&tree, &text),
+            lines[1].kind,
             LineKind::ListItem {
                 ordered: false,
                 checked: Some(true)
@@ -1032,25 +1033,23 @@ mod tests {
     fn test_nested_list() {
         let buf: Buffer = "- Item 1\n  - Nested\n- Item 2\n".parse().unwrap();
         let lines = extract_lines(&buf);
-        let text = buf.text();
-        let tree = buf.tree().unwrap();
 
         assert_eq!(
-            lines[0].kind_from_tree(&tree, &text),
+            lines[0].kind,
             LineKind::ListItem {
                 ordered: false,
                 checked: None
             }
         );
         assert_eq!(
-            lines[1].kind_from_tree(&tree, &text),
+            lines[1].kind,
             LineKind::ListItem {
                 ordered: false,
                 checked: None
             }
         );
         assert_eq!(
-            lines[2].kind_from_tree(&tree, &text),
+            lines[2].kind,
             LineKind::ListItem {
                 ordered: false,
                 checked: None
@@ -1062,38 +1061,32 @@ mod tests {
     fn test_blockquote() {
         let buf: Buffer = "> Quote line 1\n> Quote line 2\n".parse().unwrap();
         let lines = extract_lines(&buf);
-        let text = buf.text();
-        let tree = buf.tree().unwrap();
 
-        assert_eq!(lines[0].kind_from_tree(&tree, &text), LineKind::BlockQuote);
-        assert_eq!(lines[0].marker_range_from_tree(&tree, &text), Some(0..2));
-        assert_eq!(lines[1].kind_from_tree(&tree, &text), LineKind::BlockQuote);
+        assert_eq!(lines[0].kind, LineKind::BlockQuote);
+        assert_eq!(lines[0].marker_range, Some(0..2));
+        assert_eq!(lines[1].kind, LineKind::BlockQuote);
     }
 
     #[test]
     fn test_nested_blockquote() {
         let buf: Buffer = "> Level 1\n> > Level 2\n".parse().unwrap();
         let lines = extract_lines(&buf);
-        let text = buf.text();
-        let tree = buf.tree().unwrap();
 
-        assert_eq!(lines[0].kind_from_tree(&tree, &text), LineKind::BlockQuote);
-        assert_eq!(lines[0].marker_range_from_tree(&tree, &text), Some(0..2));
-        assert_eq!(lines[1].kind_from_tree(&tree, &text), LineKind::BlockQuote);
+        assert_eq!(lines[0].kind, LineKind::BlockQuote);
+        assert_eq!(lines[0].marker_range, Some(0..2));
+        assert_eq!(lines[1].kind, LineKind::BlockQuote);
         // Nested blockquote: marker range covers both "> " markers
-        assert_eq!(lines[1].marker_range_from_tree(&tree, &text), Some(10..14));
+        assert_eq!(lines[1].marker_range, Some(10..14));
     }
 
     #[test]
     fn test_list_in_blockquote() {
         let buf: Buffer = "> - Item 1\n>   - Nested item\n".parse().unwrap();
         let lines = extract_lines(&buf);
-        let text = buf.text();
-        let tree = buf.tree().unwrap();
 
         // First line: list item inside blockquote
         assert_eq!(
-            lines[0].kind_from_tree(&tree, &text),
+            lines[0].kind,
             LineKind::ListItem {
                 ordered: false,
                 checked: None
@@ -1102,7 +1095,7 @@ mod tests {
 
         // Second line: nested list item inside blockquote
         assert_eq!(
-            lines[1].kind_from_tree(&tree, &text),
+            lines[1].kind,
             LineKind::ListItem {
                 ordered: false,
                 checked: None
@@ -1114,16 +1107,14 @@ mod tests {
     fn test_blockquote_in_list() {
         let buf: Buffer = "- > Quoted item\n".parse().unwrap();
         let lines = extract_lines(&buf);
-        let text = buf.text();
-        let tree = buf.tree().unwrap();
 
         // List item with blockquote content - kind is based on innermost block
         // With tree-based approach, we find both markers
-        let kind = lines[0].kind_from_tree(&tree, &text);
+        let kind = &lines[0].kind;
         // The innermost is BlockQuote since it appears after the list marker
         assert!(
-            kind == LineKind::BlockQuote
-                || kind
+            *kind == LineKind::BlockQuote
+                || *kind
                     == LineKind::ListItem {
                         ordered: false,
                         checked: None
@@ -1135,22 +1126,20 @@ mod tests {
     fn test_code_block() {
         let buf: Buffer = "```rust\nlet x = 1;\n```\n".parse().unwrap();
         let lines = extract_lines(&buf);
-        let text = buf.text();
-        let tree = buf.tree().unwrap();
 
         assert!(matches!(
-            lines[0].kind_from_tree(&tree, &text),
+            lines[0].kind,
             LineKind::CodeBlock { is_fence: true, .. }
         ));
         assert!(matches!(
-            lines[1].kind_from_tree(&tree, &text),
+            lines[1].kind,
             LineKind::CodeBlock {
                 is_fence: false,
                 ..
             }
         ));
         assert!(matches!(
-            lines[2].kind_from_tree(&tree, &text),
+            lines[2].kind,
             LineKind::CodeBlock { is_fence: true, .. }
         ));
     }

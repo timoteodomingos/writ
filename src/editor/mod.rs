@@ -152,18 +152,11 @@ impl Editor {
             return "\n".to_string();
         };
 
-        // Get the tree for marker queries
-        let Some(tree) = self.buffer.tree() else {
-            return "\n".to_string();
-        };
-
-        // Use tree-based continuation - query tree directly for markers
-        let text = self.buffer.text();
-        let continuation = line_info.continuation_from_tree(tree, &text);
-        if continuation.is_empty() {
+        // Use pre-computed continuation from LineInfo
+        if line_info.continuation.is_empty() {
             "\n".to_string()
         } else {
-            format!("\n{}", continuation)
+            format!("\n{}", line_info.continuation)
         }
     }
 
@@ -177,20 +170,16 @@ impl Editor {
             return;
         };
 
-        // Get the tree for kind queries
-        let Some(tree) = self.buffer.tree() else {
-            return;
-        };
-
         // Only toggle task list items
         let buffer_text = self.buffer.text();
         let LineKind::ListItem {
             checked: Some(is_checked),
             ..
-        } = line.kind_from_tree(tree, &buffer_text)
+        } = &line.kind
         else {
             return;
         };
+        let is_checked = *is_checked;
 
         // Find the checkbox pattern in the line
         let line_text = &buffer_text[line.range.clone()];
@@ -305,23 +294,16 @@ impl Editor {
         lines: &[crate::lines::LineInfo],
         buffer_text: &str,
         theme: &EditorTheme,
-        tree: Option<&crate::parser::MarkdownTree>,
     ) -> Vec<(crate::highlight::HighlightSpan, Rgba)> {
         let mut all_highlights = Vec::new();
-
-        // Need tree for kind queries
-        let Some(tree) = tree else {
-            return all_highlights;
-        };
-
         let mut i = 0;
 
         while i < lines.len() {
             // Look for start of a code block (fence line with language)
             if let LineKind::CodeBlock {
-                language: Some(ref lang),
+                language: Some(lang),
                 is_fence: true,
-            } = lines[i].kind_from_tree(tree, buffer_text)
+            } = &lines[i].kind
             {
                 let lang = lang.clone();
                 i += 1;
@@ -331,7 +313,7 @@ impl Editor {
                 let mut content_start_offset: Option<usize> = None;
 
                 while i < lines.len() {
-                    match &lines[i].kind_from_tree(tree, buffer_text) {
+                    match &lines[i].kind {
                         LineKind::CodeBlock { is_fence: true, .. } => {
                             // Closing fence - end of block
                             i += 1;
@@ -676,9 +658,6 @@ impl Render for Editor {
         let lines = extract_lines(&self.buffer);
         let buffer_text = self.buffer.text();
 
-        // Get the parse tree for marker queries
-        let tree = self.buffer.tree();
-
         // Pre-compute syntax highlights for all code blocks
         // We parse each code block once and store highlights with buffer-relative offsets
         let code_block_highlights = Self::compute_code_block_highlights(
@@ -686,7 +665,6 @@ impl Render for Editor {
             &lines,
             &buffer_text,
             &theme,
-            tree,
         );
 
         // Create click callback that updates cursor position
@@ -752,20 +730,16 @@ impl Render for Editor {
         // Find code block ranges (start_line_idx, end_line_idx) to determine if cursor is in a code block
         // For incomplete blocks (no closing fence), end is None
         let mut code_block_ranges: Vec<(usize, Option<usize>)> = Vec::new();
-        if let Some(tree) = &tree {
+        {
             let mut i = 0;
             while i < lines.len() {
-                if let LineKind::CodeBlock { is_fence: true, .. } =
-                    lines[i].kind_from_tree(tree, &buffer_text)
-                {
+                if let LineKind::CodeBlock { is_fence: true, .. } = &lines[i].kind {
                     let start = i;
                     i += 1;
                     let mut found_close = false;
                     // Find closing fence
                     while i < lines.len() {
-                        if let LineKind::CodeBlock { is_fence: true, .. } =
-                            lines[i].kind_from_tree(tree, &buffer_text)
-                        {
+                        if let LineKind::CodeBlock { is_fence: true, .. } = &lines[i].kind {
                             code_block_ranges.push((start, Some(i)));
                             i += 1;
                             found_close = true;
@@ -802,19 +776,12 @@ impl Render for Editor {
 
         // Build line views with click and drag handling
         // Skip fence lines when cursor is outside the code block (they're hidden)
-        // If no tree is available, render without tree-based features
-        let tree_ref = tree.as_ref();
         let line_views: Vec<_> = lines
             .iter()
             .enumerate()
             .filter_map(|(line_idx, line)| {
                 // For fence lines, check if cursor is in this code block
-                let is_fence = tree_ref.map_or(false, |t| {
-                    matches!(
-                        line.kind_from_tree(t, &buffer_text),
-                        LineKind::CodeBlock { is_fence: true, .. }
-                    )
-                });
+                let is_fence = matches!(&line.kind, LineKind::CodeBlock { is_fence: true, .. });
                 let cursor_in_block = cursor_in_code_block_range(line_idx);
 
                 // Skip fence lines when cursor is outside the code block
@@ -844,12 +811,8 @@ impl Render for Editor {
                     None
                 };
 
-                // LineView needs a tree reference - if no tree, we can't render properly
-                let tree_ref = tree_ref?;
-
                 let line_view = LineView::new(
                     line,
-                    tree_ref,
                     &buffer_text,
                     cursor_offset,
                     inline_styles,
