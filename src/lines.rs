@@ -717,20 +717,18 @@ fn find_containing_code_block<'a>(
     pos: usize,
 ) -> Option<tree_sitter::Node<'a>> {
     fn search<'a>(node: tree_sitter::Node<'a>, pos: usize) -> Option<tree_sitter::Node<'a>> {
-        if node.kind() == "fenced_code_block" {
-            if node.start_byte() <= pos && pos <= node.end_byte() {
-                return Some(node);
-            }
+        if node.kind() == "fenced_code_block" && node.start_byte() <= pos && pos <= node.end_byte()
+        {
+            return Some(node);
         }
 
         for i in 0..node.child_count() {
-            if let Some(child) = node.child(i as u32) {
-                if child.start_byte() <= pos
-                    && pos <= child.end_byte()
-                    && let Some(found) = search(child, pos)
-                {
-                    return Some(found);
-                }
+            if let Some(child) = node.child(i as u32)
+                && child.start_byte() <= pos
+                && pos <= child.end_byte()
+                && let Some(found) = search(child, pos)
+            {
+                return Some(found);
             }
         }
 

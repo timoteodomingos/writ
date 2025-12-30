@@ -376,18 +376,18 @@ impl<'a> LineView<'a> {
         }
 
         // Add marker substitution prefix if applicable (bullet, checkbox, etc.)
-        if let Some(prefix) = self.get_marker_substitution() {
-            if !prefix.is_empty() {
-                display_text.push_str(&prefix);
-                runs.push(TextRun {
-                    len: prefix.len(),
-                    font: self.text_font.clone(),
-                    color: self.text_color.into(),
-                    background_color: None,
-                    underline: None,
-                    strikethrough: None,
-                });
-            }
+        if let Some(prefix) = self.get_marker_substitution()
+            && !prefix.is_empty()
+        {
+            display_text.push_str(&prefix);
+            runs.push(TextRun {
+                len: prefix.len(),
+                font: self.text_font.clone(),
+                color: self.text_color.into(),
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            });
         }
 
         if content_range.start >= content_range.end {
@@ -1087,11 +1087,11 @@ impl IntoElement for LineView<'_> {
                         // The checkbox symbol is displayed at the start of the line
                         // ☐ or ☑ is 3 bytes in UTF-8, plus 1 byte for space = 4 bytes total
                         // But visual_index is character-based, so check if within first 2 chars
-                        if visual_index < prefix_len {
-                            if let Some(ref cb) = on_checkbox {
-                                cb(line_number, window, cx);
-                                return;
-                            }
+                        if visual_index < prefix_len
+                            && let Some(ref cb) = on_checkbox
+                        {
+                            cb(line_number, window, cx);
+                            return;
                         }
                     }
 

@@ -292,17 +292,17 @@ impl BufferContent {
                 // Number items sequentially within this list
                 let mut item_number = 1;
                 for i in 0..node.child_count() {
-                    if let Some(child) = node.child(i as u32) {
-                        if child.kind() == "list_item" {
-                            // Find the list_marker_decimal child
-                            if let Some((marker_range, current_number)) =
-                                self.extract_ordered_marker(&child)
-                            {
-                                if current_number != item_number {
-                                    corrections.push((marker_range, item_number));
-                                }
-                                item_number += 1;
+                    if let Some(child) = node.child(i as u32)
+                        && child.kind() == "list_item"
+                    {
+                        // Find the list_marker_decimal child
+                        if let Some((marker_range, current_number)) =
+                            self.extract_ordered_marker(&child)
+                        {
+                            if current_number != item_number {
+                                corrections.push((marker_range, item_number));
                             }
+                            item_number += 1;
                         }
                     }
                 }
@@ -321,14 +321,14 @@ impl BufferContent {
     fn is_ordered_list(&self, list_node: &tree_sitter::Node) -> bool {
         // Look at the first list_item's marker type
         for i in 0..list_node.child_count() {
-            if let Some(child) = list_node.child(i as u32) {
-                if child.kind() == "list_item" {
-                    // Check for list_marker_decimal (ordered) vs list_marker_minus/etc (unordered)
-                    for j in 0..child.child_count() {
-                        if let Some(marker) = child.child(j as u32) {
-                            return marker.kind().starts_with("list_marker_decimal")
-                                || marker.kind() == "list_marker_dot";
-                        }
+            if let Some(child) = list_node.child(i as u32)
+                && child.kind() == "list_item"
+            {
+                // Check for list_marker_decimal (ordered) vs list_marker_minus/etc (unordered)
+                for j in 0..child.child_count() {
+                    if let Some(marker) = child.child(j as u32) {
+                        return marker.kind().starts_with("list_marker_decimal")
+                            || marker.kind() == "list_marker_dot";
                     }
                 }
             }

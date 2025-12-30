@@ -607,7 +607,7 @@ impl Render for Editor {
         let line_views: Vec<_> = lines
             .iter()
             .enumerate()
-            .filter_map(|(line_idx, line)| {
+            .map(|(line_idx, line)| {
                 // For fence lines, check if cursor is in this code block
                 let is_fence = matches!(line.kind(), LineKind::CodeBlock { is_fence: true, .. });
                 let cursor_in_block = cursor_in_code_block_range(line_idx);
@@ -630,30 +630,28 @@ impl Render for Editor {
                 // Show block markers for fence lines when cursor is in the code block
                 let show_block_markers = is_fence && cursor_in_block;
 
-                Some(
-                    LineView::new(
-                        line,
-                        &buffer_text,
-                        cursor_offset,
-                        inline_styles,
-                        text_color,
-                        cursor_color,
-                        link_color,
-                        selection_color,
-                        border_color,
-                        fence_color,
-                        fence_lang_color,
-                        selection_range.clone(),
-                        text_font.clone(),
-                        code_font.clone(),
-                        base_path.clone(),
-                        code_highlights,
-                        show_block_markers,
-                    )
-                    .on_click(on_click.clone())
-                    .on_drag(on_drag.clone())
-                    .on_checkbox(on_checkbox.clone()),
+                LineView::new(
+                    line,
+                    &buffer_text,
+                    cursor_offset,
+                    inline_styles,
+                    text_color,
+                    cursor_color,
+                    link_color,
+                    selection_color,
+                    border_color,
+                    fence_color,
+                    fence_lang_color,
+                    selection_range.clone(),
+                    text_font.clone(),
+                    code_font.clone(),
+                    base_path.clone(),
+                    code_highlights,
+                    show_block_markers,
                 )
+                .on_click(on_click.clone())
+                .on_drag(on_drag.clone())
+                .on_checkbox(on_checkbox.clone())
             })
             .collect();
 
