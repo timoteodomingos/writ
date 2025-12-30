@@ -64,6 +64,85 @@ Fenced code blocks render with syntax highlighting (currently Rust). The fence l
 
 Full selection support with click, drag, shift+arrow keys, double-click to select word, and triple-click to select line. Copy, cut, and paste work as expected. Undo and redo are supported with full cursor position restoration.
 
+## Library Usage
+
+writ can be embedded as a GPUI component in your own application. Add it as a dependency:
+
+```toml
+[dependencies]
+writ = "0.1"
+gpui = "0.1"
+```
+
+### Basic Usage
+
+```rust
+use gpui::prelude::*;
+use writ::{Editor, EditorConfig, EditorTheme};
+
+// Create with default configuration
+let editor = cx.new(|cx| Editor::new("# Hello, world!", cx));
+
+// Or with custom configuration
+let config = EditorConfig {
+    theme: EditorTheme::dracula(),
+    text_font: "Inter".to_string(),
+    code_font: "JetBrains Mono".to_string(),
+    base_path: Some("/path/to/markdown/file".into()),
+};
+let editor = cx.new(|cx| Editor::with_config("# Hello", config, cx));
+
+// Access content
+let text = editor.read(cx).text();
+let is_dirty = editor.read(cx).is_dirty();
+
+// Modify content
+editor.update(cx, |e, cx| e.insert("new text", cx));
+editor.update(cx, |e, cx| e.set_text("replacement", cx));
+```
+
+### Streaming Support
+
+For AI chat applications that stream markdown responses token by token:
+
+```rust
+// Start streaming (blocks user input, pins cursor to end)
+editor.update(cx, |e, cx| e.begin_streaming(cx));
+
+// Append tokens as they arrive
+for token in ai_response_stream {
+    editor.update(cx, |e, cx| e.append(&token, cx));
+}
+
+// End streaming (restores normal editing)
+editor.update(cx, |e, cx| e.end_streaming(cx));
+```
+
+### Programmatic Actions
+
+Execute editor actions programmatically:
+
+```rust
+use writ::{EditorAction, Direction};
+
+editor.update(cx, |e, cx| {
+    e.execute(EditorAction::Type('x'), window, cx);
+    e.execute(EditorAction::Move(Direction::Left), window, cx);
+    e.execute(EditorAction::Backspace, window, cx);
+    e.execute(EditorAction::Enter, window, cx);
+});
+```
+
+### State Queries
+
+```rust
+editor.read(cx).cursor_position();    // Current cursor byte offset
+editor.read(cx).selection_range();    // None if collapsed, Some(Range) if selecting
+editor.read(cx).is_dirty();           // Modified since last mark_clean()
+editor.read(cx).can_undo();
+editor.read(cx).can_redo();
+```
+
 ## Architecture
 
 The buffer stores raw markdown text using ropey, a rope data structure that provides O(log n) insertions and deletions. On every edit, tree-sitter incrementally reparses the document. Tree-sitter-md produces two parse trees: a block tree representing document structure (paragraphs, headings, lists, code blocks) and separate inline trees for each paragraph's inline content (bold, italic, links). The parser maintains both trees and provides a unified cursor that transparently switches between them when traversing.
