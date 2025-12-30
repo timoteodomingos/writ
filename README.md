@@ -83,3 +83,13 @@ Code blocks are highlighted using tree-sitter-highlight with language-specific g
 This manual extraction approach was chosen over tree-sitter's built-in injection support, which proved unreliable for our use case. Editors like Zed and Helix build their own injection handling for similar reasons. The manual approach is simpler: we find code blocks, highlight them independently, and merge the results back with buffer-relative offsets.
 
 Currently only Rust is supported, but adding new languages requires just the grammar crate and a highlights.scm query file. The highlighting runs on every edit, which is fast enough for typical documents since tree-sitter-highlight is efficient. For documents with many large code blocks, caching per-block highlights and invalidating only affected blocks would be a straightforward optimization.
+
+## Known Issues
+
+### Short Headings Not Styled While Typing
+
+When typing `# Hello`, tree-sitter doesn't recognize it as a heading until enough content is present or a newline is added. This is a quirk of the tree-sitter-md grammar. The heading styling appears once you press Enter or type enough characters.
+
+### Ordered List Continuation Shows Wrong Number
+
+Pressing Shift+Enter on an ordered list item inserts `1. ` as a placeholder. The correct number appears after you start typing, when tree-sitter recognizes the list structure and auto-numbering corrects it.
