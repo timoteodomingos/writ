@@ -2,18 +2,136 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui::{
-    App, Context, CursorStyle, FocusHandle, Focusable, Font, IntoElement, KeyDownEvent,
-    ScrollAnchor, ScrollHandle, Window, div, font, prelude::*,
+    App, Context, CursorStyle, FocusHandle, Focusable, Font, IntoElement, KeyDownEvent, Rgba,
+    ScrollAnchor, ScrollHandle, Window, div, font, prelude::*, rgb, rgba,
 };
 
 use crate::buffer::Buffer;
-use crate::config::Config;
 use crate::cursor::{Cursor, Selection};
-use crate::highlight::Highlighter;
+use crate::highlight::{HIGHLIGHT_NAMES, Highlighter};
 use crate::line_view::{CheckboxCallback, ClickCallback, DragCallback, LineView};
 use crate::lines::{LineKind, extract_inline_styles, extract_lines};
-use crate::theme::Theme;
-use crate::title_bar::FileInfo;
+
+// Platform-specific default fonts
+#[cfg(target_os = "windows")]
+const DEFAULT_TEXT_FONT: &str = "Segoe UI";
+#[cfg(target_os = "windows")]
+const DEFAULT_CODE_FONT: &str = "Consolas";
+
+#[cfg(target_os = "macos")]
+const DEFAULT_TEXT_FONT: &str = ".AppleSystemUIFont";
+#[cfg(target_os = "macos")]
+const DEFAULT_CODE_FONT: &str = "Menlo";
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+const DEFAULT_TEXT_FONT: &str = "Liberation Sans";
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+const DEFAULT_CODE_FONT: &str = "Liberation Mono";
+
+/// Theme colors for the editor.
+///
+/// Use `EditorTheme::dracula()` for the default Dracula theme.
+#[derive(Clone)]
+pub struct EditorTheme {
+    pub background: Rgba,
+    pub foreground: Rgba,
+    pub selection: Rgba,
+    pub comment: Rgba,
+    // Syntax colors
+    pub red: Rgba,
+    pub orange: Rgba,
+    pub yellow: Rgba,
+    pub green: Rgba,
+    pub cyan: Rgba,
+    pub purple: Rgba,
+    pub pink: Rgba,
+}
+
+impl EditorTheme {
+    /// The default Dracula theme.
+    pub fn dracula() -> Self {
+        Self {
+            background: rgb(0x282A36),
+            foreground: rgb(0xF8F8F2),
+            selection: rgba(0x44475A99),
+            comment: rgb(0x6272A4),
+            red: rgb(0xFF5555),
+            orange: rgb(0xFFB86C),
+            yellow: rgb(0xF1FA8C),
+            green: rgb(0x50FA7B),
+            cyan: rgb(0x8BE9FD),
+            purple: rgb(0xBD93F9),
+            pink: rgb(0xFF79C6),
+        }
+    }
+
+    /// Map a tree-sitter highlight capture name to a color.
+    pub fn color_for_capture(&self, capture: &str) -> Rgba {
+        // Handle specific sub-captures first
+        match capture {
+            "variable.special" => return self.purple,
+            "variable.parameter" => return self.orange,
+            "punctuation.bracket" => return self.foreground,
+            "punctuation.special" => return self.pink,
+            "string.escape" => return self.pink,
+            "lifetime" => return self.pink,
+            _ => {}
+        }
+
+        let base = capture.split('.').next().unwrap_or(capture);
+
+        match base {
+            "keyword" => self.pink,
+            "function" => self.green,
+            "type" => self.cyan,
+            "string" => self.yellow,
+            "number" | "boolean" => self.purple,
+            "comment" => self.comment,
+            "constant" => self.purple,
+            "operator" => self.pink,
+            "attribute" => self.pink,
+            "property" => self.cyan,
+            "punctuation" => self.foreground,
+            _ => self.foreground,
+        }
+    }
+
+    /// Map a tree-sitter highlight ID to a color.
+    pub fn color_for_highlight(&self, highlight_id: usize) -> Rgba {
+        let capture = HIGHLIGHT_NAMES.get(highlight_id).copied().unwrap_or("");
+        self.color_for_capture(capture)
+    }
+}
+
+impl Default for EditorTheme {
+    fn default() -> Self {
+        Self::dracula()
+    }
+}
+
+/// Configuration for the editor.
+#[derive(Clone)]
+pub struct EditorConfig {
+    /// Theme colors
+    pub theme: EditorTheme,
+    /// Font for regular text
+    pub text_font: String,
+    /// Font for code blocks and inline code
+    pub code_font: String,
+    /// Base path for resolving relative image URLs
+    pub base_path: Option<PathBuf>,
+}
+
+impl Default for EditorConfig {
+    fn default() -> Self {
+        Self {
+            theme: EditorTheme::default(),
+            text_font: DEFAULT_TEXT_FONT.to_string(),
+            code_font: DEFAULT_CODE_FONT.to_string(),
+            base_path: None,
+        }
+    }
+}
 
 /// An editor action that can be executed programmatically.
 #[derive(Clone, Debug)]
@@ -55,11 +173,20 @@ pub struct Editor {
     highlighter: Highlighter,
     /// Whether user input is blocked (for demo mode)
     input_blocked: bool,
+    /// Whether streaming mode is active
+    streaming_mode: bool,
+    /// Editor configuration (theme, fonts, etc.)
+    config: EditorConfig,
 }
 
 impl Editor {
-    /// Create a new editor with the given content.
+    /// Create a new editor with the given content and default configuration.
     pub fn new(content: &str, cx: &mut Context<Self>) -> Self {
+        Self::with_config(content, EditorConfig::default(), cx)
+    }
+
+    /// Create a new editor with custom configuration.
+    pub fn with_config(content: &str, config: EditorConfig, cx: &mut Context<Self>) -> Self {
         let buffer: Buffer = content.parse().unwrap_or_default();
         let focus_handle = cx.focus_handle();
 
@@ -74,12 +201,61 @@ impl Editor {
             scroll_anchor,
             highlighter: Highlighter::new(),
             input_blocked: false,
+            streaming_mode: false,
+            config,
         }
     }
 
     /// Get the buffer contents.
     pub fn text(&self) -> String {
         self.buffer.text()
+    }
+
+    /// Get the buffer length in bytes.
+    pub fn len(&self) -> usize {
+        self.buffer.len_bytes()
+    }
+
+    /// Check if the buffer is empty.
+    pub fn is_empty(&self) -> bool {
+        self.buffer.len_bytes() == 0
+    }
+
+    /// Replace the entire buffer contents.
+    ///
+    /// This resets cursor to position 0 and clears undo history.
+    pub fn set_text(&mut self, content: &str, cx: &mut Context<Self>) {
+        self.buffer = content.parse().unwrap_or_default();
+        self.selection = Selection::new(0, 0);
+        cx.notify();
+    }
+
+    /// Insert text at the current cursor position.
+    ///
+    /// If there's a selection, it will be replaced.
+    pub fn insert(&mut self, text: &str, cx: &mut Context<Self>) {
+        self.insert_text(text);
+        cx.notify();
+    }
+
+    /// Append text at the end of the buffer.
+    ///
+    /// This is optimized for streaming scenarios where text arrives incrementally.
+    /// The cursor is moved to the end after appending.
+    pub fn append(&mut self, text: &str, cx: &mut Context<Self>) {
+        let end = self.buffer.len_bytes();
+        self.buffer.insert(end, text, end);
+        let new_end = self.buffer.len_bytes();
+        self.selection = Selection::new(new_end, new_end);
+        cx.notify();
+    }
+
+    /// Append text and scroll to keep the end visible.
+    ///
+    /// Useful for streaming scenarios where you want to follow new content.
+    pub fn append_and_scroll(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.append(text, cx);
+        self.scroll_anchor.scroll_to(window, cx);
     }
 
     /// Helper to get cursor position (selection head).
@@ -183,32 +359,7 @@ impl Editor {
         // unless the cursor was inside the checkbox area
         self.selection = Selection::new(cursor_before, cursor_before);
 
-        self.sync_dirty_state(cx);
         cx.notify();
-    }
-
-    /// Sync dirty state from buffer to FileInfo global.
-    /// Call this after any buffer modification.
-    fn sync_dirty_state(&self, cx: &mut Context<Self>) {
-        let file_info = cx.global::<FileInfo>();
-        let buffer_dirty = self.buffer.is_dirty();
-        if file_info.dirty != buffer_dirty {
-            cx.set_global(FileInfo {
-                path: file_info.path.clone(),
-                dirty: buffer_dirty,
-            });
-        }
-    }
-
-    /// Save the buffer to the file.
-    fn save(&mut self, cx: &mut Context<Self>) {
-        let file_info = cx.global::<FileInfo>();
-        let content = self.buffer.text();
-        if std::fs::write(&file_info.path, &content).is_ok() {
-            self.buffer.mark_clean();
-            self.sync_dirty_state(cx);
-            cx.notify();
-        }
     }
 
     // =========================================================================
@@ -282,8 +433,8 @@ impl Editor {
         &mut self,
         lines: &[crate::lines::LineInfo],
         buffer_text: &str,
-        theme: &Theme,
-    ) -> Vec<(crate::highlight::HighlightSpan, gpui::Rgba)> {
+        theme: &EditorTheme,
+    ) -> Vec<(crate::highlight::HighlightSpan, Rgba)> {
         let mut all_highlights = Vec::new();
         let mut i = 0;
 
@@ -464,7 +615,7 @@ impl Editor {
                 }
             }
             "s" if keystroke.modifiers.control || keystroke.modifiers.platform => {
-                self.save(cx);
+                // Save is handled by the application, not the editor component
             }
             _ => {
                 if let Some(key_char) = &keystroke.key_char {
@@ -476,14 +627,121 @@ impl Editor {
 
         // Scroll cursor into view after any cursor movement
         self.scroll_anchor.scroll_to(window, cx);
-
-        // Sync dirty state to FileInfo global so title bar updates
-        self.sync_dirty_state(cx);
     }
 
     /// Block user input (for demo mode).
     pub fn set_input_blocked(&mut self, blocked: bool) {
         self.input_blocked = blocked;
+    }
+
+    /// Check if user input is currently blocked.
+    pub fn is_input_blocked(&self) -> bool {
+        self.input_blocked
+    }
+
+    // =========================================================================
+    // Streaming mode - for AI chat applications
+    // =========================================================================
+
+    /// Begin streaming mode.
+    ///
+    /// In streaming mode:
+    /// - User input is blocked
+    /// - Cursor is pinned to end of document
+    /// - Appends are optimized for frequent small updates
+    pub fn begin_streaming(&mut self, cx: &mut Context<Self>) {
+        self.streaming_mode = true;
+        self.input_blocked = true;
+        // Move cursor to end
+        let end = self.buffer.len_bytes();
+        self.selection = Selection::new(end, end);
+        cx.notify();
+    }
+
+    /// End streaming mode and restore normal editing.
+    pub fn end_streaming(&mut self, cx: &mut Context<Self>) {
+        self.streaming_mode = false;
+        self.input_blocked = false;
+        cx.notify();
+    }
+
+    /// Check if currently in streaming mode.
+    pub fn is_streaming(&self) -> bool {
+        self.streaming_mode
+    }
+
+    // =========================================================================
+    // State queries
+    // =========================================================================
+
+    /// Get the current cursor position (byte offset).
+    pub fn cursor_position(&self) -> usize {
+        self.selection.head
+    }
+
+    /// Get the current selection range, or None if collapsed (just a cursor).
+    pub fn selection_range(&self) -> Option<std::ops::Range<usize>> {
+        if self.selection.is_collapsed() {
+            None
+        } else {
+            Some(self.selection.range())
+        }
+    }
+
+    /// Set the cursor position.
+    pub fn set_cursor(&mut self, offset: usize, cx: &mut Context<Self>) {
+        let offset = offset.min(self.buffer.len_bytes());
+        self.selection = Selection::new(offset, offset);
+        cx.notify();
+    }
+
+    /// Move cursor to end of document.
+    pub fn move_to_end(&mut self, cx: &mut Context<Self>) {
+        let end = self.buffer.len_bytes();
+        self.selection = Selection::new(end, end);
+        cx.notify();
+    }
+
+    /// Move cursor to start of document.
+    pub fn move_to_start(&mut self, cx: &mut Context<Self>) {
+        self.selection = Selection::new(0, 0);
+        cx.notify();
+    }
+
+    /// Check if the buffer has been modified since last `mark_clean()`.
+    pub fn is_dirty(&self) -> bool {
+        self.buffer.is_dirty()
+    }
+
+    /// Mark the buffer as clean (call after saving).
+    pub fn mark_clean(&mut self) {
+        self.buffer.mark_clean();
+    }
+
+    /// Check if undo is available.
+    pub fn can_undo(&self) -> bool {
+        self.buffer.can_undo()
+    }
+
+    /// Check if redo is available.
+    pub fn can_redo(&self) -> bool {
+        self.buffer.can_redo()
+    }
+
+    /// Undo the last edit.
+    pub fn undo(&mut self, cx: &mut Context<Self>) {
+        if let Some(cursor_pos) = self.buffer.undo() {
+            self.selection = Selection::new(cursor_pos, cursor_pos);
+            cx.notify();
+        }
+    }
+
+    /// Redo the last undone edit.
+    pub fn redo(&mut self, cx: &mut Context<Self>) {
+        if let Some(cursor_pos) = self.buffer.redo() {
+            self.selection = Selection::new(cursor_pos, cursor_pos);
+            cx.notify();
+        }
     }
 
     /// Execute an editor action programmatically.
@@ -519,7 +777,7 @@ impl Focusable for Editor {
 
 impl Render for Editor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let theme = cx.global::<Theme>();
+        let theme = self.config.theme.clone();
         let text_color = theme.foreground;
         let cursor_color = theme.purple;
         let link_color = theme.cyan;
@@ -535,13 +793,11 @@ impl Render for Editor {
         };
 
         // Get fonts from config
-        let config = cx.global::<Config>();
-        let text_font: Font = font(&config.text_font);
-        let code_font: Font = font(&config.code_font);
+        let text_font: Font = font(&self.config.text_font);
+        let code_font: Font = font(&self.config.code_font);
 
         // Get the base path for resolving relative image paths
-        let file_info = cx.global::<FileInfo>();
-        let base_path: Option<PathBuf> = file_info.path.parent().map(|p| p.to_path_buf());
+        let base_path = self.config.base_path.clone();
 
         // Extract lines from the buffer
         let lines = extract_lines(&self.buffer);
@@ -549,7 +805,8 @@ impl Render for Editor {
 
         // Pre-compute syntax highlights for all code blocks
         // We parse each code block once and store highlights with buffer-relative offsets
-        let code_block_highlights = self.compute_code_block_highlights(&lines, &buffer_text, theme);
+        let code_block_highlights =
+            self.compute_code_block_highlights(&lines, &buffer_text, &theme);
 
         // Create click callback that updates cursor position
         let entity = cx.entity().clone();

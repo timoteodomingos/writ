@@ -9,7 +9,7 @@ use gpui::{
 use writ::{
     config::Config,
     demo::{DemoStep, DemoTiming, demo_script},
-    editor::{Editor, EditorAction},
+    editor::{Editor, EditorAction, EditorConfig, EditorTheme},
     http, theme,
     title_bar::FileInfo,
     window::{CloseWindow, Quit, window_shadow},
@@ -153,8 +153,17 @@ fn main() {
                 let focus_handle = cx.focus_handle();
                 focus_handle.focus(window);
 
-                // Create editor with file content
-                let editor = cx.new(|cx| Editor::new(&content, cx));
+                // Create editor config from CLI config
+                let cli_config = cx.global::<Config>();
+                let editor_config = EditorConfig {
+                    theme: EditorTheme::dracula(),
+                    text_font: cli_config.text_font.clone(),
+                    code_font: cli_config.code_font.clone(),
+                    base_path: file_path.parent().map(|p| p.to_path_buf()),
+                };
+
+                // Create editor with file content and config
+                let editor = cx.new(|cx| Editor::with_config(&content, editor_config, cx));
 
                 // Start demo if in demo mode
                 if demo_mode {
