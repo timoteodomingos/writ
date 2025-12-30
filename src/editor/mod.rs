@@ -840,6 +840,10 @@ impl Render for Editor {
             })
             .collect();
 
+        // Create spacer elements for vertical padding (these scroll with content)
+        let top_spacer = div().h(self.config.padding_y);
+        let bottom_spacer = div().h(self.config.padding_y);
+
         div()
             .id("editor")
             .track_focus(&self.focus_handle)
@@ -848,9 +852,12 @@ impl Render for Editor {
             .size_full()
             .overflow_scroll()
             .track_scroll(&self.scroll_handle)
+            .px(self.config.padding_x)
             .font(text_font.clone())
             .text_color(text_color)
             .cursor(CursorStyle::IBeam)
+            .child(top_spacer)
             .children(line_views)
+            .child(bottom_spacer)
     }
 }

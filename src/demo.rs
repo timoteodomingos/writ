@@ -54,7 +54,7 @@ pub fn demo_script() -> Vec<DemoStep> {
         // Task list
         Type("Tasks work too:".into()),
         Action(A::Enter),
-        Type("- [ ] Learn writ".into()),
+        Type("- [x] Learn writ".into()),
         Action(A::ShiftEnter),
         Type("Write documentation".into()),
         Action(A::ShiftEnter),

@@ -3,8 +3,8 @@ use std::time::Duration;
 
 use clap::Parser;
 use gpui::{
-    Application, Bounds, Entity, FocusHandle, Focusable, KeyBinding, Point, Size, Timer, Window,
-    WindowBounds, WindowDecorations, WindowOptions, div, prelude::*, rems,
+    Application, Bounds, Entity, FocusHandle, Focusable, KeyBinding, Point, Rems, Size, Timer,
+    Window, WindowBounds, WindowDecorations, WindowOptions, div, prelude::*,
 };
 use writ::{
     config::Config,
@@ -85,12 +85,10 @@ impl Render for Root {
                 .on_action(|Quit, _, cx| {
                     cx.quit();
                 })
-                .overflow_scroll()
-                .px(rems(2.0))
-                .py(rems(1.6))
                 .flex()
                 .flex_col()
                 .size_full()
+                .overflow_hidden()
                 .bg(self.theme.background)
                 .child(self.editor.clone()),
         )
@@ -161,6 +159,8 @@ fn main() {
                     text_font: cli_config.text_font.clone(),
                     code_font: cli_config.code_font.clone(),
                     base_path: file_path.parent().map(|p| p.to_path_buf()),
+                    padding_x: Rems(2.0),
+                    padding_y: Rems(1.6),
                 };
 
                 // Create editor with file content and config

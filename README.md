@@ -75,7 +75,7 @@ cargo add writ
 ### Basic Usage
 
 ```rust
-use gpui::prelude::*;
+use gpui::{prelude::*, Rems};
 use writ::{Editor, EditorConfig, EditorTheme};
 
 // Create with default configuration
@@ -87,6 +87,8 @@ let config = EditorConfig {
     text_font: "Inter".to_string(),
     code_font: "JetBrains Mono".to_string(),
     base_path: Some("/path/to/markdown/file".into()),
+    padding_x: Rems(2.0),  // Horizontal padding
+    padding_y: Rems(1.5),  // Vertical padding (scrolls with content)
 };
 let editor = cx.new(|cx| Editor::with_config("# Hello", config, cx));
 
