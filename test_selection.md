@@ -2,6 +2,8 @@
 
 This is a paragraph with **bold text** and *italic text* for testing selection across styled regions.
 
+
+
 ## Second Heading
 
 Here is a line with `inline code` that has hidden markers.

@@ -627,6 +627,10 @@ fn determine_line_context(
                 None
             }
         }
+        LineKind::CodeBlock { is_fence: true, .. } => {
+            // The entire fence line (```rust or ```) is the marker
+            Some(range.clone())
+        }
         _ => None,
     };
 

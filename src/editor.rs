@@ -447,10 +447,67 @@ impl Render for Editor {
             });
         });
 
+        // Find code block ranges (start_line_idx, end_line_idx) to determine if cursor is in a code block
+        // For incomplete blocks (no closing fence), end is None
+        let mut code_block_ranges: Vec<(usize, Option<usize>)> = Vec::new();
+        {
+            let mut i = 0;
+            while i < lines.len() {
+                if let LineKind::CodeBlock { is_fence: true, .. } = lines[i].kind {
+                    let start = i;
+                    i += 1;
+                    let mut found_close = false;
+                    // Find closing fence
+                    while i < lines.len() {
+                        if let LineKind::CodeBlock { is_fence: true, .. } = lines[i].kind {
+                            code_block_ranges.push((start, Some(i)));
+                            i += 1;
+                            found_close = true;
+                            break;
+                        }
+                        i += 1;
+                    }
+                    // Incomplete block - no closing fence found
+                    if !found_close {
+                        code_block_ranges.push((start, None));
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+        }
+
+        // Helper: check if cursor is inside a code block (by line index)
+        let cursor_line = self.buffer.byte_to_line(cursor_offset);
+        let cursor_in_code_block_range = |line_idx: usize| -> bool {
+            for (start, end) in &code_block_ranges {
+                let block_end = end.unwrap_or(lines.len().saturating_sub(1));
+                // Check if this fence line belongs to a block that contains the cursor
+                if line_idx >= *start
+                    && line_idx <= block_end
+                    && cursor_line >= *start
+                    && cursor_line <= block_end
+                {
+                    return true;
+                }
+            }
+            false
+        };
+
         // Build line views with click and drag handling
         let line_views: Vec<_> = lines
             .iter()
-            .map(|line| {
+            .enumerate()
+            .filter_map(|(line_idx, line)| {
+                // For fence lines, check if cursor is in this code block
+                let is_fence = matches!(line.kind, LineKind::CodeBlock { is_fence: true, .. });
+                let cursor_in_block = cursor_in_code_block_range(line_idx);
+
+                // Skip fence lines when cursor is not in that code block
+                if is_fence && !cursor_in_block {
+                    return None;
+                }
+
                 let inline_styles = extract_inline_styles(&self.buffer, line);
 
                 // Filter pre-computed highlights to those overlapping this line
@@ -463,23 +520,29 @@ impl Render for Editor {
                     .cloned()
                     .collect();
 
-                LineView::new(
-                    line,
-                    &buffer_text,
-                    cursor_offset,
-                    inline_styles,
-                    text_color,
-                    cursor_color,
-                    link_color,
-                    selection_color,
-                    selection_range.clone(),
-                    text_font.clone(),
-                    code_font.clone(),
-                    base_path.clone(),
-                    code_highlights,
+                // Show block markers for fence lines when cursor is in the code block
+                let show_block_markers = is_fence && cursor_in_block;
+
+                Some(
+                    LineView::new(
+                        line,
+                        &buffer_text,
+                        cursor_offset,
+                        inline_styles,
+                        text_color,
+                        cursor_color,
+                        link_color,
+                        selection_color,
+                        selection_range.clone(),
+                        text_font.clone(),
+                        code_font.clone(),
+                        base_path.clone(),
+                        code_highlights,
+                        show_block_markers,
+                    )
+                    .on_click(on_click.clone())
+                    .on_drag(on_drag.clone()),
                 )
-                .on_click(on_click.clone())
-                .on_drag(on_drag.clone())
             })
             .collect();
 

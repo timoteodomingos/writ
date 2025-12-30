@@ -56,6 +56,8 @@ pub struct LineView<'a> {
     on_click: Option<ClickCallback>,
     /// Callback when mouse is dragged over line (with button pressed)
     on_drag: Option<DragCallback>,
+    /// Whether to force showing block markers (e.g., cursor is in code block)
+    show_block_markers: bool,
 }
 
 impl<'a> LineView<'a> {
@@ -74,6 +76,7 @@ impl<'a> LineView<'a> {
         code_font: Font,
         base_path: Option<PathBuf>,
         code_highlights: Vec<(HighlightSpan, Rgba)>,
+        show_block_markers: bool,
     ) -> Self {
         Self {
             line,
@@ -91,6 +94,7 @@ impl<'a> LineView<'a> {
             code_highlights,
             on_click: None,
             on_drag: None,
+            show_block_markers,
         }
     }
 
@@ -161,8 +165,11 @@ impl<'a> LineView<'a> {
     fn content_range(&self) -> Range<usize> {
         let range = &self.line.range;
 
-        // Block markers are shown when cursor is on line OR selection is on line
-        if self.cursor_on_line() || self.selection_on_line() {
+        // Block markers are shown when:
+        // - cursor is on this line, OR
+        // - selection is on this line, OR
+        // - show_block_markers is set (e.g., cursor is in the same code block)
+        if self.cursor_on_line() || self.selection_on_line() || self.show_block_markers {
             range.clone()
         } else if let Some(marker_range) = &self.line.marker_range {
             // Hide the block marker
@@ -812,10 +819,7 @@ impl IntoElement for LineView<'_> {
                     .border_color(gpui::rgb(0x6272a4)) // Dracula comment color
             }
             LineKind::CodeBlock { .. } => {
-                line_base(line_number)
-                    .relative()
-                    .pl_2()
-                    .bg(gpui::rgb(0x282a36)) // Dracula background, slightly different
+                line_base(line_number).relative().bg(gpui::rgb(0x282a36)) // Dracula background, slightly different
             }
             _ => line_base(line_number).relative(),
         };
