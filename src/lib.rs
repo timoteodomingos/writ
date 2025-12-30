@@ -2,6 +2,7 @@ pub mod args;
 pub mod buffer;
 pub mod cursor;
 pub mod editor;
+pub mod highlight;
 pub mod http;
 pub mod line_view;
 pub mod lines;

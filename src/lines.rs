@@ -80,10 +80,10 @@ pub fn extract_lines(buffer: &Buffer) -> Vec<LineInfo> {
     lines
         .into_iter()
         .map(|(line_num, range)| {
-            let kind = if range.start == range.end {
-                LineKind::Blank
-            } else if let Some(tree) = &tree {
+            let kind = if let Some(tree) = &tree {
                 determine_line_kind(tree, &text, &range)
+            } else if range.start == range.end {
+                LineKind::Blank
             } else {
                 LineKind::Paragraph
             };
@@ -377,6 +377,20 @@ fn determine_line_kind(tree: &MarkdownTree, text: &str, range: &Range<usize>) ->
     // Walk tree-sitter to find what node contains this line's start position
     let root = tree.block_tree().root_node();
 
+    // First, check if this position is inside a fenced_code_block by scanning top-level nodes.
+    // This handles empty lines within code blocks that might not be found by find_node_with_ancestors.
+    if let Some(code_block) = find_containing_code_block(&root, range.start) {
+        let line_text = &text[range.clone()];
+        let is_fence = line_text.trim_start().starts_with("```");
+        let language = extract_code_block_language(&code_block, text);
+        return LineKind::CodeBlock { language, is_fence };
+    }
+
+    // For empty lines outside code blocks, return Blank
+    if range.start == range.end {
+        return LineKind::Blank;
+    }
+
     // Find node and its ancestor chain at this position
     if let Some((node, ancestors)) = find_node_with_ancestors(&root, range.start) {
         // Check ancestors for container/block types
@@ -409,10 +423,8 @@ fn determine_line_kind(tree: &MarkdownTree, text: &str, range: &Range<usize>) ->
                 "fenced_code_block" => {
                     let line_text = &text[range.clone()];
                     let is_fence = line_text.trim_start().starts_with("```");
-                    return LineKind::CodeBlock {
-                        language: None,
-                        is_fence,
-                    };
+                    let language = extract_code_block_language(ancestor, text);
+                    return LineKind::CodeBlock { language, is_fence };
                 }
                 _ => {}
             }
@@ -446,10 +458,8 @@ fn determine_line_kind(tree: &MarkdownTree, text: &str, range: &Range<usize>) ->
             "fenced_code_block" => {
                 let line_text = &text[range.clone()];
                 let is_fence = line_text.trim_start().starts_with("```");
-                LineKind::CodeBlock {
-                    language: None,
-                    is_fence,
-                }
+                let language = extract_code_block_language(&node, text);
+                LineKind::CodeBlock { language, is_fence }
             }
             "paragraph" | "inline" => LineKind::Paragraph,
             _ => LineKind::Paragraph,
@@ -462,6 +472,70 @@ fn determine_line_kind(tree: &MarkdownTree, text: &str, range: &Range<usize>) ->
             LineKind::Paragraph
         }
     }
+}
+
+/// Extract the language from a fenced_code_block node.
+///
+/// The structure is: fenced_code_block -> info_string -> language
+fn extract_code_block_language(node: &tree_sitter::Node, text: &str) -> Option<String> {
+    // Find the info_string child which contains the language
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i as u32)
+            && child.kind() == "info_string"
+        {
+            // The info_string might have a "language" child, or the text itself is the language
+            for j in 0..child.child_count() {
+                if let Some(lang_node) = child.child(j as u32)
+                    && lang_node.kind() == "language"
+                {
+                    let lang = &text[lang_node.start_byte()..lang_node.end_byte()];
+                    return Some(lang.to_string());
+                }
+            }
+            // If no language child, use the whole info_string content
+            let info = &text[child.start_byte()..child.end_byte()];
+            let trimmed = info.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    None
+}
+
+/// Find a fenced_code_block node that contains the given position.
+/// Uses inclusive bounds (start <= pos <= end) to handle empty lines at boundaries.
+fn find_containing_code_block<'a>(
+    root: &tree_sitter::Node<'a>,
+    pos: usize,
+) -> Option<tree_sitter::Node<'a>> {
+    fn search<'a>(node: tree_sitter::Node<'a>, pos: usize) -> Option<tree_sitter::Node<'a>> {
+        // Check if this is a fenced_code_block containing the position
+        if node.kind() == "fenced_code_block" {
+            // Use inclusive check: start <= pos <= end
+            // This handles empty lines at the boundary of the code block content
+            if node.start_byte() <= pos && pos <= node.end_byte() {
+                return Some(node);
+            }
+        }
+
+        // Recurse into children
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i as u32) {
+                // Only recurse if this child could contain pos
+                if child.start_byte() <= pos
+                    && pos <= child.end_byte()
+                    && let Some(found) = search(child, pos)
+                {
+                    return Some(found);
+                }
+            }
+        }
+
+        None
+    }
+
+    search(*root, pos)
 }
 
 /// Find the deepest node at a position, along with all its ancestors.

@@ -10,6 +10,7 @@ use gpui::{
     prelude::*, px, rems,
 };
 
+use crate::highlight::HighlightSpan;
 use crate::lines::{LineInfo, LineKind};
 use crate::render::StyledRegion;
 
@@ -49,6 +50,8 @@ pub struct LineView<'a> {
     code_font: Font,
     /// Base path for resolving relative image paths (directory containing the markdown file)
     base_path: Option<PathBuf>,
+    /// Syntax highlighting spans for code blocks (with pre-computed colors)
+    code_highlights: Vec<(HighlightSpan, Rgba)>,
     /// Callback when line is clicked
     on_click: Option<ClickCallback>,
     /// Callback when mouse is dragged over line (with button pressed)
@@ -70,6 +73,7 @@ impl<'a> LineView<'a> {
         text_font: Font,
         code_font: Font,
         base_path: Option<PathBuf>,
+        code_highlights: Vec<(HighlightSpan, Rgba)>,
     ) -> Self {
         Self {
             line,
@@ -84,6 +88,7 @@ impl<'a> LineView<'a> {
             text_font,
             code_font,
             base_path,
+            code_highlights,
             on_click: None,
             on_drag: None,
         }
@@ -184,6 +189,21 @@ impl<'a> LineView<'a> {
         }
     }
 
+    /// Get the syntax highlight color for a buffer range, if any.
+    ///
+    /// Returns the color of the most specific highlight span that contains this range.
+    /// tree-sitter-highlight produces non-overlapping spans, so we just find
+    /// the one that contains our range.
+    fn get_highlight_color_for_range(&self, start: usize, end: usize) -> Option<Rgba> {
+        for (span, color) in &self.code_highlights {
+            // Check if this highlight span contains our range
+            if span.range.start <= start && end <= span.range.end {
+                return Some(*color);
+            }
+        }
+        None
+    }
+
     /// Build the display text and text runs with proper fonts.
     fn build_styled_content(&self) -> (String, Vec<TextRun>) {
         let content_range = self.content_range();
@@ -222,6 +242,14 @@ impl<'a> LineView<'a> {
                     boundaries.push(region.content_range.end.min(content_range.end));
                     boundaries.push(region.full_range.end.min(content_range.end));
                 }
+            }
+        }
+
+        // Add boundaries from syntax highlighting spans
+        for (span, _) in &self.code_highlights {
+            if span.range.end > content_range.start && span.range.start < content_range.end {
+                boundaries.push(span.range.start.max(content_range.start));
+                boundaries.push(span.range.end.min(content_range.end));
             }
         }
 
@@ -331,6 +359,9 @@ impl<'a> LineView<'a> {
             // Determine text color
             let color: Hsla = if is_link {
                 self.link_color.into()
+            } else if let Some(highlight_color) = self.get_highlight_color_for_range(start, end) {
+                // Code block with syntax highlighting
+                highlight_color.into()
             } else {
                 self.text_color.into()
             };

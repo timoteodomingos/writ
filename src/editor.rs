@@ -8,8 +8,9 @@ use gpui::{
 
 use crate::buffer::Buffer;
 use crate::cursor::{Cursor, Selection};
+use crate::highlight::Highlighter;
 use crate::line_view::{ClickCallback, DragCallback, LineView};
-use crate::lines::{extract_inline_styles, extract_lines};
+use crate::lines::{LineKind, extract_inline_styles, extract_lines};
 use crate::theme::Theme;
 use crate::title_bar::FileInfo;
 
@@ -23,6 +24,8 @@ pub struct Editor {
     focus_handle: FocusHandle,
     /// Scroll handle for scrolling cursor into view
     scroll_handle: ScrollHandle,
+    /// Syntax highlighter for code blocks
+    highlighter: Highlighter,
 }
 
 impl Editor {
@@ -36,6 +39,7 @@ impl Editor {
             selection: Selection::new(0, 0),
             focus_handle,
             scroll_handle: ScrollHandle::new(),
+            highlighter: Highlighter::new(),
         }
     }
 
@@ -87,6 +91,81 @@ impl Editor {
             self.sync_dirty_state(cx);
             cx.notify();
         }
+    }
+
+    /// Compute syntax highlights for all code blocks in the document.
+    ///
+    /// This parses each code block once and returns all highlights with
+    /// buffer-relative offsets. The caller can then filter by line range.
+    fn compute_code_block_highlights(
+        &mut self,
+        lines: &[crate::lines::LineInfo],
+        buffer_text: &str,
+        theme: &Theme,
+    ) -> Vec<(crate::highlight::HighlightSpan, gpui::Rgba)> {
+        let mut all_highlights = Vec::new();
+        let mut i = 0;
+
+        while i < lines.len() {
+            // Look for start of a code block (fence line with language)
+            if let LineKind::CodeBlock {
+                language: Some(ref lang),
+                is_fence: true,
+            } = lines[i].kind
+            {
+                let lang = lang.clone();
+                let block_start = i;
+                i += 1;
+
+                // Collect all content lines until closing fence
+                let mut code_content = String::new();
+                let mut content_start_offset: Option<usize> = None;
+
+                while i < lines.len() {
+                    match &lines[i].kind {
+                        LineKind::CodeBlock { is_fence: true, .. } => {
+                            // Closing fence - end of block
+                            i += 1;
+                            break;
+                        }
+                        LineKind::CodeBlock {
+                            is_fence: false, ..
+                        } => {
+                            // Content line
+                            if content_start_offset.is_none() {
+                                content_start_offset = Some(lines[i].range.start);
+                            }
+                            code_content.push_str(&buffer_text[lines[i].range.clone()]);
+                            code_content.push('\n');
+                            i += 1;
+                        }
+                        _ => {
+                            // Unexpected - shouldn't happen, but break to be safe
+                            break;
+                        }
+                    }
+                }
+
+                // Parse and highlight the entire code block
+                if let Some(start_offset) = content_start_offset {
+                    let spans = self.highlighter.highlight(&code_content, &lang);
+
+                    // Convert to buffer-relative offsets and add colors
+                    for mut span in spans {
+                        span.range.start += start_offset;
+                        span.range.end += start_offset;
+                        let color = theme.color_for_highlight(span.highlight_id);
+                        all_highlights.push((span, color));
+                    }
+                }
+
+                let _ = block_start; // suppress unused warning
+            } else {
+                i += 1;
+            }
+        }
+
+        all_highlights
     }
 
     /// Handle a key down event.
@@ -324,6 +403,10 @@ impl Render for Editor {
         let lines = extract_lines(&self.buffer);
         let buffer_text = self.buffer.text();
 
+        // Pre-compute syntax highlights for all code blocks
+        // We parse each code block once and store highlights with buffer-relative offsets
+        let code_block_highlights = self.compute_code_block_highlights(&lines, &buffer_text, theme);
+
         // Create click callback that updates cursor position
         let entity = cx.entity().clone();
         let on_click: ClickCallback =
@@ -369,6 +452,17 @@ impl Render for Editor {
             .iter()
             .map(|line| {
                 let inline_styles = extract_inline_styles(&self.buffer, line);
+
+                // Filter pre-computed highlights to those overlapping this line
+                let code_highlights: Vec<_> = code_block_highlights
+                    .iter()
+                    .filter(|(span, _)| {
+                        // Include highlights that overlap with this line's range
+                        span.range.start < line.range.end && span.range.end > line.range.start
+                    })
+                    .cloned()
+                    .collect();
+
                 LineView::new(
                     line,
                     &buffer_text,
@@ -382,6 +476,7 @@ impl Render for Editor {
                     text_font.clone(),
                     code_font.clone(),
                     base_path.clone(),
+                    code_highlights,
                 )
                 .on_click(on_click.clone())
                 .on_drag(on_drag.clone())
