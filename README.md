@@ -2,6 +2,34 @@
 
 A hybrid markdown editor that seamlessly combines raw text editing with live inline rendering.
 
+## Features
+
+### Inline Rendering
+
+Markdown syntax is hidden when your cursor is elsewhere, revealing clean formatted text. Move your cursor to any formatted element and the raw syntax appears for editing. Headings hide their `#` markers and display at the appropriate size. Bold and italic text hides the `*` markers. Inline code hides the backticks and renders in a monospace font. Links hide the URL syntax entirely and can be opened with Ctrl+click (Cmd+click on macOS).
+
+### Images
+
+Images render inline, supporting both URLs and local file paths (absolute or relative to the markdown file). When an image is on its own line, only the rendered image is shown. Move your cursor to the line to reveal the markdown syntax above the image.
+
+### Lists and Blockquotes
+
+Unordered list markers (`-`) are replaced with bullet symbols when the cursor is away. Ordered lists are automatically renumbered as you edit. Task lists render interactive checkboxes that you can click to toggle. Blockquotes hide their `>` markers and show a left border instead.
+
+Nesting is fully supported. A task item inside a blockquote is represented internally as a stack of layers, and each layer contributes its visual treatment independently.
+
+### Smart Enter
+
+Pressing Shift+Enter continues the current line structure. On a list item, it inserts a new item at the same nesting level. On a blockquote, it continues the quote. On a nested structure like a list inside a blockquote, it continues both.
+
+### Code Blocks
+
+Fenced code blocks render with syntax highlighting (currently Rust). The fence lines are hidden when the cursor is outside the block, showing only the highlighted code. Move your cursor into the block to reveal the fences for editing.
+
+### Selection and Editing
+
+Full selection support with click, drag, shift+arrow keys, double-click to select word, and triple-click to select line. Copy, cut, and paste work as expected. Undo and redo are supported with full cursor position restoration.
+
 ## Architecture
 
 The buffer stores raw markdown text using ropey, a rope data structure that provides O(log n) insertions and deletions. On every edit, tree-sitter incrementally reparses the document. Tree-sitter-md produces two parse trees: a block tree representing document structure (paragraphs, headings, lists, code blocks) and separate inline trees for each paragraph's inline content (bold, italic, links). The parser maintains both trees and provides a unified cursor that transparently switches between them when traversing.
