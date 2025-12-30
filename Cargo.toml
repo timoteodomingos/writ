@@ -1,7 +1,7 @@
 [package]
 name = "writ"
 version = "0.1.0"
-description = "A Typora-style GPUI markdown editor"
+description = "A hybrid markdown editor that seamlessly combines raw text editing with live inline rendering"
 authors = ["Wilfred Denton <wilfred@hey.com>"]
 license = "MIT"
 edition = "2024"
