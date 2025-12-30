@@ -390,8 +390,9 @@ impl<'a> LineView<'a> {
         let mut runs: Vec<TextRun> = Vec::new();
 
         // Add leading whitespace (indentation) before the substitution prefix
+        // Skip for checkbox lines - whitespace is handled as left margin on the checkbox
         let whitespace = self.leading_whitespace();
-        if !whitespace.is_empty() {
+        if !whitespace.is_empty() && self.checkbox_state().is_none() {
             display_text.push_str(whitespace);
             runs.push(TextRun {
                 len: whitespace.len(),
@@ -1040,6 +1041,10 @@ impl IntoElement for LineView<'_> {
             let line_num = self.line.line_number;
             let check_color = self.text_color;
 
+            // Get leading whitespace for indentation (rendered before checkbox)
+            let indent = self.leading_whitespace();
+            let indent_width = indent.len() as f32 * 0.6; // Approximate character width in rems
+
             // Outer box: square matching line height
             let box_size = rems(1.0);
             let inner_size = rems(0.6);
@@ -1049,6 +1054,7 @@ impl IntoElement for LineView<'_> {
                 .border_color(self.text_color)
                 .cursor(CursorStyle::PointingHand)
                 .mr_2()
+                .ml(rems(indent_width)) // Add left margin for indentation
                 .flex()
                 .items_center()
                 .justify_center()

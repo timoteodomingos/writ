@@ -53,7 +53,7 @@ impl MarkerInfo {
     /// Create a MarkerInfo from a tree-sitter node.
     fn from_node(node: &Node, text: &str) -> Option<Self> {
         let kind = node.kind();
-        let range = node.start_byte()..node.end_byte();
+        let mut range = node.start_byte()..node.end_byte();
 
         let marker_kind = match kind {
             "block_quote_marker" => MarkerKind::BlockQuote,
@@ -75,6 +75,10 @@ impl MarkerInfo {
             k if k.starts_with("atx_h") && k.ends_with("_marker") => {
                 // Extract level from "atx_h1_marker", "atx_h2_marker", etc.
                 let level = k.chars().nth(5)?.to_digit(10)? as u8;
+                // tree-sitter's marker is just "##", extend to include trailing space
+                if range.end < text.len() && text.as_bytes().get(range.end) == Some(&b' ') {
+                    range.end += 1;
+                }
                 MarkerKind::Heading(level)
             }
             _ => return None,
@@ -116,7 +120,7 @@ impl MarkerInfo {
 }
 
 /// Find all markers on a line by traversing the tree.
-/// Returns markers sorted by byte position.
+/// Returns markers in byte position order (tree-sitter children are in source order).
 fn find_markers_on_line(
     root: &Node,
     text: &str,
@@ -125,7 +129,6 @@ fn find_markers_on_line(
 ) -> Vec<MarkerInfo> {
     let mut markers = Vec::new();
     collect_markers_recursive(root, text, line_start, line_end, &mut markers);
-    markers.sort_by_key(|m| m.range.start);
     markers
 }
 
@@ -144,12 +147,22 @@ fn collect_markers_recursive(
     // Check if this node is a marker on our line
     if node.start_byte() >= line_start
         && node.start_byte() < line_end
-        && let Some(marker) = MarkerInfo::from_node(node, text)
+        && let Some(mut marker) = MarkerInfo::from_node(node, text)
     {
+        // Task list markers absorb the preceding unordered list marker.
+        // They're conceptually one marker "- [ ]" not two separate markers.
+        if matches!(marker.kind, MarkerKind::TaskList { .. })
+            && let Some(prev) = markers.last()
+            && matches!(prev.kind, MarkerKind::UnorderedList)
+        {
+            // Extend task list range to include the list marker, then replace it
+            marker.range.start = prev.range.start;
+            markers.pop();
+        }
         markers.push(marker);
     }
 
-    // Recurse into children
+    // Recurse into children (tree-sitter children are in source order)
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i as u32) {
             collect_markers_recursive(&child, text, line_start, line_end, markers);
@@ -865,15 +878,17 @@ mod tests {
         let root = tree.block_tree().root_node();
 
         // Line 0: "- [ ] Unchecked" (bytes 0-15)
+        // Task list merges the list marker and checkbox into a single marker
         let markers = find_markers_on_line(&root, &text, 0, 15);
-        assert_eq!(markers.len(), 2); // list marker + task marker
-        assert_eq!(markers[0].kind, MarkerKind::UnorderedList);
-        assert_eq!(markers[1].kind, MarkerKind::TaskList { checked: false });
+        assert_eq!(markers.len(), 1);
+        assert_eq!(markers[0].kind, MarkerKind::TaskList { checked: false });
+        // Range includes the "- " prefix
+        assert_eq!(markers[0].range.start, 0);
 
         // Line 1: "- [x] Checked" (bytes 16-29)
         let markers = find_markers_on_line(&root, &text, 16, 29);
-        assert_eq!(markers.len(), 2);
-        assert_eq!(markers[1].kind, MarkerKind::TaskList { checked: true });
+        assert_eq!(markers.len(), 1);
+        assert_eq!(markers[0].kind, MarkerKind::TaskList { checked: true });
     }
 
     #[test]
@@ -958,8 +973,8 @@ mod tests {
 
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].kind, LineKind::Heading(1));
-        // tree-sitter's atx_h1_marker is just "#", not "# "
-        assert_eq!(lines[0].marker_range, Some(0..1));
+        // Marker range includes "# " (hash plus space)
+        assert_eq!(lines[0].marker_range, Some(0..2));
     }
 
     #[test]
