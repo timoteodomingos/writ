@@ -12,6 +12,7 @@ use gpui::{
 
 use crate::highlight::HighlightSpan;
 use crate::lines::{LineInfo, LineKind};
+use crate::parser::MarkdownTree;
 use crate::render::StyledRegion;
 
 /// Callback type for click events - receives the buffer offset where the click occurred,
@@ -34,6 +35,8 @@ enum ImageSource {
 pub struct LineView<'a> {
     /// The line info
     line: &'a LineInfo,
+    /// The parsed markdown tree
+    tree: &'a MarkdownTree,
     /// The full buffer text
     text: &'a str,
     /// Current cursor position in the buffer
@@ -77,6 +80,7 @@ impl<'a> LineView<'a> {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         line: &'a LineInfo,
+        tree: &'a MarkdownTree,
         text: &'a str,
         cursor_offset: usize,
         inline_styles: Vec<StyledRegion>,
@@ -96,6 +100,7 @@ impl<'a> LineView<'a> {
     ) -> Self {
         Self {
             line,
+            tree,
             text,
             cursor_offset,
             inline_styles,
@@ -206,9 +211,12 @@ impl<'a> LineView<'a> {
         // Block markers are shown when cursor/selection is on line
         if self.should_show_raw_markers() {
             range.clone()
-        } else if let Some(marker_range) = self.line.marker_range() {
+        } else if let Some(marker_range) = self.line.marker_range_from_tree(self.tree, self.text) {
             // For ordered lists, don't hide the marker (no substitution available)
-            if matches!(self.line.kind(), LineKind::ListItem { ordered: true, .. }) {
+            if matches!(
+                self.line.kind_from_tree(self.tree, self.text),
+                LineKind::ListItem { ordered: true, .. }
+            ) {
                 range.clone()
             } else {
                 // Hide the block marker
@@ -221,7 +229,7 @@ impl<'a> LineView<'a> {
 
     /// Check if this line should show a border (has blockquote layer).
     fn should_show_border(&self) -> bool {
-        !self.should_show_raw_markers() && self.line.has_border()
+        !self.should_show_raw_markers() && self.line.has_border_from_tree(self.tree, self.text)
     }
 
     /// Get the substitution prefix for this line (combined from all layers).
@@ -231,7 +239,7 @@ impl<'a> LineView<'a> {
             return None;
         }
 
-        let substitution = self.line.substitution();
+        let substitution = self.line.substitution_from_tree(self.tree, self.text);
         if substitution.is_empty() {
             None
         } else {
@@ -266,7 +274,7 @@ impl<'a> LineView<'a> {
             return "";
         }
 
-        if let Some(marker_range) = self.line.marker_range() {
+        if let Some(marker_range) = self.line.marker_range_from_tree(self.tree, self.text) {
             let line_start = self.line.range.start;
             if marker_range.start > line_start {
                 // There's whitespace before the first marker
@@ -281,12 +289,18 @@ impl<'a> LineView<'a> {
 
     /// Check if this line should have bold styling (headings).
     fn is_line_bold(&self) -> bool {
-        matches!(self.line.kind(), LineKind::Heading(_))
+        matches!(
+            self.line.kind_from_tree(self.tree, self.text),
+            LineKind::Heading(_)
+        )
     }
 
     /// Check if this line is inside a code block (should use mono font).
     fn is_code_block_line(&self) -> bool {
-        matches!(self.line.kind(), LineKind::CodeBlock { .. })
+        matches!(
+            self.line.kind_from_tree(self.tree, self.text),
+            LineKind::CodeBlock { .. }
+        )
     }
 
     /// Get the base text font with line-level styling (bold for headings).
@@ -318,7 +332,10 @@ impl<'a> LineView<'a> {
 
     /// Check if this is a fence line (code block delimiter).
     fn is_fence_line(&self) -> bool {
-        matches!(self.line.kind(), LineKind::CodeBlock { is_fence: true, .. })
+        matches!(
+            self.line.kind_from_tree(self.tree, self.text),
+            LineKind::CodeBlock { is_fence: true, .. }
+        )
     }
 
     /// Build styled content for fence lines (``` with optional language).
@@ -1000,7 +1017,7 @@ impl IntoElement for LineView<'_> {
         let text_layout = styled_text.layout().clone();
 
         // Base div with line-specific styling
-        let mut line_div = match self.line.kind() {
+        let mut line_div = match self.line.kind_from_tree(self.tree, self.text) {
             LineKind::Heading(level) => {
                 let base = line_base(line_number)
                     .relative()
