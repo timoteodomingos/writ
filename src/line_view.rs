@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gpui::{
-    App, Font, FontStyle, FontWeight, Hsla, IntoElement, MouseButton, MouseDownEvent,
+    App, CursorStyle, Font, FontStyle, FontWeight, Hsla, IntoElement, MouseButton, MouseDownEvent,
     MouseMoveEvent, Rgba, SharedString, StyledText, TextRun, Window, canvas, div, img, point,
     prelude::*, px, rems,
 };
@@ -230,6 +230,26 @@ impl<'a> LineView<'a> {
         }
     }
 
+    /// Get checkbox state if this line shows a clickable checkbox (when cursor is away).
+    /// Returns Some(checked) where checked is true for ☑, false for ☐.
+    fn checkbox_state(&self) -> Option<bool> {
+        match self.get_marker_substitution().as_deref() {
+            Some("☐ ") => Some(false),
+            Some("☑ ") => Some(true),
+            _ => None,
+        }
+    }
+
+    /// Get the non-checkbox part of the marker substitution.
+    /// For checkbox lines, this returns None (checkbox rendered separately).
+    /// For other lines, returns the full substitution.
+    fn get_non_checkbox_substitution(&self) -> Option<String> {
+        match self.get_marker_substitution().as_deref() {
+            Some("☐ ") | Some("☑ ") => None, // Checkbox rendered separately
+            other => other.map(|s| s.to_string()),
+        }
+    }
+
     /// Get leading whitespace (indentation before the first marker).
     /// Returns empty string if no markers or showing raw markers.
     fn leading_whitespace(&self) -> &str {
@@ -375,8 +395,9 @@ impl<'a> LineView<'a> {
             });
         }
 
-        // Add marker substitution prefix if applicable (bullet, checkbox, etc.)
-        if let Some(prefix) = self.get_marker_substitution()
+        // Add marker substitution prefix if applicable (bullet, etc.)
+        // Note: checkboxes are rendered separately as a larger element
+        if let Some(prefix) = self.get_non_checkbox_substitution()
             && !prefix.is_empty()
         {
             display_text.push_str(&prefix);
@@ -1005,33 +1026,67 @@ impl IntoElement for LineView<'_> {
             }
         };
 
-        // Add styled text first so its layout is prepainted before overlays
-        line_div = line_div.child(styled_text);
+        // For checkbox lines, render checkbox as a styled box element
+        if let Some(checked) = self.checkbox_state() {
+            let on_checkbox = self.on_checkbox.clone();
+            let line_num = self.line.line_number;
+            let check_color = self.text_color;
+
+            // Outer box: square matching line height
+            let box_size = rems(1.0);
+            let inner_size = rems(0.6);
+            let mut checkbox_div = div()
+                .size(box_size)
+                .border_1()
+                .border_color(self.text_color)
+                .cursor(CursorStyle::PointingHand)
+                .mr_2()
+                .flex()
+                .items_center()
+                .justify_center()
+                .on_mouse_down(MouseButton::Left, move |_event, window, cx: &mut App| {
+                    cx.stop_propagation();
+                    if let Some(ref cb) = on_checkbox {
+                        cb(line_num, window, cx);
+                    }
+                });
+
+            // Add filled inner square when checked (with gap from border)
+            if checked {
+                let inner_box = div().size(inner_size).bg(check_color);
+                checkbox_div = checkbox_div.child(inner_box);
+            }
+
+            // Make line a flex row with checkbox + content
+            line_div = line_div
+                .flex()
+                .flex_row()
+                .items_center()
+                .child(checkbox_div);
+        }
+
+        // Wrap text content in a relative div for overlays
+        let mut text_container = div().relative().child(styled_text);
 
         // Add selection overlay (positioned absolutely, so appears behind text visually)
         if let Some(sel_range) = visual_selection {
-            line_div = line_div.child(self.render_selection(sel_range, text_layout.clone()));
+            text_container =
+                text_container.child(self.render_selection(sel_range, text_layout.clone()));
         }
 
         // Add cursor overlay if cursor is on this line
         if let Some(cursor_pos) = visual_cursor_pos {
-            line_div = line_div.child(self.render_cursor(cursor_pos, text_layout.clone()));
+            text_container =
+                text_container.child(self.render_cursor(cursor_pos, text_layout.clone()));
         }
 
-        // Add click handler
+        line_div = line_div.child(text_container);
+
+        // Add click handler for text content (not checkbox - that has its own handler)
         if let Some(ref on_click) = self.on_click {
             let on_click = on_click.clone();
-            let on_checkbox = self.on_checkbox.clone();
             let layout_for_click = text_layout.clone();
             let content_range = self.content_range();
-
-            // Check if this line has a checkbox that can be clicked
-            // We show checkbox when: task list item AND cursor/selection not on line
-            let checkbox_prefix_len = match self.get_marker_substitution().as_deref() {
-                Some("☐ ") | Some("☑ ") => Some(2), // checkbox symbol (2 bytes for ☐/☑) + space
-                _ => None,
-            };
-            let line_number = self.line.line_number;
 
             // Extract link regions for Ctrl/Cmd+click handling
             let link_regions: Vec<_> = self
@@ -1081,19 +1136,6 @@ impl IntoElement for LineView<'_> {
                         Ok(idx) => idx,
                         Err(idx) => idx,
                     };
-
-                    // Check for checkbox click (click on the checkbox prefix)
-                    if let Some(prefix_len) = checkbox_prefix_len {
-                        // The checkbox symbol is displayed at the start of the line
-                        // ☐ or ☑ is 3 bytes in UTF-8, plus 1 byte for space = 4 bytes total
-                        // But visual_index is character-based, so check if within first 2 chars
-                        if visual_index < prefix_len
-                            && let Some(ref cb) = on_checkbox
-                        {
-                            cb(line_number, window, cx);
-                            return;
-                        }
-                    }
 
                     // Convert visual index to buffer offset, accounting for hidden markers
                     let buffer_offset = {
