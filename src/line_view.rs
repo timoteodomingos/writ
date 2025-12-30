@@ -255,6 +255,11 @@ impl<'a> LineView<'a> {
         matches!(self.line.kind(), LineKind::Heading(_))
     }
 
+    /// Check if this line is inside a code block (should use mono font).
+    fn is_code_block_line(&self) -> bool {
+        matches!(self.line.kind(), LineKind::CodeBlock { .. })
+    }
+
     /// Get the base text font with line-level styling (bold for headings).
     fn line_font(&self) -> Font {
         if self.is_line_bold() {
@@ -510,7 +515,8 @@ impl<'a> LineView<'a> {
             }
 
             // Build the font for this run
-            let base_font = if is_code {
+            // Use code font for: inline code spans, or any line inside a code block
+            let base_font = if is_code || self.is_code_block_line() {
                 self.code_font.clone()
             } else {
                 self.text_font.clone()
