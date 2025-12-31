@@ -375,12 +375,12 @@ impl BufferContent {
                         && child.kind() == "list_item"
                         && let Some((marker_range, current_number)) =
                             self.extract_ordered_marker(&child)
-                        {
-                            if current_number != item_number {
-                                corrections.push((marker_range, item_number));
-                            }
-                            item_number += 1;
+                    {
+                        if current_number != item_number {
+                            corrections.push((marker_range, item_number));
                         }
+                        item_number += 1;
+                    }
                 }
             }
         }
@@ -416,21 +416,21 @@ impl BufferContent {
             if let Some(marker) = list_item.child(i as u32)
                 && (marker.kind().starts_with("list_marker_decimal")
                     || marker.kind() == "list_marker_dot")
-                {
-                    let start = marker.start_byte();
-                    let end = marker.end_byte();
-                    let text = self.text();
-                    let marker_text = &text[start..end];
+            {
+                let start = marker.start_byte();
+                let end = marker.end_byte();
+                let text = self.text();
+                let marker_text = &text[start..end];
 
-                    let number: usize = marker_text
-                        .chars()
-                        .take_while(|c| c.is_ascii_digit())
-                        .collect::<String>()
-                        .parse()
-                        .unwrap_or(1);
+                let number: usize = marker_text
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect::<String>()
+                    .parse()
+                    .unwrap_or(1);
 
-                    return Some((start..end, number));
-                }
+                return Some((start..end, number));
+            }
         }
         None
     }
