@@ -1,5 +1,7 @@
 # writ
 
+[![CI](https://github.com/wilfreddenton/writ/actions/workflows/ci.yml/badge.svg)](https://github.com/wilfreddenton/writ/actions/workflows/ci.yml)
+
 A hybrid markdown editor that seamlessly combines raw text editing with live inline rendering.
 
 ## Install
