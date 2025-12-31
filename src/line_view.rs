@@ -1219,19 +1219,18 @@ impl IntoElement for LineView<'_> {
 
             line_div = line_div.on_mouse_move(move |event: &MouseMoveEvent, window, cx| {
                 // Handle drag when left button is pressed
-                if event.pressed_button == Some(MouseButton::Left) {
-                    if let Some(ref on_drag) = on_drag {
-                        let visual_index = match layout_for_move.index_for_position(event.position)
-                        {
-                            Ok(idx) => idx,
-                            Err(idx) => idx,
-                        };
+                if event.pressed_button == Some(MouseButton::Left)
+                    && let Some(ref on_drag) = on_drag
+                {
+                    let visual_index = match layout_for_move.index_for_position(event.position) {
+                        Ok(idx) => idx,
+                        Err(idx) => idx,
+                    };
 
-                        // Simple mapping: visual index to buffer offset
-                        let buffer_offset =
-                            (line_range_for_move.start + visual_index).min(line_range_for_move.end);
-                        on_drag(buffer_offset, window, cx);
-                    }
+                    // Simple mapping: visual index to buffer offset
+                    let buffer_offset =
+                        (line_range_for_move.start + visual_index).min(line_range_for_move.end);
+                    on_drag(buffer_offset, window, cx);
                 }
 
                 // Handle link hover detection when Ctrl/Cmd is held
