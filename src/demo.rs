@@ -140,10 +140,11 @@ pub fn demo_script() -> Vec<DemoStep> {
         Type("Embed images:".into()),
         Action(A::Enter),
         Action(A::Enter),
-        Type("![tux](https://upload.wikimedia.org/wikipedia/commons/thumb/3/35/Tux.svg/960px-Tux.svg.png)".into()),
-        Action(A::Enter),
+        Type("![tux](https://upload.wikimedia.org/wikipedia/commons/thumb/3/35/Tux.svg/480px-Tux.svg.png)".into()),
+        Wait(500),
         Action(A::Enter),
         Wait(1000),
+        Action(A::Enter),
         // Finish
         Type("---".into()),
         Action(A::Enter),

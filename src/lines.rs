@@ -47,6 +47,8 @@ enum MarkerKind {
     TaskList { checked: bool },
     /// Heading marker `# `, `## `, etc.
     Heading(u8),
+    /// Thematic break `---`, `***`, or `___`
+    ThematicBreak,
 }
 
 impl MarkerInfo {
@@ -81,6 +83,7 @@ impl MarkerInfo {
                 }
                 MarkerKind::Heading(level)
             }
+            "thematic_break" => MarkerKind::ThematicBreak,
             _ => return None,
         };
 
@@ -99,6 +102,7 @@ impl MarkerInfo {
             MarkerKind::TaskList { checked: false } => "☐ ",
             MarkerKind::TaskList { checked: true } => "☑ ",
             MarkerKind::Heading(_) => "",
+            MarkerKind::ThematicBreak => "", // Rendered as horizontal line
         }
     }
 
@@ -110,6 +114,7 @@ impl MarkerInfo {
             MarkerKind::OrderedList => "1. ", // Normalization fixes the number
             MarkerKind::TaskList { .. } => "- [ ] ",
             MarkerKind::Heading(_) => "",
+            MarkerKind::ThematicBreak => "", // No continuation
         }
     }
 
@@ -219,6 +224,8 @@ pub enum LineKind {
         language: Option<String>,
         is_fence: bool,
     },
+    /// Thematic break (horizontal rule: ---, ***, ___)
+    ThematicBreak,
 }
 
 impl LineKind {
@@ -271,6 +278,7 @@ fn compute_kind_from_markers(markers: &[MarkerInfo]) -> LineKind {
                 };
             }
             MarkerKind::BlockQuote => return LineKind::BlockQuote,
+            MarkerKind::ThematicBreak => return LineKind::ThematicBreak,
         }
     }
     LineKind::Paragraph
@@ -288,7 +296,7 @@ fn compute_line_kind(
         return LineKind::Blank;
     }
 
-    // Check for code block first
+    // Check for code block
     if let Some(tree) = tree {
         let root = tree.block_tree().root_node();
         if let Some(code_block) = find_containing_code_block(&root, range.start) {

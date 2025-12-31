@@ -15,7 +15,9 @@ use gpui::{
 
 use crate::buffer::Buffer;
 use crate::cursor::{Cursor, Selection};
-use crate::line_view::{CheckboxCallback, ClickCallback, DragCallback, LineView, LineViewTheme};
+use crate::line_view::{
+    CheckboxCallback, ClickCallback, DragCallback, LineView, LineViewTheme, LinkHoverCallback,
+};
 use crate::lines::{LineInfo, LineKind, extract_inline_styles, extract_lines};
 
 /// Code block range: (start_line_idx, end_line_idx or None for incomplete blocks)
@@ -41,6 +43,8 @@ pub struct Editor {
     streaming_mode: bool,
     /// Editor configuration (theme, fonts, etc.)
     config: EditorConfig,
+    /// Whether mouse is hovering over a link with Ctrl/Cmd held
+    hovering_link: bool,
 }
 
 impl Editor {
@@ -66,6 +70,7 @@ impl Editor {
             input_blocked: false,
             streaming_mode: false,
             config,
+            hovering_link: false,
         }
     }
 
@@ -726,6 +731,17 @@ impl Render for Editor {
             });
         });
 
+        // Create link hover callback
+        let entity = cx.entity().clone();
+        let on_link_hover: LinkHoverCallback = Rc::new(move |hovering, _window, cx| {
+            entity.update(cx, |editor, cx| {
+                if editor.hovering_link != hovering {
+                    editor.hovering_link = hovering;
+                    cx.notify();
+                }
+            });
+        });
+
         // Extract lines fresh on each render (tree-sitter walking is fast)
         let lines = extract_lines(&self.buffer);
         let code_block_ranges = Self::compute_code_block_ranges(&lines);
@@ -800,7 +816,8 @@ impl Render for Editor {
                 )
                 .on_click(on_click.clone())
                 .on_drag(on_drag.clone())
-                .on_checkbox(on_checkbox.clone());
+                .on_checkbox(on_checkbox.clone())
+                .on_link_hover(on_link_hover.clone());
 
                 Some(line_view)
             })
@@ -834,7 +851,11 @@ impl Render for Editor {
             .px(self.config.padding_x)
             .font(line_theme.text_font.clone())
             .text_color(line_theme.text_color)
-            .cursor(CursorStyle::IBeam)
+            .cursor(if self.hovering_link {
+                CursorStyle::PointingHand
+            } else {
+                CursorStyle::IBeam
+            })
             .child(top_spacer)
             .children(line_views)
             .child(bottom_spacer)

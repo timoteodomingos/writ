@@ -24,6 +24,9 @@ pub type DragCallback = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 /// Callback type for checkbox toggle - receives the line number where checkbox was clicked.
 pub type CheckboxCallback = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 
+/// Callback type for link hover state changes - receives true when hovering a link with Ctrl, false otherwise.
+pub type LinkHoverCallback = Rc<dyn Fn(bool, &mut Window, &mut App)>;
+
 /// Theme colors and fonts for rendering lines.
 #[derive(Clone)]
 pub struct LineViewTheme {
@@ -68,6 +71,8 @@ pub struct LineView<'a> {
     on_drag: Option<DragCallback>,
     /// Callback when checkbox is clicked (for task list items)
     on_checkbox: Option<CheckboxCallback>,
+    /// Callback when link hover state changes (hovering link with Ctrl)
+    on_link_hover: Option<LinkHoverCallback>,
     /// Whether to force showing block markers (e.g., cursor is in code block)
     show_block_markers: bool,
     /// Scroll anchor for cursor line (attached to line containing cursor)
@@ -99,6 +104,7 @@ impl<'a> LineView<'a> {
             on_click: None,
             on_drag: None,
             on_checkbox: None,
+            on_link_hover: None,
             show_block_markers,
             scroll_anchor: None,
         }
@@ -125,6 +131,12 @@ impl<'a> LineView<'a> {
     /// Set the checkbox toggle callback for this line.
     pub fn on_checkbox(mut self, callback: CheckboxCallback) -> Self {
         self.on_checkbox = Some(callback);
+        self
+    }
+
+    /// Set the link hover callback for this line.
+    pub fn on_link_hover(mut self, callback: LinkHoverCallback) -> Self {
+        self.on_link_hover = Some(callback);
         self
     }
 
@@ -918,6 +930,68 @@ impl IntoElement for LineView<'_> {
                 }
             }
             LineKind::CodeBlock { .. } => line_base(line_number).relative().text_size(rems(0.9)),
+            LineKind::ThematicBreak => {
+                // When cursor is on line, show raw markers (---, ***, ___)
+                // When cursor is away, render invisible text with HR line behind it
+                // This gives us proper click positioning for free
+                if self.should_show_raw_markers() {
+                    line_base(line_number).relative()
+                } else {
+                    // Build invisible text runs (same text, transparent color)
+                    let line_text = &self.text[self.line.range.clone()];
+                    let invisible_run = TextRun {
+                        len: line_text.len(),
+                        font: self.theme.text_font.clone(),
+                        color: gpui::transparent_black(),
+                        background_color: None,
+                        underline: None,
+                        strikethrough: None,
+                    };
+                    let shared_text: SharedString = line_text.to_string().into();
+                    let styled_text = StyledText::new(shared_text).with_runs(vec![invisible_run]);
+                    let text_layout = styled_text.layout().clone();
+
+                    // Horizontal line overlay (doesn't affect text layout)
+                    let hr_line = div()
+                        .absolute()
+                        .top_1_2() // Center vertically
+                        .left_0()
+                        .right_0()
+                        .h(px(1.0))
+                        .bg(self.theme.border_color);
+
+                    let mut hr_div = line_base(line_number)
+                        .relative()
+                        .child(styled_text)
+                        .child(hr_line);
+
+                    // Add click handler using the text layout for positioning
+                    if let Some(ref on_click) = self.on_click {
+                        let on_click = on_click.clone();
+                        hr_div = hr_div.on_mouse_down(
+                            MouseButton::Left,
+                            move |event: &MouseDownEvent, window, cx| {
+                                let visual_index =
+                                    match text_layout.index_for_position(event.position) {
+                                        Ok(idx) => idx,
+                                        Err(idx) => idx,
+                                    };
+                                let buffer_offset = line_range.start + visual_index;
+                                let buffer_offset = buffer_offset.min(line_range.end);
+                                on_click(
+                                    buffer_offset,
+                                    event.modifiers.shift,
+                                    event.click_count,
+                                    window,
+                                    cx,
+                                );
+                            },
+                        );
+                    }
+
+                    return hr_div;
+                }
+            }
             _ => {
                 let base = line_base(line_number).relative();
                 // Add blockquote border for list items inside blockquotes
@@ -989,6 +1063,11 @@ impl IntoElement for LineView<'_> {
             text_container =
                 text_container.child(self.render_cursor(cursor_pos, text_layout.clone()));
         }
+
+        // TODO: Ctrl+hover link cursor not yet implemented
+        // The canvas-based approach doesn't work because position_for_index
+        // returns None in the prepaint callback (text not yet laid out).
+        // Need to implement at Editor level with proper state tracking.
 
         line_div = line_div.child(text_container);
 
@@ -1102,31 +1181,64 @@ impl IntoElement for LineView<'_> {
             );
         }
 
-        // Add drag handler for mouse move with button pressed
-        if let Some(ref on_drag) = self.on_drag {
-            let on_drag = on_drag.clone();
-            let layout_for_drag = text_layout;
-            let line_range = self.line.range.clone();
+        // Add mouse move handler for drag and link hover detection
+        {
+            let on_drag = self.on_drag.clone();
+            let on_link_hover = self.on_link_hover.clone();
+            let layout_for_move = text_layout;
+            let line_range_for_move = self.line.range.clone();
+            let content_range = self.content_range();
+
+            // Extract link content ranges for hover detection
+            let link_content_ranges: Vec<Range<usize>> = self
+                .inline_styles
+                .iter()
+                .filter(|region| region.link_url.is_some())
+                .map(|region| region.content_range.clone())
+                .collect();
 
             line_div = line_div.on_mouse_move(move |event: &MouseMoveEvent, window, cx| {
-                // Only handle drag when left button is pressed
-                if event.pressed_button != Some(MouseButton::Left) {
-                    return;
+                // Handle drag when left button is pressed
+                if event.pressed_button == Some(MouseButton::Left) {
+                    if let Some(ref on_drag) = on_drag {
+                        let visual_index = match layout_for_move.index_for_position(event.position)
+                        {
+                            Ok(idx) => idx,
+                            Err(idx) => idx,
+                        };
+
+                        // Simple mapping: visual index to buffer offset
+                        let buffer_offset =
+                            (line_range_for_move.start + visual_index).min(line_range_for_move.end);
+                        on_drag(buffer_offset, window, cx);
+                    }
                 }
 
-                let visual_index = match layout_for_drag.index_for_position(event.position) {
-                    Ok(idx) => idx,
-                    Err(idx) => idx,
-                };
+                // Handle link hover detection when Ctrl/Cmd is held
+                if let Some(ref on_link_hover) = on_link_hover {
+                    let is_ctrl_held = event.modifiers.control || event.modifiers.platform;
 
-                // Simple mapping: visual index to buffer offset
-                // Note: This doesn't perfectly account for hidden markers, but avoids
-                // the jumping issue when markers are revealed during drag. The offset
-                // will be slightly off when markers are hidden, but the re-render will
-                // correct it on the next frame.
-                let buffer_offset = (line_range.start + visual_index).min(line_range.end);
+                    if is_ctrl_held && !link_content_ranges.is_empty() {
+                        // Get buffer offset from mouse position
+                        let visual_index = match layout_for_move.index_for_position(event.position)
+                        {
+                            Ok(idx) => idx,
+                            Err(idx) => idx,
+                        };
+                        let buffer_offset =
+                            (content_range.start + visual_index).min(line_range_for_move.end);
 
-                on_drag(buffer_offset, window, cx);
+                        // Check if we're over a link
+                        let hovering_link = link_content_ranges
+                            .iter()
+                            .any(|range| buffer_offset >= range.start && buffer_offset < range.end);
+
+                        on_link_hover(hovering_link, window, cx);
+                    } else {
+                        // Not holding Ctrl or no links - not hovering
+                        on_link_hover(false, window, cx);
+                    }
+                }
             });
         }
 
