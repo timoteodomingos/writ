@@ -1,14 +1,72 @@
-//! Line extraction from buffer for rendering.
-//!
-//! Each line knows its markers (e.g., `#`, `-`, `>`), what to show when the
-//! cursor is away (substitutions like `•` for bullets), and continuation
-//! text for Smart Enter.
-
 use crate::buffer::Buffer;
 use crate::parser::MarkdownTree;
-use crate::render::{StyledRegion, TextStyle};
 use std::ops::Range;
 use tree_sitter::Node;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TextStyle {
+    pub bold: bool,
+    pub italic: bool,
+    pub code: bool,
+    pub strikethrough: bool,
+    pub heading_level: u8,
+}
+
+impl TextStyle {
+    pub fn bold() -> Self {
+        Self {
+            bold: true,
+            ..Default::default()
+        }
+    }
+
+    pub fn italic() -> Self {
+        Self {
+            italic: true,
+            ..Default::default()
+        }
+    }
+
+    pub fn code() -> Self {
+        Self {
+            code: true,
+            ..Default::default()
+        }
+    }
+
+    pub fn strikethrough() -> Self {
+        Self {
+            strikethrough: true,
+            ..Default::default()
+        }
+    }
+
+    pub fn heading(level: u8) -> Self {
+        Self {
+            heading_level: level,
+            bold: true,
+            ..Default::default()
+        }
+    }
+
+    pub fn merge(&self, other: &TextStyle) -> Self {
+        Self {
+            bold: self.bold || other.bold,
+            italic: self.italic || other.italic,
+            code: self.code || other.code,
+            strikethrough: self.strikethrough || other.strikethrough,
+            heading_level: self.heading_level.max(other.heading_level),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StyledRegion {
+    pub full_range: Range<usize>,
+    pub content_range: Range<usize>,
+    pub style: TextStyle,
+    pub link_url: Option<String>,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 struct MarkerInfo {

@@ -18,13 +18,16 @@ pub const DEFAULT_TEXT_FONT: &str = "Liberation Sans";
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub const DEFAULT_CODE_FONT: &str = "Liberation Mono";
 
+/// Color theme for the editor.
+///
+/// Provides colors for the background, foreground, selection, and syntax
+/// highlighting. Use [`EditorTheme::dracula()`] for the built-in Dracula theme.
 #[derive(Clone)]
 pub struct EditorTheme {
     pub background: Rgba,
     pub foreground: Rgba,
     pub selection: Rgba,
     pub comment: Rgba,
-    // Syntax colors
     pub red: Rgba,
     pub orange: Rgba,
     pub yellow: Rgba,
@@ -35,6 +38,7 @@ pub struct EditorTheme {
 }
 
 impl EditorTheme {
+    /// The Dracula color theme.
     pub fn dracula() -> Self {
         Self {
             background: rgb(0x282A36),

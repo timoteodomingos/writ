@@ -22,6 +22,17 @@ use crate::lines::{LineInfo, LineKind, extract_inline_styles, extract_lines};
 
 type CodeBlockRange = (usize, Option<usize>);
 
+/// A markdown editor component with live inline rendering.
+///
+/// The editor hides markdown syntax (like `**`, `#`, `-`) when the cursor
+/// is elsewhere, showing only the styled result. When you move the cursor
+/// into styled text, the syntax reappears for editing.
+///
+/// # Example
+///
+/// ```ignore
+/// let editor = cx.new(|cx| Editor::new("# Hello, world!", cx));
+/// ```
 pub struct Editor {
     buffer: Buffer,
     selection: Selection,
@@ -36,10 +47,12 @@ pub struct Editor {
 }
 
 impl Editor {
+    /// Create a new editor with the given content and default configuration.
     pub fn new(content: &str, cx: &mut Context<Self>) -> Self {
         Self::with_config(content, EditorConfig::default(), cx)
     }
 
+    /// Create a new editor with the given content and configuration.
     pub fn with_config(content: &str, config: EditorConfig, cx: &mut Context<Self>) -> Self {
         let buffer: Buffer = content.parse().unwrap_or_default();
         let focus_handle = cx.focus_handle();
@@ -60,29 +73,37 @@ impl Editor {
         }
     }
 
+    /// Returns the buffer contents as a string.
     pub fn text(&self) -> String {
         self.buffer.text()
     }
 
+    /// Returns the length of the buffer in bytes.
     pub fn len(&self) -> usize {
         self.buffer.len_bytes()
     }
 
+    /// Returns true if the buffer is empty.
     pub fn is_empty(&self) -> bool {
         self.buffer.len_bytes() == 0
     }
 
+    /// Replace the entire buffer contents, resetting cursor to the start.
     pub fn set_text(&mut self, content: &str, cx: &mut Context<Self>) {
         self.buffer = content.parse().unwrap_or_default();
         self.selection = Selection::new(0, 0);
         cx.notify();
     }
 
+    /// Insert text at the current cursor position.
     pub fn insert(&mut self, text: &str, cx: &mut Context<Self>) {
         self.insert_text(text);
         cx.notify();
     }
 
+    /// Append text to the end of the buffer and move cursor to the end.
+    ///
+    /// Useful for streaming content from an AI or other source.
     pub fn append(&mut self, text: &str, cx: &mut Context<Self>) {
         let end = self.buffer.len_bytes();
         self.buffer.insert(end, text, end);
@@ -91,6 +112,7 @@ impl Editor {
         cx.notify();
     }
 
+    /// Append text and scroll to keep the cursor visible.
     pub fn append_and_scroll(&mut self, text: &str, _window: &mut Window, cx: &mut Context<Self>) {
         self.append(text, cx);
         self.scroll_handle.scroll_to_bottom();
@@ -440,37 +462,46 @@ impl Editor {
         }
     }
 
+    /// Block or unblock user input. Useful during demos or streaming.
     pub fn set_input_blocked(&mut self, blocked: bool) {
         self.input_blocked = blocked;
     }
 
+    /// Returns true if user input is currently blocked.
     pub fn is_input_blocked(&self) -> bool {
         self.input_blocked
     }
 
+    /// Enter streaming mode: block input and move cursor to end.
+    ///
+    /// Call this before appending streamed content, then call
+    /// [`end_streaming`](Self::end_streaming) when done.
     pub fn begin_streaming(&mut self, cx: &mut Context<Self>) {
         self.streaming_mode = true;
         self.input_blocked = true;
-        // Move cursor to end
         let end = self.buffer.len_bytes();
         self.selection = Selection::new(end, end);
         cx.notify();
     }
 
+    /// Exit streaming mode and re-enable user input.
     pub fn end_streaming(&mut self, cx: &mut Context<Self>) {
         self.streaming_mode = false;
         self.input_blocked = false;
         cx.notify();
     }
 
+    /// Returns true if currently in streaming mode.
     pub fn is_streaming(&self) -> bool {
         self.streaming_mode
     }
 
+    /// Returns the current cursor position as a byte offset.
     pub fn cursor_position(&self) -> usize {
         self.selection.head
     }
 
+    /// Returns the current selection range, or None if the cursor is collapsed.
     pub fn selection_range(&self) -> Option<std::ops::Range<usize>> {
         if self.selection.is_collapsed() {
             None
@@ -479,39 +510,47 @@ impl Editor {
         }
     }
 
+    /// Set the cursor position to the given byte offset.
     pub fn set_cursor(&mut self, offset: usize, cx: &mut Context<Self>) {
         let offset = offset.min(self.buffer.len_bytes());
         self.selection = Selection::new(offset, offset);
         cx.notify();
     }
 
+    /// Move the cursor to the end of the buffer.
     pub fn move_to_end(&mut self, cx: &mut Context<Self>) {
         let end = self.buffer.len_bytes();
         self.selection = Selection::new(end, end);
         cx.notify();
     }
 
+    /// Move the cursor to the start of the buffer.
     pub fn move_to_start(&mut self, cx: &mut Context<Self>) {
         self.selection = Selection::new(0, 0);
         cx.notify();
     }
 
+    /// Returns true if the buffer has unsaved changes.
     pub fn is_dirty(&self) -> bool {
         self.buffer.is_dirty()
     }
 
+    /// Mark the buffer as clean (no unsaved changes).
     pub fn mark_clean(&mut self) {
         self.buffer.mark_clean();
     }
 
+    /// Returns true if there are actions to undo.
     pub fn can_undo(&self) -> bool {
         self.buffer.can_undo()
     }
 
+    /// Returns true if there are actions to redo.
     pub fn can_redo(&self) -> bool {
         self.buffer.can_redo()
     }
 
+    /// Undo the last action.
     pub fn undo(&mut self, cx: &mut Context<Self>) {
         if let Some(cursor_pos) = self.buffer.undo() {
             self.selection = Selection::new(cursor_pos, cursor_pos);
@@ -519,6 +558,7 @@ impl Editor {
         }
     }
 
+    /// Redo the last undone action.
     pub fn redo(&mut self, cx: &mut Context<Self>) {
         if let Some(cursor_pos) = self.buffer.redo() {
             self.selection = Selection::new(cursor_pos, cursor_pos);
@@ -526,6 +566,9 @@ impl Editor {
         }
     }
 
+    /// Execute an editor action programmatically.
+    ///
+    /// This is useful for scripted demos or external control of the editor.
     pub fn execute(&mut self, action: EditorAction, _window: &mut Window, cx: &mut Context<Self>) {
         match action {
             EditorAction::Type(c) => {

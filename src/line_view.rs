@@ -9,8 +9,7 @@ use gpui::{
 };
 
 use crate::highlight::HighlightSpan;
-use crate::lines::{LineInfo, LineKind};
-use crate::render::StyledRegion;
+use crate::lines::{LineInfo, LineKind, StyledRegion};
 
 pub type ClickCallback = Rc<dyn Fn(usize, bool, usize, &mut Window, &mut App)>;
 pub type DragCallback = Rc<dyn Fn(usize, &mut Window, &mut App)>;
