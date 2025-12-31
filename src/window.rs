@@ -146,6 +146,7 @@ impl RenderOnce for WindowShadow {
                     })
                     .bg(theme.background)
                     .size_full()
+                    .overflow_hidden()
                     .flex()
                     .flex_col()
                     .child(title_bar(theme, cx))

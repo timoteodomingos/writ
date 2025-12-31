@@ -9,15 +9,17 @@ pub use theme::EditorTheme;
 use std::rc::Rc;
 
 use gpui::{
-    App, Context, CursorStyle, FocusHandle, Focusable, IntoElement, KeyDownEvent, Rgba,
-    ScrollAnchor, ScrollHandle, Window, div, font, prelude::*,
+    App, Context, CursorStyle, FocusHandle, Focusable, IntoElement, KeyDownEvent, ScrollHandle,
+    Window, div, font, prelude::*,
 };
 
 use crate::buffer::Buffer;
 use crate::cursor::{Cursor, Selection};
-use crate::highlight::Highlighter;
 use crate::line_view::{CheckboxCallback, ClickCallback, DragCallback, LineView, LineViewTheme};
-use crate::lines::{LineKind, extract_inline_styles, extract_lines};
+use crate::lines::{LineInfo, LineKind, extract_inline_styles, extract_lines};
+
+/// Code block range: (start_line_idx, end_line_idx or None for incomplete blocks)
+type CodeBlockRange = (usize, Option<usize>);
 
 /// The main editor component.
 pub struct Editor {
@@ -29,10 +31,10 @@ pub struct Editor {
     focus_handle: FocusHandle,
     /// Scroll handle for scrolling cursor into view
     scroll_handle: ScrollHandle,
-    /// Scroll anchor for cursor line (scrolls cursor into view)
-    scroll_anchor: ScrollAnchor,
-    /// Syntax highlighter for code blocks
-    highlighter: Highlighter,
+    /// Child index of the cursor line in the scroll container (accounts for spacer and filtered lines)
+    cursor_child_index: Option<usize>,
+    /// Whether a scroll to cursor is pending (set when cursor moves, cleared after scroll)
+    scroll_to_cursor_pending: bool,
     /// Whether user input is blocked (for demo mode)
     input_blocked: bool,
     /// Whether streaming mode is active
@@ -53,15 +55,14 @@ impl Editor {
         let focus_handle = cx.focus_handle();
 
         let scroll_handle = ScrollHandle::new();
-        let scroll_anchor = ScrollAnchor::for_handle(scroll_handle.clone());
 
         Self {
             buffer,
             selection: Selection::new(0, 0),
             focus_handle,
             scroll_handle,
-            scroll_anchor,
-            highlighter: Highlighter::new(),
+            cursor_child_index: None,
+            scroll_to_cursor_pending: false,
             input_blocked: false,
             streaming_mode: false,
             config,
@@ -115,9 +116,9 @@ impl Editor {
     /// Append text and scroll to keep the end visible.
     ///
     /// Useful for streaming scenarios where you want to follow new content.
-    pub fn append_and_scroll(&mut self, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn append_and_scroll(&mut self, text: &str, _window: &mut Window, cx: &mut Context<Self>) {
         self.append(text, cx);
-        self.scroll_anchor.scroll_to(window, cx);
+        self.scroll_handle.scroll_to_bottom();
     }
 
     /// Helper to get cursor position (selection head).
@@ -133,6 +134,56 @@ impl Editor {
         } else {
             self.selection = Selection::new(new_cursor.offset, new_cursor.offset);
         }
+    }
+
+    /// Perform scroll to cursor if pending and bounds are available.
+    /// Called from render() - uses bounds from the previous layout.
+    fn perform_pending_scroll(&mut self, margin: gpui::Pixels) {
+        if !self.scroll_to_cursor_pending {
+            return;
+        }
+
+        let Some(child_ix) = self.cursor_child_index else {
+            return;
+        };
+
+        let Some(item_bounds) = self.scroll_handle.bounds_for_item(child_ix) else {
+            return;
+        };
+
+        // Clear the pending flag now that we have bounds
+        self.scroll_to_cursor_pending = false;
+
+        let viewport = self.scroll_handle.bounds();
+        let offset = self.scroll_handle.offset();
+
+        // Calculate item position relative to viewport
+        let item_top = item_bounds.origin.y + offset.y;
+        let item_bottom = item_top + item_bounds.size.height;
+
+        let visible_top = viewport.origin.y + margin;
+        let visible_bottom = viewport.origin.y + viewport.size.height - margin;
+
+        // Check if we need to scroll
+        if item_top < visible_top {
+            // Item is above visible area - scroll up
+            let new_offset_y = viewport.origin.y - item_bounds.origin.y + margin;
+            self.scroll_handle
+                .set_offset(gpui::point(offset.x, new_offset_y));
+        } else if item_bottom > visible_bottom {
+            // Item is below visible area - scroll down
+            let new_offset_y = viewport.origin.y + viewport.size.height
+                - item_bounds.origin.y
+                - item_bounds.size.height
+                - margin;
+            self.scroll_handle
+                .set_offset(gpui::point(offset.x, new_offset_y));
+        }
+    }
+
+    /// Mark that we need to scroll to cursor on next render.
+    fn request_scroll_to_cursor(&mut self) {
+        self.scroll_to_cursor_pending = true;
     }
 
     /// Compute the text to insert for Smart Enter (Shift+Enter).
@@ -285,80 +336,43 @@ impl Editor {
         self.move_cursor(new_cursor, extend);
     }
 
-    /// Compute syntax highlights for all code blocks in the document.
-    ///
-    /// This parses each code block once and returns all highlights with
-    /// buffer-relative offsets. The caller can then filter by line range.
-    fn compute_code_block_highlights(
-        highlighter: &mut Highlighter,
-        lines: &[crate::lines::LineInfo],
-        buffer_text: &str,
-        theme: &EditorTheme,
-    ) -> Vec<(crate::highlight::HighlightSpan, Rgba)> {
-        let mut all_highlights = Vec::new();
+    /// Compute code block ranges from lines.
+    /// Returns (start_line_idx, end_line_idx or None for incomplete blocks).
+    fn compute_code_block_ranges(lines: &[LineInfo]) -> Vec<CodeBlockRange> {
+        let mut ranges = Vec::new();
         let mut i = 0;
 
         while i < lines.len() {
-            // Look for start of a code block (fence line with language)
-            if let LineKind::CodeBlock {
-                language: Some(lang),
-                is_fence: true,
-            } = &lines[i].kind
-            {
-                let lang = lang.clone();
+            if let LineKind::CodeBlock { is_fence: true, .. } = &lines[i].kind {
+                let start = i;
                 i += 1;
+                let mut found_close = false;
 
-                // Collect all content lines until closing fence
-                let mut code_content = String::new();
-                let mut content_start_offset: Option<usize> = None;
-
+                // Find closing fence
                 while i < lines.len() {
-                    match &lines[i].kind {
-                        LineKind::CodeBlock { is_fence: true, .. } => {
-                            // Closing fence - end of block
-                            i += 1;
-                            break;
-                        }
-                        LineKind::CodeBlock {
-                            is_fence: false, ..
-                        } => {
-                            // Content line
-                            if content_start_offset.is_none() {
-                                content_start_offset = Some(lines[i].range.start);
-                            }
-                            code_content.push_str(&buffer_text[lines[i].range.clone()]);
-                            code_content.push('\n');
-                            i += 1;
-                        }
-                        _ => {
-                            // Unexpected - shouldn't happen, but break to be safe
-                            break;
-                        }
+                    if let LineKind::CodeBlock { is_fence: true, .. } = &lines[i].kind {
+                        ranges.push((start, Some(i)));
+                        i += 1;
+                        found_close = true;
+                        break;
                     }
+                    i += 1;
                 }
 
-                // Parse and highlight the entire code block
-                if let Some(start_offset) = content_start_offset {
-                    let spans = highlighter.highlight(&code_content, &lang);
-
-                    // Convert to buffer-relative offsets and add colors
-                    for mut span in spans {
-                        span.range.start += start_offset;
-                        span.range.end += start_offset;
-                        let color = theme.color_for_highlight(span.highlight_id);
-                        all_highlights.push((span, color));
-                    }
+                // Incomplete block - no closing fence found
+                if !found_close {
+                    ranges.push((start, None));
                 }
             } else {
                 i += 1;
             }
         }
 
-        all_highlights
+        ranges
     }
 
     /// Handle a key down event.
-    fn on_key_down(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+    fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         // Block user input during demo mode
         if self.input_blocked {
             return;
@@ -479,9 +493,6 @@ impl Editor {
                 }
             }
         }
-
-        // Scroll cursor into view after any cursor movement
-        self.scroll_anchor.scroll_to(window, cx);
     }
 
     /// Block user input (for demo mode).
@@ -600,7 +611,7 @@ impl Editor {
     }
 
     /// Execute an editor action programmatically.
-    pub fn execute(&mut self, action: EditorAction, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn execute(&mut self, action: EditorAction, _window: &mut Window, cx: &mut Context<Self>) {
         match action {
             EditorAction::Type(c) => {
                 self.insert_text(&c.to_string());
@@ -619,7 +630,6 @@ impl Editor {
                 self.move_in_direction(direction, false);
             }
         }
-        self.scroll_anchor.scroll_to(window, cx);
         cx.notify();
     }
 }
@@ -631,7 +641,7 @@ impl Focusable for Editor {
 }
 
 impl Render for Editor {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.config.theme.clone();
         let line_theme = LineViewTheme {
             text_color: theme.foreground,
@@ -654,18 +664,7 @@ impl Render for Editor {
         // Get the base path for resolving relative image paths
         let base_path = self.config.base_path.clone();
 
-        // Extract lines from the buffer
-        let lines = extract_lines(&self.buffer);
         let buffer_text = self.buffer.text();
-
-        // Pre-compute syntax highlights for all code blocks
-        // We parse each code block once and store highlights with buffer-relative offsets
-        let code_block_highlights = Self::compute_code_block_highlights(
-            &mut self.highlighter,
-            &lines,
-            &buffer_text,
-            &theme,
-        );
 
         // Create click callback that updates cursor position
         let entity = cx.entity().clone();
@@ -727,41 +726,16 @@ impl Render for Editor {
             });
         });
 
-        // Find code block ranges (start_line_idx, end_line_idx) to determine if cursor is in a code block
-        // For incomplete blocks (no closing fence), end is None
-        let mut code_block_ranges: Vec<(usize, Option<usize>)> = Vec::new();
-        {
-            let mut i = 0;
-            while i < lines.len() {
-                if let LineKind::CodeBlock { is_fence: true, .. } = &lines[i].kind {
-                    let start = i;
-                    i += 1;
-                    let mut found_close = false;
-                    // Find closing fence
-                    while i < lines.len() {
-                        if let LineKind::CodeBlock { is_fence: true, .. } = &lines[i].kind {
-                            code_block_ranges.push((start, Some(i)));
-                            i += 1;
-                            found_close = true;
-                            break;
-                        }
-                        i += 1;
-                    }
-                    // Incomplete block - no closing fence found
-                    if !found_close {
-                        code_block_ranges.push((start, None));
-                    }
-                } else {
-                    i += 1;
-                }
-            }
-        }
+        // Extract lines fresh on each render (tree-sitter walking is fast)
+        let lines = extract_lines(&self.buffer);
+        let code_block_ranges = Self::compute_code_block_ranges(&lines);
+        let cursor_line = self.buffer.byte_to_line(cursor_offset);
+        let num_lines = lines.len();
 
         // Helper: check if cursor is inside a code block (by line index)
-        let cursor_line = self.buffer.byte_to_line(cursor_offset);
         let cursor_in_code_block_range = |line_idx: usize| -> bool {
             for (start, end) in &code_block_ranges {
-                let block_end = end.unwrap_or(lines.len().saturating_sub(1));
+                let block_end = end.unwrap_or(num_lines.saturating_sub(1));
                 // Check if this fence line belongs to a block that contains the cursor
                 if line_idx >= *start
                     && line_idx <= block_end
@@ -776,6 +750,10 @@ impl Render for Editor {
 
         // Build line views with click and drag handling
         // Skip fence lines when cursor is outside the code block (they're hidden)
+        // Track child index for cursor line (accounting for filtered lines and top spacer)
+        let mut cursor_child_index: Option<usize> = None;
+        let mut child_index = 1; // Start at 1 to account for top_spacer
+
         let line_views: Vec<_> = lines
             .iter()
             .enumerate()
@@ -789,27 +767,25 @@ impl Render for Editor {
                     return None;
                 }
 
-                let inline_styles = extract_inline_styles(&self.buffer, line);
-
-                // Filter pre-computed highlights to those overlapping this line
-                let code_highlights: Vec<_> = code_block_highlights
-                    .iter()
-                    .filter(|(span, _)| {
-                        // Include highlights that overlap with this line's range
-                        span.range.start < line.range.end && span.range.end > line.range.start
-                    })
-                    .cloned()
-                    .collect();
+                // Track the child index for the cursor line
+                if line_idx == cursor_line {
+                    cursor_child_index = Some(child_index);
+                }
+                child_index += 1;
 
                 // Show block markers for fence lines when cursor is in the code block
                 let show_block_markers = is_fence && cursor_in_block;
 
-                // Attach scroll anchor to the line containing the cursor
-                let line_scroll_anchor = if line_idx == cursor_line {
-                    Some(self.scroll_anchor.clone())
-                } else {
-                    None
-                };
+                // Extract inline styles for this line
+                let inline_styles = extract_inline_styles(&self.buffer, line);
+
+                // Get code highlights for this line's range
+                let code_highlights: Vec<_> = self
+                    .buffer
+                    .code_highlights_for_range(line.range.clone())
+                    .iter()
+                    .map(|span| (span.clone(), theme.color_for_highlight(span.highlight_id)))
+                    .collect();
 
                 let line_view = LineView::new(
                     line,
@@ -822,7 +798,6 @@ impl Render for Editor {
                     code_highlights,
                     show_block_markers,
                 )
-                .with_scroll_anchor(line_scroll_anchor)
                 .on_click(on_click.clone())
                 .on_drag(on_drag.clone())
                 .on_checkbox(on_checkbox.clone());
@@ -830,6 +805,19 @@ impl Render for Editor {
                 Some(line_view)
             })
             .collect();
+
+        // Check if cursor moved to a different child
+        let cursor_moved = self.cursor_child_index != cursor_child_index;
+        self.cursor_child_index = cursor_child_index;
+
+        // If cursor moved, request scroll on next render (when bounds will be available)
+        if cursor_moved {
+            self.request_scroll_to_cursor();
+        }
+
+        // Perform any pending scroll (uses bounds from previous layout)
+        let margin = self.config.padding_y.to_pixels(window.rem_size());
+        self.perform_pending_scroll(margin);
 
         // Create spacer elements for vertical padding (these scroll with content)
         let top_spacer = div().h(self.config.padding_y);

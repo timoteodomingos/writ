@@ -4,7 +4,19 @@ use std::str::FromStr;
 use tree_sitter::{InputEdit, Point};
 use undo::Record;
 
+use crate::highlight::{HighlightSpan, Highlighter};
+use crate::lines::LineKind;
 use crate::parser::{MarkdownParser, MarkdownTree};
+
+/// Cached code block highlights.
+/// Maps (block_start_byte, block_end_byte) -> Vec<HighlightSpan>
+#[derive(Clone, Debug, Default)]
+struct CodeHighlightCache {
+    /// The highlights, keyed by code block byte range
+    highlights: Vec<(Range<usize>, Vec<HighlightSpan>)>,
+    /// Whether the cache is valid (invalidated on any edit)
+    valid: bool,
+}
 
 /// A text edit operation that can be undone/redone.
 #[derive(Clone, Debug)]
@@ -45,13 +57,11 @@ impl undo::Edit for TextEdit {
     type Output = usize; // Returns cursor position
 
     fn edit(&mut self, target: &mut BufferContent) -> Self::Output {
-        // Apply: delete `deleted`, insert `inserted`
         target.apply_edit(self.offset, &self.deleted, &self.inserted);
         self.cursor_after
     }
 
     fn undo(&mut self, target: &mut BufferContent) -> Self::Output {
-        // Reverse: delete `inserted`, insert `deleted`
         target.apply_edit(self.offset, &self.inserted, &self.deleted);
         self.cursor_before
     }
@@ -65,6 +75,10 @@ pub struct BufferContent {
     parser: MarkdownParser,
     /// The current parse tree (block + inline trees)
     tree: Option<MarkdownTree>,
+    /// Syntax highlighter for code blocks
+    highlighter: Highlighter,
+    /// Cached code block highlights (invalidated on edit)
+    code_highlight_cache: CodeHighlightCache,
 }
 
 impl BufferContent {
@@ -73,12 +87,13 @@ impl BufferContent {
         Self {
             text: Rope::new(),
             parser: MarkdownParser::default(),
+            highlighter: Highlighter::new(),
             tree: None,
+            code_highlight_cache: CodeHighlightCache::default(),
         }
     }
 
     /// Apply an edit: delete `to_delete` worth of content at offset, then insert `to_insert`.
-    /// This handles both rope modification AND tree-sitter incremental parsing.
     fn apply_edit(&mut self, offset: usize, to_delete: &str, to_insert: &str) {
         let delete_len = to_delete.len();
         let insert_len = to_insert.len();
@@ -91,7 +106,6 @@ impl BufferContent {
             start_point
         };
 
-        // Compute new end position after the edit
         let new_end_position = if insert_len > 0 {
             self.compute_new_end_point(start_point, to_insert)
         } else {
@@ -125,11 +139,14 @@ impl BufferContent {
         let text = self.text.to_string();
         self.tree = self.parser.parse(text.as_bytes(), self.tree.as_ref());
 
-        // Normalize ordered list numbering (silent, not through undo)
+        // Normalize ordered list numbering
         self.normalize_ordered_lists();
+
+        // Invalidate code highlight cache
+        self.code_highlight_cache.valid = false;
     }
 
-    /// Convert a byte offset to a tree-sitter Point (row, column).
+    /// Convert a byte offset to a tree-sitter Point.
     fn byte_to_point(&self, byte_offset: usize) -> Point {
         let byte_offset = byte_offset.min(self.text.len_bytes());
         let char_offset = self.text.byte_to_char(byte_offset);
@@ -140,7 +157,7 @@ impl BufferContent {
         Point::new(line, column)
     }
 
-    /// Compute the end point after inserting text at a given start point.
+    /// Compute the end point after inserting text.
     fn compute_new_end_point(&self, start: Point, text: &str) -> Point {
         let newlines: Vec<_> = text.match_indices('\n').collect();
         if newlines.is_empty() {
@@ -226,76 +243,137 @@ impl BufferContent {
         self.text.slice(char_start..char_end).to_string()
     }
 
-    /// Normalize ordered list numbering throughout the buffer.
-    ///
-    /// This ensures all ordered list items have correct sequential numbers.
-    /// Each nested list numbers independently starting from 1.
-    /// This is called after every edit and on initial load.
-    ///
-    /// Changes are made directly to the rope (not through undo history).
+    /// Get code highlights for a specific byte range.
+    /// Returns highlights that overlap with the given range.
+    pub fn code_highlights_for_range(&mut self, range: Range<usize>) -> Vec<HighlightSpan> {
+        // Rebuild cache if invalid
+        if !self.code_highlight_cache.valid {
+            self.rebuild_code_highlight_cache();
+        }
+
+        // Find highlights that overlap with the range
+        let mut result = Vec::new();
+        for (block_range, highlights) in &self.code_highlight_cache.highlights {
+            if range.start < block_range.end && range.end > block_range.start {
+                for span in highlights {
+                    if span.range.start < range.end && span.range.end > range.start {
+                        result.push(span.clone());
+                    }
+                }
+            }
+        }
+        result
+    }
+
+    /// Rebuild the code highlight cache by parsing all code blocks.
+    fn rebuild_code_highlight_cache(&mut self) {
+        self.code_highlight_cache.highlights.clear();
+
+        let text = self.text.to_string();
+        let lines = crate::lines::extract_lines_from_parts(&text, self.tree.as_ref());
+
+        let mut i = 0;
+        while i < lines.len() {
+            if let LineKind::CodeBlock {
+                language: Some(lang),
+                is_fence: true,
+            } = &lines[i].kind
+            {
+                let lang = lang.clone();
+                let block_start = lines[i].range.start;
+                i += 1;
+
+                // Collect code content
+                let mut code_content = String::new();
+                let mut content_start_offset: Option<usize> = None;
+                let mut block_end = block_start;
+
+                while i < lines.len() {
+                    match &lines[i].kind {
+                        LineKind::CodeBlock { is_fence: true, .. } => {
+                            block_end = lines[i].range.end;
+                            i += 1;
+                            break;
+                        }
+                        LineKind::CodeBlock {
+                            is_fence: false, ..
+                        } => {
+                            if content_start_offset.is_none() {
+                                content_start_offset = Some(lines[i].range.start);
+                            }
+                            code_content.push_str(&text[lines[i].range.clone()]);
+                            code_content.push('\n');
+                            block_end = lines[i].range.end;
+                            i += 1;
+                        }
+                        _ => break,
+                    }
+                }
+
+                // Highlight and store
+                if let Some(start_offset) = content_start_offset {
+                    let mut spans = self.highlighter.highlight(&code_content, &lang);
+                    for span in &mut spans {
+                        span.range.start += start_offset;
+                        span.range.end += start_offset;
+                    }
+                    self.code_highlight_cache
+                        .highlights
+                        .push((block_start..block_end, spans));
+                }
+            } else {
+                i += 1;
+            }
+        }
+
+        self.code_highlight_cache.valid = true;
+    }
+
+    /// Normalize ordered list numbering.
     pub fn normalize_ordered_lists(&mut self) {
         let Some(tree) = &self.tree else { return };
 
-        // Collect all list_item nodes that are part of ordered lists
-        // We need to collect them first because we'll be modifying the buffer
         let corrections = self.find_ordered_list_corrections(tree.block_tree().root_node());
 
         if corrections.is_empty() {
             return;
         }
 
-        // Apply corrections in reverse order (from end to start) to preserve byte offsets
         for (marker_range, correct_number) in corrections.into_iter().rev() {
             let new_marker = format!("{}. ", correct_number);
-            let old_len = marker_range.end - marker_range.start;
-            let new_len = new_marker.len();
 
-            // Delete old marker
             let char_start = self.text.byte_to_char(marker_range.start);
             let char_end = self.text.byte_to_char(marker_range.end);
             self.text.remove(char_start..char_end);
 
-            // Insert new marker
             let char_offset = self.text.byte_to_char(marker_range.start);
             self.text.insert(char_offset, &new_marker);
-
-            // Note: We could do incremental tree-sitter edits here, but since
-            // normalization typically changes few items, a full reparse is simpler.
-            // We'll reparse once at the end if any changes were made.
-            let _ = (old_len, new_len); // silence unused warnings
         }
 
-        // Reparse after all corrections
         let text = self.text.to_string();
         self.tree = self.parser.parse(text.as_bytes(), None);
     }
 
-    /// Find all ordered list items that need number correction.
-    /// Returns Vec<(marker_byte_range, correct_number)>
     fn find_ordered_list_corrections(&self, root: tree_sitter::Node) -> Vec<(Range<usize>, usize)> {
         let mut corrections = Vec::new();
         self.collect_list_corrections(&root, &mut corrections);
         corrections
     }
 
-    /// Recursively collect corrections needed for ordered lists.
     fn collect_list_corrections(
         &self,
         node: &tree_sitter::Node,
         corrections: &mut Vec<(Range<usize>, usize)>,
     ) {
         if node.kind() == "list" {
-            // Check if this is an ordered list by looking at the first item's marker
             let is_ordered = self.is_ordered_list(node);
 
             if is_ordered {
-                // Number items sequentially within this list
                 let mut item_number = 1;
                 for i in 0..node.child_count() {
                     if let Some(child) = node.child(i as u32)
                         && child.kind() == "list_item"
                     {
-                        // Find the list_marker_decimal child
                         if let Some((marker_range, current_number)) =
                             self.extract_ordered_marker(&child)
                         {
@@ -309,7 +387,6 @@ impl BufferContent {
             }
         }
 
-        // Recurse into children to find nested lists
         for i in 0..node.child_count() {
             if let Some(child) = node.child(i as u32) {
                 self.collect_list_corrections(&child, corrections);
@@ -317,14 +394,11 @@ impl BufferContent {
         }
     }
 
-    /// Check if a list node is an ordered list.
     fn is_ordered_list(&self, list_node: &tree_sitter::Node) -> bool {
-        // Look at the first list_item's marker type
         for i in 0..list_node.child_count() {
             if let Some(child) = list_node.child(i as u32)
                 && child.kind() == "list_item"
             {
-                // Check for list_marker_decimal (ordered) vs list_marker_minus/etc (unordered)
                 for j in 0..child.child_count() {
                     if let Some(marker) = child.child(j as u32) {
                         return marker.kind().starts_with("list_marker_decimal")
@@ -336,15 +410,12 @@ impl BufferContent {
         false
     }
 
-    /// Extract the marker range and current number from an ordered list item.
-    /// Returns Some((byte_range_of_marker, current_number)) or None if not an ordered item.
     fn extract_ordered_marker(
         &self,
         list_item: &tree_sitter::Node,
     ) -> Option<(Range<usize>, usize)> {
         for i in 0..list_item.child_count() {
             if let Some(marker) = list_item.child(i as u32) {
-                // tree-sitter-md uses "list_marker_decimal" for ordered lists
                 if marker.kind().starts_with("list_marker_decimal")
                     || marker.kind() == "list_marker_dot"
                 {
@@ -353,7 +424,6 @@ impl BufferContent {
                     let text = self.text();
                     let marker_text = &text[start..end];
 
-                    // Parse the number from "N. " format
                     let number: usize = marker_text
                         .chars()
                         .take_while(|c| c.is_ascii_digit())
@@ -376,14 +446,8 @@ impl Default for BufferContent {
 }
 
 /// A text buffer backed by a rope with incremental tree-sitter parsing and undo/redo.
-///
-/// The buffer contains raw markdown text. Tree-sitter parses it into
-/// block structure (paragraphs, headings, lists) and inline structure
-/// (bold, italic, links, etc.) which we use for rendering.
 pub struct Buffer {
-    /// The actual buffer content
     content: BufferContent,
-    /// The undo/redo history record
     history: Record<TextEdit>,
 }
 
@@ -461,8 +525,12 @@ impl Buffer {
         self.content.line_byte_range(line_idx)
     }
 
+    /// Get code highlights for a byte range.
+    pub fn code_highlights_for_range(&mut self, range: Range<usize>) -> Vec<HighlightSpan> {
+        self.content.code_highlights_for_range(range)
+    }
+
     /// Insert text at a byte offset.
-    /// Returns the new cursor position.
     pub fn insert(&mut self, byte_offset: usize, text: &str, cursor_before: usize) -> usize {
         let cursor_after = byte_offset + text.len();
         let edit = TextEdit::new(
@@ -476,7 +544,6 @@ impl Buffer {
     }
 
     /// Delete a range of bytes.
-    /// Returns the new cursor position.
     pub fn delete(&mut self, byte_range: Range<usize>, cursor_before: usize) -> usize {
         let deleted = self.content.slice(byte_range.clone());
         let cursor_after = byte_range.start;
@@ -491,7 +558,6 @@ impl Buffer {
     }
 
     /// Replace a range of bytes with new text.
-    /// Returns the new cursor position.
     pub fn replace(&mut self, byte_range: Range<usize>, text: &str, cursor_before: usize) -> usize {
         let deleted = self.content.slice(byte_range.clone());
         let cursor_after = byte_range.start + text.len();
@@ -506,13 +572,11 @@ impl Buffer {
     }
 
     /// Undo the last edit.
-    /// Returns the cursor position to restore, or None if nothing to undo.
     pub fn undo(&mut self) -> Option<usize> {
         self.history.undo(&mut self.content)
     }
 
     /// Redo the last undone edit.
-    /// Returns the cursor position to restore, or None if nothing to redo.
     pub fn redo(&mut self) -> Option<usize> {
         self.history.redo(&mut self.content)
     }
@@ -542,13 +606,17 @@ impl FromStr for Buffer {
         let mut parser = MarkdownParser::default();
         let tree = parser.parse(s.as_bytes(), None);
 
-        let mut content = BufferContent { text, parser, tree };
+        let mut content = BufferContent {
+            text,
+            parser,
+            highlighter: Highlighter::new(),
+            tree,
+            code_highlight_cache: CodeHighlightCache::default(),
+        };
 
-        // Normalize ordered list numbering on load
         content.normalize_ordered_lists();
 
         let mut history = Record::new();
-        // Mark initial state as saved
         history.set_saved();
 
         Ok(Self { content, history })
@@ -607,10 +675,10 @@ mod tests {
     #[test]
     fn test_byte_to_line() {
         let buf: Buffer = "abc\ndef\nghi".parse().unwrap();
-        assert_eq!(buf.byte_to_line(0), 0); // 'a'
-        assert_eq!(buf.byte_to_line(3), 0); // '\n' at end of line 0
-        assert_eq!(buf.byte_to_line(4), 1); // 'd'
-        assert_eq!(buf.byte_to_line(8), 2); // 'g'
+        assert_eq!(buf.byte_to_line(0), 0);
+        assert_eq!(buf.byte_to_line(3), 0);
+        assert_eq!(buf.byte_to_line(4), 1);
+        assert_eq!(buf.byte_to_line(8), 2);
     }
 
     #[test]
@@ -627,7 +695,6 @@ mod tests {
         buf.insert(7, " World", 7);
         let tree2 = buf.tree().map(|t| t.block_tree().root_node().to_sexp());
 
-        // Trees should be different after edit
         assert_ne!(tree1, tree2);
     }
 
@@ -647,10 +714,9 @@ mod tests {
         let mut buf: Buffer = "hello".parse().unwrap();
         buf.insert(5, " world", 5);
         buf.undo();
-        assert_eq!(buf.text(), "hello");
 
         let cursor = buf.redo();
-        assert_eq!(cursor, Some(11)); // cursor_after from insert
+        assert_eq!(cursor, Some(11));
         assert_eq!(buf.text(), "hello world");
     }
 
@@ -684,34 +750,30 @@ mod tests {
     fn test_dirty_after_undo_to_save_point() {
         let mut buf: Buffer = "hello".parse().unwrap();
         buf.insert(5, " world", 5);
-        buf.mark_clean(); // Saved at "hello world"
+        buf.mark_clean();
         assert!(!buf.is_dirty());
 
         buf.insert(11, "!", 11);
         assert!(buf.is_dirty());
 
-        // Undo back to save point
         buf.undo();
-        assert!(!buf.is_dirty()); // Should be clean again
+        assert!(!buf.is_dirty());
     }
 
     #[test]
     fn test_dirty_save_point_unreachable() {
         let mut buf: Buffer = "hello".parse().unwrap();
         buf.insert(5, " world", 5);
-        buf.mark_clean(); // Saved at "hello world"
+        buf.mark_clean();
 
-        // Undo past save point
         buf.undo();
         assert!(buf.is_dirty());
 
-        // New edit makes save point unreachable
         buf.insert(5, " rust", 5);
         assert!(buf.is_dirty());
 
-        // Undo doesn't get back to "hello world" save point
         buf.undo();
-        assert!(buf.is_dirty()); // Still dirty because save point is gone
+        assert!(buf.is_dirty());
     }
 
     #[test]
@@ -737,32 +799,21 @@ mod tests {
         assert_eq!(buf.text(), "abcd");
     }
 
-    // ========== ORDERED LIST NORMALIZATION TESTS ==========
-
     #[test]
     fn test_ordered_list_normalization_on_load() {
-        // Load a file with wrong numbering - should be fixed
         let buf: Buffer = "1. First\n5. Second\n9. Third\n".parse().unwrap();
         assert_eq!(buf.text(), "1. First\n2. Second\n3. Third\n");
     }
 
     #[test]
     fn test_ordered_list_correct_numbers_unchanged() {
-        // Already correct numbering should remain unchanged
         let buf: Buffer = "1. First\n2. Second\n3. Third\n".parse().unwrap();
         assert_eq!(buf.text(), "1. First\n2. Second\n3. Third\n");
     }
 
     #[test]
     fn test_unordered_list_unchanged() {
-        // Unordered lists should not be affected
         let buf: Buffer = "- First\n- Second\n- Third\n".parse().unwrap();
         assert_eq!(buf.text(), "- First\n- Second\n- Third\n");
     }
-
-    // Note: tree-sitter-md doesn't recognize nested ordered lists as separate list nodes.
-    // Indented "5. text" is parsed as paragraph continuation, not a nested list item.
-    // This is a tree-sitter-md grammar limitation. Nested unordered lists work fine
-    // because "-" is unambiguously a list marker, but "5." can look like a sentence.
-    // Our normalization works correctly for what tree-sitter recognizes as ordered lists.
 }

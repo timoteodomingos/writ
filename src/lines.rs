@@ -367,9 +367,11 @@ fn compute_checkbox(markers: &[MarkerInfo]) -> Option<bool> {
 
 /// Extract line information from a buffer using tree-sitter.
 pub fn extract_lines(buffer: &Buffer) -> Vec<LineInfo> {
-    let text = buffer.text();
-    let tree = buffer.tree();
+    extract_lines_from_parts(&buffer.text(), buffer.tree())
+}
 
+/// Extract lines from raw text and tree (used internally by BufferContent).
+pub fn extract_lines_from_parts(text: &str, tree: Option<&MarkdownTree>) -> Vec<LineInfo> {
     // First, split the buffer into lines
     let mut lines = Vec::new();
     let mut line_start = 0;
@@ -438,11 +440,19 @@ pub fn extract_lines(buffer: &Buffer) -> Vec<LineInfo> {
 
 /// Extract inline styles (bold, italic, code, etc.) for a specific line.
 pub fn extract_inline_styles(buffer: &Buffer, line: &LineInfo) -> Vec<StyledRegion> {
-    let Some(tree) = buffer.tree() else {
+    extract_inline_styles_from_parts(&buffer.text(), buffer.tree(), line)
+}
+
+/// Extract inline styles from raw text and tree (used internally by BufferContent).
+pub fn extract_inline_styles_from_parts(
+    text: &str,
+    tree: Option<&MarkdownTree>,
+    line: &LineInfo,
+) -> Vec<StyledRegion> {
+    let Some(tree) = tree else {
         return Vec::new();
     };
 
-    let text = buffer.text();
     let mut styles = Vec::new();
 
     // Find the inline node that covers this line's content

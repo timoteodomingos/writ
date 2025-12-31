@@ -561,11 +561,18 @@ impl<'a> LineView<'a> {
         (display_text, runs)
     }
 
-    /// Compute the visual cursor position within the displayed text.
     /// Calculate hidden marker bytes before a given buffer offset.
+    /// Markers are only hidden if cursor is NOT inside that region.
     fn hidden_bytes_before(&self, offset: usize, content_range: &Range<usize>) -> usize {
         let mut hidden = 0usize;
         for region in &self.inline_styles {
+            // If cursor is inside this region, its markers are visible (not hidden)
+            let cursor_inside = self.cursor_offset >= region.full_range.start
+                && self.cursor_offset <= region.full_range.end;
+            if cursor_inside {
+                continue;
+            }
+
             // Opening marker
             let opening_start = region.full_range.start.max(content_range.start);
             let opening_end = region.content_range.start.min(content_range.end);

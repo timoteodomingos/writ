@@ -89,7 +89,6 @@ impl Render for Root {
                 .flex_col()
                 .size_full()
                 .overflow_hidden()
-                .bg(self.theme.background)
                 .child(self.editor.clone()),
         )
     }
