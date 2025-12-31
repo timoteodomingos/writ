@@ -1,21 +1,14 @@
-//! Demo mode: scripted input automation for screen recording.
-
 use std::time::Duration;
 
 use crate::editor::{Direction, EditorAction};
 
-/// A demo step: either an editor action or a wait.
 #[derive(Clone, Debug)]
 pub enum DemoStep {
-    /// Execute an editor action.
     Action(EditorAction),
-    /// Type a string (expands to multiple Type actions).
     Type(String),
-    /// Wait for a duration (milliseconds).
     Wait(u64),
 }
 
-/// The demo script showing off writ's features.
 pub fn demo_script() -> Vec<DemoStep> {
     use DemoStep::*;
     use Direction::*;
@@ -155,11 +148,8 @@ pub fn demo_script() -> Vec<DemoStep> {
     ]
 }
 
-/// Timing configuration for the demo.
 pub struct DemoTiming {
-    /// Delay between each character when typing.
     pub char_delay: Duration,
-    /// Delay after special keys (enter, etc).
     pub key_delay: Duration,
 }
 

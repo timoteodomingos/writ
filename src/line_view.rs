@@ -1,5 +1,3 @@
-//! Line view component for rendering individual lines.
-
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
@@ -14,20 +12,11 @@ use crate::highlight::HighlightSpan;
 use crate::lines::{LineInfo, LineKind};
 use crate::render::StyledRegion;
 
-/// Callback type for click events - receives the buffer offset where the click occurred,
-/// whether shift was held (for extending selection), and the click count (1=single, 2=double, 3=triple).
 pub type ClickCallback = Rc<dyn Fn(usize, bool, usize, &mut Window, &mut App)>;
-
-/// Callback type for drag events - receives the buffer offset during mouse drag.
 pub type DragCallback = Rc<dyn Fn(usize, &mut Window, &mut App)>;
-
-/// Callback type for checkbox toggle - receives the line number where checkbox was clicked.
 pub type CheckboxCallback = Rc<dyn Fn(usize, &mut Window, &mut App)>;
-
-/// Callback type for link hover state changes - receives true when hovering a link with Ctrl, false otherwise.
 pub type LinkHoverCallback = Rc<dyn Fn(bool, &mut Window, &mut App)>;
 
-/// Theme colors and fonts for rendering lines.
 #[derive(Clone)]
 pub struct LineViewTheme {
     pub text_color: Rgba,
@@ -42,46 +31,29 @@ pub struct LineViewTheme {
     pub code_font: Font,
 }
 
-/// Represents a resolved image source for rendering.
 enum ImageSource {
     Url(String),
     Path(PathBuf),
 }
 
-/// A view component for rendering a single line.
 pub struct LineView<'a> {
-    /// The line info
     line: &'a LineInfo,
-    /// The full buffer text (needed for inline styles and content extraction)
     text: &'a str,
-    /// Current cursor position in the buffer
     cursor_offset: usize,
-    /// Inline styles for this line (bold, italic, code, etc.)
     inline_styles: Vec<StyledRegion>,
-    /// Theme colors and fonts
     theme: LineViewTheme,
-    /// Selection range in buffer offsets (None if collapsed/no selection)
     selection_range: Option<Range<usize>>,
-    /// Base path for resolving relative image paths (directory containing the markdown file)
     base_path: Option<PathBuf>,
-    /// Syntax highlighting spans for code blocks (with pre-computed colors)
     code_highlights: Vec<(HighlightSpan, Rgba)>,
-    /// Callback when line is clicked
     on_click: Option<ClickCallback>,
-    /// Callback when mouse is dragged over line (with button pressed)
     on_drag: Option<DragCallback>,
-    /// Callback when checkbox is clicked (for task list items)
     on_checkbox: Option<CheckboxCallback>,
-    /// Callback when link hover state changes (hovering link with Ctrl)
     on_link_hover: Option<LinkHoverCallback>,
-    /// Whether to force showing block markers (e.g., cursor is in code block)
     show_block_markers: bool,
-    /// Scroll anchor for cursor line (attached to line containing cursor)
     scroll_anchor: Option<ScrollAnchor>,
 }
 
 impl<'a> LineView<'a> {
-    /// Create a new line view.
     pub fn new(
         line: &'a LineInfo,
         text: &'a str,
@@ -111,41 +83,31 @@ impl<'a> LineView<'a> {
         }
     }
 
-    /// Set the scroll anchor for this line (used for cursor line).
     pub fn with_scroll_anchor(mut self, anchor: Option<ScrollAnchor>) -> Self {
         self.scroll_anchor = anchor;
         self
     }
 
-    /// Set the click callback for this line.
     pub fn on_click(mut self, callback: ClickCallback) -> Self {
         self.on_click = Some(callback);
         self
     }
 
-    /// Set the drag callback for this line.
     pub fn on_drag(mut self, callback: DragCallback) -> Self {
         self.on_drag = Some(callback);
         self
     }
 
-    /// Set the checkbox toggle callback for this line.
     pub fn on_checkbox(mut self, callback: CheckboxCallback) -> Self {
         self.on_checkbox = Some(callback);
         self
     }
 
-    /// Set the link hover callback for this line.
     pub fn on_link_hover(mut self, callback: LinkHoverCallback) -> Self {
         self.on_link_hover = Some(callback);
         self
     }
 
-    /// Resolve an image path to an absolute path or URL.
-    ///
-    /// - URLs (http://, https://) are returned as-is
-    /// - Absolute paths are returned as-is
-    /// - Relative paths are resolved against the base_path (markdown file's directory)
     fn resolve_image_source(&self, image_path: &str) -> ImageSource {
         // Check if it's a URL
         if image_path.starts_with("http://") || image_path.starts_with("https://") {
@@ -169,7 +131,6 @@ impl<'a> LineView<'a> {
         ImageSource::Path(path.to_path_buf())
     }
 
-    /// Check if the cursor is on this line.
     fn cursor_on_line(&self) -> bool {
         let range = &self.line.range;
         // Cursor is on this line if it's within the range, or at the end for empty lines
@@ -181,7 +142,6 @@ impl<'a> LineView<'a> {
         }
     }
 
-    /// Check if selection intersects this line.
     fn selection_on_line(&self) -> bool {
         if let Some(ref sel) = self.selection_range {
             let line_range = &self.line.range;
@@ -192,12 +152,10 @@ impl<'a> LineView<'a> {
         }
     }
 
-    /// Check if we should show raw markers (cursor/selection on line, or force show).
     fn should_show_raw_markers(&self) -> bool {
         self.cursor_on_line() || self.selection_on_line() || self.show_block_markers
     }
 
-    /// Get the content range, accounting for hidden block markers (like # for headings).
     fn content_range(&self) -> Range<usize> {
         let range = &self.line.range;
 
@@ -217,13 +175,10 @@ impl<'a> LineView<'a> {
         }
     }
 
-    /// Check if this line should show a border (has blockquote layer).
     fn should_show_border(&self) -> bool {
         !self.should_show_raw_markers() && self.line.has_border
     }
 
-    /// Get checkbox state if this line shows a clickable checkbox (when cursor is away).
-    /// Returns Some(checked) where checked is true for ☑, false for ☐.
     fn checkbox_state(&self) -> Option<bool> {
         // Only show checkbox when not showing raw markers
         if self.should_show_raw_markers() {
@@ -232,9 +187,6 @@ impl<'a> LineView<'a> {
         self.line.checkbox
     }
 
-    /// Get the non-checkbox part of the marker substitution.
-    /// For checkbox lines, this returns None (checkbox rendered separately).
-    /// For other lines, returns the full substitution.
     fn get_non_checkbox_substitution(&self) -> Option<&str> {
         // Only substitute when not showing raw markers
         if self.should_show_raw_markers() {
@@ -251,8 +203,6 @@ impl<'a> LineView<'a> {
         }
     }
 
-    /// Get leading whitespace (indentation before the first marker).
-    /// Returns empty string if showing raw markers.
     fn leading_whitespace(&self) -> &str {
         if self.should_show_raw_markers() {
             ""
@@ -261,7 +211,6 @@ impl<'a> LineView<'a> {
         }
     }
 
-    /// Create a simple text run with the given properties.
     fn text_run(&self, len: usize, font: Font, color: Rgba) -> TextRun {
         TextRun {
             len,
@@ -273,7 +222,6 @@ impl<'a> LineView<'a> {
         }
     }
 
-    /// Get the base text font with line-level styling (bold for headings).
     fn line_font(&self) -> Font {
         if self.line.kind.is_bold() {
             Font {
@@ -285,11 +233,6 @@ impl<'a> LineView<'a> {
         }
     }
 
-    /// Get the syntax highlight color for a buffer range, if any.
-    ///
-    /// Returns the color of the most specific highlight span that contains this range.
-    /// tree-sitter-highlight produces non-overlapping spans, so we just find
-    /// the one that contains our range.
     fn get_highlight_color_for_range(&self, start: usize, end: usize) -> Option<Rgba> {
         for (span, color) in &self.code_highlights {
             // Check if this highlight span contains our range
@@ -300,8 +243,6 @@ impl<'a> LineView<'a> {
         None
     }
 
-    /// Build styled content for fence lines (``` with optional language).
-    /// Returns backticks in comment color and language in green.
     fn build_fence_content(&self) -> (String, Vec<TextRun>) {
         let line_text = &self.text[self.line.range.clone()];
         let trimmed = line_text.trim_start();
@@ -348,7 +289,6 @@ impl<'a> LineView<'a> {
         (display_text, runs)
     }
 
-    /// Build the display text and text runs with proper fonts.
     fn build_styled_content(&self) -> (String, Vec<TextRun>) {
         // Handle fence lines specially when cursor is not on them
         if self.line.kind.is_fence() && !self.should_show_raw_markers() {
@@ -577,8 +517,6 @@ impl<'a> LineView<'a> {
         (display_text, runs)
     }
 
-    /// Calculate hidden marker bytes before a given buffer offset.
-    /// Markers are only hidden if cursor is NOT inside that region.
     fn hidden_bytes_before(&self, offset: usize, content_range: &Range<usize>) -> usize {
         let mut hidden = 0usize;
         for region in &self.inline_styles {
@@ -605,7 +543,6 @@ impl<'a> LineView<'a> {
         hidden
     }
 
-    /// Compute the visual cursor position within the displayed text.
     fn compute_visual_cursor_pos(&self, display_text: &str) -> Option<usize> {
         if !self.cursor_on_line() {
             return None;
@@ -613,7 +550,6 @@ impl<'a> LineView<'a> {
         Some(self.buffer_to_visual_pos(self.cursor_offset, display_text))
     }
 
-    /// Convert a buffer offset to a visual position, accounting for hidden markers.
     fn buffer_to_visual_pos(&self, buffer_offset: usize, display_text: &str) -> usize {
         let content_range = self.content_range();
 
@@ -636,8 +572,6 @@ impl<'a> LineView<'a> {
         visual_pos.min(display_text.len())
     }
 
-    /// Compute the visual selection range for this line.
-    /// Returns None if selection doesn't intersect this line.
     fn compute_visual_selection_range(&self, display_text: &str) -> Option<Range<usize>> {
         let selection = self.selection_range.as_ref()?;
         let line_range = &self.line.range;
@@ -662,7 +596,6 @@ impl<'a> LineView<'a> {
         }
     }
 
-    /// Render the selection overlay.
     fn render_selection(
         &self,
         visual_range: Range<usize>,
@@ -743,7 +676,6 @@ impl<'a> LineView<'a> {
         .size_full()
     }
 
-    /// Render the cursor overlay.
     fn render_cursor(&self, cursor_pos: usize, text_layout: gpui::TextLayout) -> impl IntoElement {
         let cursor_color = self.theme.cursor_color;
 
@@ -787,7 +719,6 @@ impl<'a> LineView<'a> {
     }
 }
 
-/// Create a base line div with common styling (max-width, centered).
 fn line_base(line_number: usize) -> gpui::Stateful<gpui::Div> {
     div()
         .id(("line", line_number))

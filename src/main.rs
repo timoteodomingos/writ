@@ -19,7 +19,6 @@ fn load_file(file: &std::path::Path) -> String {
     std::fs::read_to_string(file).unwrap_or_default()
 }
 
-/// Run the demo script sequentially, sleeping between events.
 fn run_demo(editor: Entity<Editor>, cx: &mut gpui::App) {
     let script = demo_script();
     let timing = DemoTiming::default();

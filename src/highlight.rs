@@ -1,8 +1,3 @@
-//! Syntax highlighting for code blocks.
-//!
-//! This module provides tree-sitter based syntax highlighting for code blocks
-//! using the tree-sitter-highlight crate, which handles capture priority correctly.
-
 use std::collections::HashMap;
 use std::ops::Range;
 use std::sync::Arc;
@@ -10,8 +5,6 @@ use tree_sitter_highlight::{
     Highlight, HighlightConfiguration, HighlightEvent, Highlighter as TSHighlighter,
 };
 
-/// The highlight names we recognize, in priority order.
-/// The index in this array becomes the Highlight ID.
 pub const HIGHLIGHT_NAMES: &[&str] = &[
     "attribute",
     "boolean",
@@ -42,21 +35,16 @@ pub const HIGHLIGHT_NAMES: &[&str] = &[
     "variable.special",
 ];
 
-/// A highlighted span within a code block.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct HighlightSpan {
-    /// Byte range relative to the start of the code content
     pub range: Range<usize>,
-    /// The highlight index (index into HIGHLIGHT_NAMES)
     pub highlight_id: usize,
 }
 
-/// Configuration for a language.
 struct LanguageConfig {
     config: HighlightConfiguration,
 }
 
-/// A syntax highlighter that can highlight code in various languages.
 pub struct Highlighter {
     inner: TSHighlighter,
     languages: HashMap<String, Arc<LanguageConfig>>,
@@ -69,7 +57,6 @@ impl Default for Highlighter {
 }
 
 impl Highlighter {
-    /// Create a new highlighter with built-in language support.
     pub fn new() -> Self {
         let inner = TSHighlighter::new();
         let mut languages = HashMap::new();
@@ -111,14 +98,10 @@ impl Highlighter {
         Some(LanguageConfig { config })
     }
 
-    /// Check if a language is supported.
     pub fn supports_language(&self, lang: &str) -> bool {
         self.languages.contains_key(&lang.to_lowercase())
     }
 
-    /// Highlight code in a given language.
-    ///
-    /// Returns a list of non-overlapping highlight spans, sorted by start position.
     pub fn highlight(&mut self, code: &str, language: &str) -> Vec<HighlightSpan> {
         let lang_lower = language.to_lowercase();
         let Some(lang_config) = self.languages.get(&lang_lower) else {
@@ -170,7 +153,6 @@ impl Highlighter {
         spans
     }
 
-    /// Get the capture name for a highlight ID.
     pub fn capture_name(highlight_id: usize) -> &'static str {
         HIGHLIGHT_NAMES
             .get(highlight_id)

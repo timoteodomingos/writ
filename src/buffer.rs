@@ -8,33 +8,22 @@ use crate::highlight::{HighlightSpan, Highlighter};
 use crate::lines::LineKind;
 use crate::parser::{MarkdownParser, MarkdownTree};
 
-/// Cached code block highlights.
-/// Maps (block_start_byte, block_end_byte) -> Vec<HighlightSpan>
 #[derive(Clone, Debug, Default)]
 struct CodeHighlightCache {
-    /// The highlights, keyed by code block byte range
     highlights: Vec<(Range<usize>, Vec<HighlightSpan>)>,
-    /// Whether the cache is valid (invalidated on any edit)
     valid: bool,
 }
 
-/// A text edit operation that can be undone/redone.
 #[derive(Clone, Debug)]
 pub struct TextEdit {
-    /// Byte offset where the edit occurs
     offset: usize,
-    /// Text that was deleted (empty for pure insertions)
     deleted: String,
-    /// Text that was inserted (empty for pure deletions)
     inserted: String,
-    /// Cursor position before the edit
     cursor_before: usize,
-    /// Cursor position after the edit
     cursor_after: usize,
 }
 
 impl TextEdit {
-    /// Create a new text edit.
     pub fn new(
         offset: usize,
         deleted: String,
@@ -67,22 +56,15 @@ impl undo::Edit for TextEdit {
     }
 }
 
-/// The actual buffer content that TextEdit operates on.
 pub struct BufferContent {
-    /// The raw text content
     text: Rope,
-    /// The markdown parser (reused for incremental parsing)
     parser: MarkdownParser,
-    /// The current parse tree (block + inline trees)
     tree: Option<MarkdownTree>,
-    /// Syntax highlighter for code blocks
     highlighter: Highlighter,
-    /// Cached code block highlights (invalidated on edit)
     code_highlight_cache: CodeHighlightCache,
 }
 
 impl BufferContent {
-    /// Create a new empty buffer content.
     pub fn new() -> Self {
         Self {
             text: Rope::new(),
@@ -93,7 +75,6 @@ impl BufferContent {
         }
     }
 
-    /// Apply an edit: delete `to_delete` worth of content at offset, then insert `to_insert`.
     fn apply_edit(&mut self, offset: usize, to_delete: &str, to_insert: &str) {
         let delete_len = to_delete.len();
         let insert_len = to_insert.len();
@@ -146,7 +127,6 @@ impl BufferContent {
         self.code_highlight_cache.valid = false;
     }
 
-    /// Convert a byte offset to a tree-sitter Point.
     fn byte_to_point(&self, byte_offset: usize) -> Point {
         let byte_offset = byte_offset.min(self.text.len_bytes());
         let char_offset = self.text.byte_to_char(byte_offset);
@@ -157,7 +137,6 @@ impl BufferContent {
         Point::new(line, column)
     }
 
-    /// Compute the end point after inserting text.
     fn compute_new_end_point(&self, start: Point, text: &str) -> Point {
         let newlines: Vec<_> = text.match_indices('\n').collect();
         if newlines.is_empty() {
@@ -169,61 +148,50 @@ impl BufferContent {
         }
     }
 
-    /// Get the full text as a String.
     pub fn text(&self) -> String {
         self.text.to_string()
     }
 
-    /// Get the length in bytes.
     pub fn len_bytes(&self) -> usize {
         self.text.len_bytes()
     }
 
-    /// Get the length in characters.
     pub fn len_chars(&self) -> usize {
         self.text.len_chars()
     }
 
-    /// Check if the buffer is empty.
     pub fn is_empty(&self) -> bool {
         self.text.len_bytes() == 0
     }
 
-    /// Get a reference to the underlying rope.
     pub fn rope(&self) -> &Rope {
         &self.text
     }
 
-    /// Get the current parse tree.
     pub fn tree(&self) -> Option<&MarkdownTree> {
         self.tree.as_ref()
     }
 
-    /// Get the line number (0-indexed) for a byte offset.
     pub fn byte_to_line(&self, byte_offset: usize) -> usize {
         let char_offset = self.text.byte_to_char(byte_offset);
         self.text.char_to_line(char_offset)
     }
 
-    /// Get the byte offset for the start of a line.
     pub fn line_to_byte(&self, line: usize) -> usize {
         let char_offset = self.text.line_to_char(line);
         self.text.char_to_byte(char_offset)
     }
 
-    /// Get the number of lines.
     pub fn line_count(&self) -> usize {
         self.text.len_lines()
     }
 
-    /// Get a line's text (without trailing newline).
     pub fn line(&self, line_idx: usize) -> String {
         let line = self.text.line(line_idx);
         let s = line.to_string();
         s.trim_end_matches('\n').to_string()
     }
 
-    /// Get the byte range for a line.
     pub fn line_byte_range(&self, line_idx: usize) -> Range<usize> {
         let start_char = self.text.line_to_char(line_idx);
         let end_char = if line_idx + 1 < self.text.len_lines() {
@@ -236,15 +204,12 @@ impl BufferContent {
         start_byte..end_byte
     }
 
-    /// Get the text in a byte range.
     fn slice(&self, range: Range<usize>) -> String {
         let char_start = self.text.byte_to_char(range.start);
         let char_end = self.text.byte_to_char(range.end);
         self.text.slice(char_start..char_end).to_string()
     }
 
-    /// Get code highlights for a specific byte range.
-    /// Returns highlights that overlap with the given range.
     pub fn code_highlights_for_range(&mut self, range: Range<usize>) -> Vec<HighlightSpan> {
         // Rebuild cache if invalid
         if !self.code_highlight_cache.valid {
@@ -265,7 +230,6 @@ impl BufferContent {
         result
     }
 
-    /// Rebuild the code highlight cache by parsing all code blocks.
     fn rebuild_code_highlight_cache(&mut self) {
         self.code_highlight_cache.highlights.clear();
 
@@ -329,7 +293,6 @@ impl BufferContent {
         self.code_highlight_cache.valid = true;
     }
 
-    /// Normalize ordered list numbering.
     pub fn normalize_ordered_lists(&mut self) {
         let Some(tree) = &self.tree else { return };
 
@@ -442,14 +405,12 @@ impl Default for BufferContent {
     }
 }
 
-/// A text buffer backed by a rope with incremental tree-sitter parsing and undo/redo.
 pub struct Buffer {
     content: BufferContent,
     history: Record<TextEdit>,
 }
 
 impl Buffer {
-    /// Create a new empty buffer.
     pub fn new() -> Self {
         Self {
             content: BufferContent::new(),
@@ -457,77 +418,62 @@ impl Buffer {
         }
     }
 
-    /// Check if the buffer has unsaved changes.
     pub fn is_dirty(&self) -> bool {
         !self.history.is_saved()
     }
 
-    /// Mark the buffer as clean (after saving).
     pub fn mark_clean(&mut self) {
         self.history.set_saved();
     }
 
-    /// Get the full text as a String.
     pub fn text(&self) -> String {
         self.content.text()
     }
 
-    /// Get the length in bytes.
     pub fn len_bytes(&self) -> usize {
         self.content.len_bytes()
     }
 
-    /// Get the length in characters.
     pub fn len_chars(&self) -> usize {
         self.content.len_chars()
     }
 
-    /// Check if the buffer is empty.
     pub fn is_empty(&self) -> bool {
         self.content.is_empty()
     }
 
-    /// Get a reference to the underlying rope.
     pub fn rope(&self) -> &Rope {
         self.content.rope()
     }
 
-    /// Get the current parse tree.
     pub fn tree(&self) -> Option<&MarkdownTree> {
         self.content.tree()
     }
 
-    /// Get the line number (0-indexed) for a byte offset.
     pub fn byte_to_line(&self, byte_offset: usize) -> usize {
         self.content.byte_to_line(byte_offset)
     }
 
-    /// Get the byte offset for the start of a line.
     pub fn line_to_byte(&self, line: usize) -> usize {
         self.content.line_to_byte(line)
     }
 
-    /// Get the number of lines.
     pub fn line_count(&self) -> usize {
         self.content.line_count()
     }
 
-    /// Get a line's text (without trailing newline).
     pub fn line(&self, line_idx: usize) -> String {
         self.content.line(line_idx)
     }
 
-    /// Get the byte range for a line.
     pub fn line_byte_range(&self, line_idx: usize) -> Range<usize> {
         self.content.line_byte_range(line_idx)
     }
 
-    /// Get code highlights for a byte range.
     pub fn code_highlights_for_range(&mut self, range: Range<usize>) -> Vec<HighlightSpan> {
         self.content.code_highlights_for_range(range)
     }
 
-    /// Insert text at a byte offset.
     pub fn insert(&mut self, byte_offset: usize, text: &str, cursor_before: usize) -> usize {
         let cursor_after = byte_offset + text.len();
         let edit = TextEdit::new(
@@ -540,7 +486,6 @@ impl Buffer {
         self.history.edit(&mut self.content, edit)
     }
 
-    /// Delete a range of bytes.
     pub fn delete(&mut self, byte_range: Range<usize>, cursor_before: usize) -> usize {
         let deleted = self.content.slice(byte_range.clone());
         let cursor_after = byte_range.start;
@@ -554,7 +499,6 @@ impl Buffer {
         self.history.edit(&mut self.content, edit)
     }
 
-    /// Replace a range of bytes with new text.
     pub fn replace(&mut self, byte_range: Range<usize>, text: &str, cursor_before: usize) -> usize {
         let deleted = self.content.slice(byte_range.clone());
         let cursor_after = byte_range.start + text.len();
@@ -568,22 +512,18 @@ impl Buffer {
         self.history.edit(&mut self.content, edit)
     }
 
-    /// Undo the last edit.
     pub fn undo(&mut self) -> Option<usize> {
         self.history.undo(&mut self.content)
     }
 
-    /// Redo the last undone edit.
     pub fn redo(&mut self) -> Option<usize> {
         self.history.redo(&mut self.content)
     }
 
-    /// Check if undo is available.
     pub fn can_undo(&self) -> bool {
         self.history.can_undo()
     }
 
-    /// Check if redo is available.
     pub fn can_redo(&self) -> bool {
         self.history.can_redo()
     }

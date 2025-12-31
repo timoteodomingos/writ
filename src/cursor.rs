@@ -2,39 +2,32 @@ use std::ops::Range;
 
 use crate::buffer::Buffer;
 
-/// A cursor position in the buffer, represented as a byte offset.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct Cursor {
-    /// Byte offset in the buffer
     pub offset: usize,
 }
 
 impl Cursor {
-    /// Create a new cursor at the given byte offset.
     pub fn new(offset: usize) -> Self {
         Self { offset }
     }
 
-    /// Create a cursor at the start of the buffer.
     pub fn start() -> Self {
         Self { offset: 0 }
     }
 
-    /// Create a cursor at the end of the buffer.
     pub fn end(buffer: &Buffer) -> Self {
         Self {
             offset: buffer.len_bytes(),
         }
     }
 
-    /// Clamp the cursor to valid buffer bounds.
     pub fn clamp(&self, buffer: &Buffer) -> Self {
         Self {
             offset: self.offset.min(buffer.len_bytes()),
         }
     }
 
-    /// Move cursor left by one character.
     pub fn move_left(&self, buffer: &Buffer) -> Self {
         if self.offset == 0 {
             return *self;
@@ -50,7 +43,6 @@ impl Cursor {
         Self { offset: new_offset }
     }
 
-    /// Move cursor right by one character.
     pub fn move_right(&self, buffer: &Buffer) -> Self {
         let len = buffer.len_bytes();
         if self.offset >= len {
@@ -67,7 +59,6 @@ impl Cursor {
         Self { offset: new_offset }
     }
 
-    /// Move cursor up one line, trying to maintain column position.
     pub fn move_up(&self, buffer: &Buffer) -> Self {
         let current_line = buffer.byte_to_line(self.offset);
         if current_line == 0 {
@@ -91,7 +82,6 @@ impl Cursor {
         }
     }
 
-    /// Move cursor down one line, trying to maintain column position.
     pub fn move_down(&self, buffer: &Buffer) -> Self {
         let current_line = buffer.byte_to_line(self.offset);
         let line_count = buffer.line_count();
@@ -117,7 +107,6 @@ impl Cursor {
         }
     }
 
-    /// Move cursor to start of current line.
     pub fn move_to_line_start(&self, buffer: &Buffer) -> Self {
         let current_line = buffer.byte_to_line(self.offset);
         Self {
@@ -125,7 +114,6 @@ impl Cursor {
         }
     }
 
-    /// Move cursor to end of current line.
     pub fn move_to_line_end(&self, buffer: &Buffer) -> Self {
         let current_line = buffer.byte_to_line(self.offset);
         let line_start = buffer.line_to_byte(current_line);
@@ -135,36 +123,26 @@ impl Cursor {
         }
     }
 
-    /// Move cursor to start of buffer.
     pub fn move_to_start(&self) -> Self {
         Self::start()
     }
 
-    /// Move cursor to end of buffer.
     pub fn move_to_end(&self, buffer: &Buffer) -> Self {
         Self::end(buffer)
     }
 }
 
-/// A selection in the buffer, represented as anchor and head positions.
-///
-/// The anchor is where the selection started, the head is where it ends
-/// (i.e., where the cursor visually is). They can be in either order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Selection {
-    /// Where the selection started (byte offset)
     pub anchor: usize,
-    /// Where the selection ends / cursor is (byte offset)
     pub head: usize,
 }
 
 impl Selection {
-    /// Create a new selection.
     pub fn new(anchor: usize, head: usize) -> Self {
         Self { anchor, head }
     }
 
-    /// Create a selection from a cursor (collapsed, no actual selection).
     pub fn from_cursor(cursor: Cursor) -> Self {
         Self {
             anchor: cursor.offset,
@@ -172,17 +150,14 @@ impl Selection {
         }
     }
 
-    /// Check if this is a collapsed selection (cursor with no range).
     pub fn is_collapsed(&self) -> bool {
         self.anchor == self.head
     }
 
-    /// Get the cursor position (the head of the selection).
     pub fn cursor(&self) -> Cursor {
         Cursor::new(self.head)
     }
 
-    /// Get the selected range as (start, end) where start <= end.
     pub fn range(&self) -> Range<usize> {
         if self.anchor <= self.head {
             self.anchor..self.head
@@ -191,7 +166,6 @@ impl Selection {
         }
     }
 
-    /// Extend the selection by moving the head.
     pub fn extend_to(&self, new_head: usize) -> Self {
         Self {
             anchor: self.anchor,
@@ -199,7 +173,6 @@ impl Selection {
         }
     }
 
-    /// Collapse the selection to the head position.
     pub fn collapse(&self) -> Self {
         Self {
             anchor: self.head,
@@ -207,7 +180,6 @@ impl Selection {
         }
     }
 
-    /// Collapse the selection to the start of the range.
     pub fn collapse_to_start(&self) -> Self {
         let start = self.range().start;
         Self {
@@ -216,7 +188,6 @@ impl Selection {
         }
     }
 
-    /// Collapse the selection to the end of the range.
     pub fn collapse_to_end(&self) -> Self {
         let end = self.range().end;
         Self {
@@ -225,7 +196,6 @@ impl Selection {
         }
     }
 
-    /// Clamp the selection to valid buffer bounds.
     pub fn clamp(&self, buffer: &Buffer) -> Self {
         let len = buffer.len_bytes();
         Self {
@@ -234,7 +204,6 @@ impl Selection {
         }
     }
 
-    /// Select all text in the buffer.
     pub fn select_all(buffer: &Buffer) -> Self {
         Self {
             anchor: 0,
@@ -242,8 +211,6 @@ impl Selection {
         }
     }
 
-    /// Select the word at the given offset.
-    /// A word is a sequence of alphanumeric characters or underscores.
     pub fn select_word_at(offset: usize, buffer: &Buffer) -> Self {
         let text = buffer.text();
         let len = text.len();
@@ -290,7 +257,6 @@ impl Selection {
         Self::new(start, end)
     }
 
-    /// Select the entire line at the given offset.
     pub fn select_line_at(offset: usize, buffer: &Buffer) -> Self {
         let line = buffer.byte_to_line(offset);
         let line_start = buffer.line_to_byte(line);

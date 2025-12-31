@@ -1,19 +1,8 @@
-//! Line-based rendering model.
+//! Line extraction from buffer for rendering.
 //!
-//! This module provides line-by-line rendering where each line in the buffer
-//! gets rendered as a separate element, with styling determined by tree-sitter.
-//!
-//! Lines are modeled as a stack of layers, where each layer represents a
-//! structural element (blockquote, list item, heading, etc.). For example:
-//! - `> - item` has layers: [BlockQuote, ListItem]
-//! - `> > text` has layers: [BlockQuote, BlockQuote]
-//! - `# Title` has layers: [Heading(1)]
-//!
-//! Each layer knows:
-//! - Its marker range (what to hide when cursor is away)
-//! - Its substitution (what to show instead, e.g., bullet for list)
-//! - Its styling contribution (border for blockquote, bold for heading)
-//! - Its continuation text for Smart Enter
+//! Each line knows its markers (e.g., `#`, `-`, `>`), what to show when the
+//! cursor is away (substitutions like `•` for bullets), and continuation
+//! text for Smart Enter.
 
 use crate::buffer::Buffer;
 use crate::parser::MarkdownTree;
@@ -21,38 +10,23 @@ use crate::render::{StyledRegion, TextStyle};
 use std::ops::Range;
 use tree_sitter::Node;
 
-// ============================================================================
-// New tree-sitter based marker detection
-// ============================================================================
-
-/// Information about a marker found on a line (internal use only).
 #[derive(Debug, Clone, PartialEq)]
 struct MarkerInfo {
-    /// The type of marker
-    pub kind: MarkerKind,
-    /// Byte range of this marker in the buffer
-    pub range: Range<usize>,
+    kind: MarkerKind,
+    range: Range<usize>,
 }
 
-/// The type of a marker node (internal use only).
 #[derive(Debug, Clone, PartialEq)]
 enum MarkerKind {
-    /// Blockquote marker `> ` or continuation
     BlockQuote,
-    /// Unordered list marker `- ` or `* `
     UnorderedList,
-    /// Ordered list marker `1. `
     OrderedList,
-    /// Task list marker `[ ]` or `[x]`
     TaskList { checked: bool },
-    /// Heading marker `# `, `## `, etc.
     Heading(u8),
-    /// Thematic break `---`, `***`, or `___`
     ThematicBreak,
 }
 
 impl MarkerInfo {
-    /// Create a MarkerInfo from a tree-sitter node.
     fn from_node(node: &Node, text: &str) -> Option<Self> {
         let kind = node.kind();
         let mut range = node.start_byte()..node.end_byte();
@@ -60,12 +34,11 @@ impl MarkerInfo {
         let marker_kind = match kind {
             "block_quote_marker" => MarkerKind::BlockQuote,
             "block_continuation" => {
-                // Only count as blockquote if it contains '>'
                 let content = &text[range.clone()];
                 if content.contains('>') {
                     MarkerKind::BlockQuote
                 } else {
-                    return None; // This is list indentation, not a blockquote
+                    return None;
                 }
             }
             "list_marker_minus" | "list_marker_star" | "list_marker_plus" => {
@@ -75,9 +48,7 @@ impl MarkerInfo {
             "task_list_marker_unchecked" => MarkerKind::TaskList { checked: false },
             "task_list_marker_checked" => MarkerKind::TaskList { checked: true },
             k if k.starts_with("atx_h") && k.ends_with("_marker") => {
-                // Extract level from "atx_h1_marker", "atx_h2_marker", etc.
                 let level = k.chars().nth(5)?.to_digit(10)? as u8;
-                // tree-sitter's marker is just "##", extend to include trailing space
                 if range.end < text.len() && text.as_bytes().get(range.end) == Some(&b' ') {
                     range.end += 1;
                 }
@@ -93,39 +64,34 @@ impl MarkerInfo {
         })
     }
 
-    /// Get the substitution text for this marker (shown when marker is hidden).
-    pub fn substitution(&self) -> &'static str {
+    fn substitution(&self) -> &'static str {
         match &self.kind {
-            MarkerKind::BlockQuote => "", // No text substitution, just border
+            MarkerKind::BlockQuote => "",
             MarkerKind::UnorderedList => "• ",
-            MarkerKind::OrderedList => "", // Keep number visible
+            MarkerKind::OrderedList => "",
             MarkerKind::TaskList { checked: false } => "☐ ",
             MarkerKind::TaskList { checked: true } => "☑ ",
             MarkerKind::Heading(_) => "",
-            MarkerKind::ThematicBreak => "", // Rendered as horizontal line
+            MarkerKind::ThematicBreak => "",
         }
     }
 
-    /// Get the continuation text for Smart Enter.
-    pub fn continuation(&self) -> &'static str {
+    fn continuation(&self) -> &'static str {
         match &self.kind {
             MarkerKind::BlockQuote => "> ",
             MarkerKind::UnorderedList => "- ",
-            MarkerKind::OrderedList => "1. ", // Normalization fixes the number
+            MarkerKind::OrderedList => "1. ",
             MarkerKind::TaskList { .. } => "- [ ] ",
             MarkerKind::Heading(_) => "",
-            MarkerKind::ThematicBreak => "", // No continuation
+            MarkerKind::ThematicBreak => "",
         }
     }
 
-    /// Whether this marker adds a left border when hidden.
-    pub fn has_border(&self) -> bool {
+    fn has_border(&self) -> bool {
         matches!(self.kind, MarkerKind::BlockQuote)
     }
 }
 
-/// Find all markers on a line by traversing the tree.
-/// Returns markers in byte position order (tree-sitter children are in source order).
 fn find_markers_on_line(
     root: &Node,
     text: &str,
@@ -144,30 +110,25 @@ fn collect_markers_recursive(
     line_end: usize,
     markers: &mut Vec<MarkerInfo>,
 ) {
-    // Skip nodes that don't overlap with our line
     if node.end_byte() <= line_start || node.start_byte() >= line_end {
         return;
     }
 
-    // Check if this node is a marker on our line
     if node.start_byte() >= line_start
         && node.start_byte() < line_end
         && let Some(mut marker) = MarkerInfo::from_node(node, text)
     {
-        // Task list markers absorb the preceding unordered list marker.
-        // They're conceptually one marker "- [ ]" not two separate markers.
+        // Task list markers absorb the preceding unordered list marker
         if matches!(marker.kind, MarkerKind::TaskList { .. })
             && let Some(prev) = markers.last()
             && matches!(prev.kind, MarkerKind::UnorderedList)
         {
-            // Extend task list range to include the list marker, then replace it
             marker.range.start = prev.range.start;
             markers.pop();
         }
         markers.push(marker);
     }
 
-    // Recurse into children (tree-sitter children are in source order)
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i as u32) {
             collect_markers_recursive(&child, text, line_start, line_end, markers);
@@ -175,76 +136,51 @@ fn collect_markers_recursive(
     }
 }
 
-/// Information about a single line for rendering purposes.
-/// All marker-derived fields are pre-computed during line extraction.
 #[derive(Debug, Clone, PartialEq)]
 pub struct LineInfo {
-    /// Byte range of this line in the buffer (excluding the newline)
     pub range: Range<usize>,
-    /// The line number (0-indexed)
     pub line_number: usize,
-    /// URL for image-only lines (when line contains only an image)
     pub image_url: Option<String>,
-    /// Alt text for image-only lines
     pub image_alt: Option<String>,
-    /// The kind of line (heading, list item, etc.)
     pub kind: LineKind,
-    /// Combined byte range of all markers on this line (to hide when cursor away)
     pub marker_range: Option<Range<usize>>,
-    /// Whether this line should show a left border (blockquote)
     pub has_border: bool,
-    /// Substitution text when markers are hidden (e.g., "• " for bullets)
     pub substitution: String,
-    /// Continuation text for smart enter (e.g., "- " for list items)
     pub continuation: String,
-    /// Leading whitespace before the first marker (indentation)
     pub leading_whitespace: String,
-    /// Whether this line is a checkbox (task list with marker hidden)
     pub checkbox: Option<bool>,
 }
 
-/// The kind of line (structural type).
 #[derive(Debug, Clone, PartialEq)]
 pub enum LineKind {
-    /// Empty line
     Blank,
-    /// Regular paragraph text
     Paragraph,
-    /// Heading with level 1-6
     Heading(u8),
-    /// List item (ordered or unordered)
     ListItem {
         ordered: bool,
         checked: Option<bool>,
     },
-    /// Blockquote line
     BlockQuote,
-    /// Code block line (inside fenced code block)
     CodeBlock {
         language: Option<String>,
         is_fence: bool,
     },
-    /// Thematic break (horizontal rule: ---, ***, ___)
     ThematicBreak,
 }
 
 impl LineKind {
-    /// Whether this line should be rendered in bold (headings).
     pub fn is_bold(&self) -> bool {
         matches!(self, LineKind::Heading(_))
     }
 
-    /// Whether this line is inside a code block.
     pub fn is_code_block(&self) -> bool {
         matches!(self, LineKind::CodeBlock { .. })
     }
 
-    /// Whether this line is a code fence (``` delimiter).
     pub fn is_fence(&self) -> bool {
         matches!(self, LineKind::CodeBlock { is_fence: true, .. })
     }
 
-    /// Get heading level if this is a heading (1-6).
     pub fn heading_level(&self) -> Option<u8> {
         match self {
             LineKind::Heading(level) => Some(*level),
@@ -253,7 +189,6 @@ impl LineKind {
     }
 }
 
-/// Compute LineKind from markers.
 fn compute_kind_from_markers(markers: &[MarkerInfo]) -> LineKind {
     // Check for specific marker types in reverse order (innermost first)
     if let Some(marker) = markers.iter().next_back() {
@@ -284,7 +219,6 @@ fn compute_kind_from_markers(markers: &[MarkerInfo]) -> LineKind {
     LineKind::Paragraph
 }
 
-/// Compute LineKind for a line, checking for code blocks first.
 fn compute_line_kind(
     tree: Option<&MarkdownTree>,
     text: &str,
@@ -311,7 +245,6 @@ fn compute_line_kind(
     compute_kind_from_markers(markers)
 }
 
-/// Compute the combined marker range (for hiding when cursor is away).
 fn compute_marker_range(markers: &[MarkerInfo]) -> Option<Range<usize>> {
     if markers.is_empty() {
         return None;
@@ -319,17 +252,14 @@ fn compute_marker_range(markers: &[MarkerInfo]) -> Option<Range<usize>> {
     Some(markers.first()?.range.start..markers.last()?.range.end)
 }
 
-/// Compute whether line should show a left border.
 fn compute_has_border(markers: &[MarkerInfo]) -> bool {
     markers.iter().any(|m| m.has_border())
 }
 
-/// Compute substitution text when markers are hidden.
 fn compute_substitution(markers: &[MarkerInfo]) -> String {
     markers.iter().map(|m| m.substitution()).collect()
 }
 
-/// Compute continuation text for smart enter.
 fn compute_continuation(text: &str, line_range: &Range<usize>, markers: &[MarkerInfo]) -> String {
     if markers.is_empty() {
         return String::new();
@@ -348,7 +278,6 @@ fn compute_continuation(text: &str, line_range: &Range<usize>, markers: &[Marker
     format!("{}{}", leading, marker_text)
 }
 
-/// Compute leading whitespace (indentation before first marker).
 fn compute_leading_whitespace(
     text: &str,
     line_range: &Range<usize>,
@@ -362,8 +291,6 @@ fn compute_leading_whitespace(
     String::new()
 }
 
-/// Compute checkbox state from markers.
-/// Returns Some(true) for checked, Some(false) for unchecked, None if not a task list.
 fn compute_checkbox(markers: &[MarkerInfo]) -> Option<bool> {
     for marker in markers {
         if let MarkerKind::TaskList { checked } = marker.kind {
@@ -373,12 +300,10 @@ fn compute_checkbox(markers: &[MarkerInfo]) -> Option<bool> {
     None
 }
 
-/// Extract line information from a buffer using tree-sitter.
 pub fn extract_lines(buffer: &Buffer) -> Vec<LineInfo> {
     extract_lines_from_parts(&buffer.text(), buffer.tree())
 }
 
-/// Extract lines from raw text and tree (used internally by BufferContent).
 pub fn extract_lines_from_parts(text: &str, tree: Option<&MarkdownTree>) -> Vec<LineInfo> {
     // First, split the buffer into lines
     let mut lines = Vec::new();
@@ -446,12 +371,10 @@ pub fn extract_lines_from_parts(text: &str, tree: Option<&MarkdownTree>) -> Vec<
         .collect()
 }
 
-/// Extract inline styles (bold, italic, code, etc.) for a specific line.
 pub fn extract_inline_styles(buffer: &Buffer, line: &LineInfo) -> Vec<StyledRegion> {
     extract_inline_styles_from_parts(&buffer.text(), buffer.tree(), line)
 }
 
-/// Extract inline styles from raw text and tree (used internally by BufferContent).
 pub fn extract_inline_styles_from_parts(
     text: &str,
     tree: Option<&MarkdownTree>,
@@ -470,7 +393,6 @@ pub fn extract_inline_styles_from_parts(
     styles
 }
 
-/// Recursively find inline nodes and collect their styles if they overlap with the given range.
 fn collect_inline_styles_in_range(
     node: &Node,
     tree: &MarkdownTree,
@@ -499,7 +421,6 @@ fn collect_inline_styles_in_range(
     }
 }
 
-/// Recursively collect inline styles from an inline tree.
 fn collect_inline_styles_recursive(node: Node, text: &str, styles: &mut Vec<StyledRegion>) {
     match node.kind() {
         "emphasis" => {
@@ -543,7 +464,6 @@ fn collect_inline_styles_recursive(node: Node, text: &str, styles: &mut Vec<Styl
     }
 }
 
-/// Extract a styled region from an emphasis-like node.
 fn extract_emphasis_region(node: &Node, style: TextStyle) -> Option<StyledRegion> {
     let full_start = node.start_byte();
     let full_end = node.end_byte();
@@ -584,7 +504,6 @@ fn extract_emphasis_region(node: &Node, style: TextStyle) -> Option<StyledRegion
     })
 }
 
-/// Extract a styled region from a code span.
 fn extract_code_span_region(node: &Node) -> Option<StyledRegion> {
     let full_start = node.start_byte();
     let full_end = node.end_byte();
@@ -612,7 +531,6 @@ fn extract_code_span_region(node: &Node) -> Option<StyledRegion> {
     })
 }
 
-/// Extract a styled region from a link node (inline_link, shortcut_link, etc.).
 fn extract_link_region(node: &Node, text: &str) -> Option<StyledRegion> {
     let full_start = node.start_byte();
     let full_end = node.end_byte();
@@ -656,7 +574,6 @@ fn extract_link_region(node: &Node, text: &str) -> Option<StyledRegion> {
     })
 }
 
-/// Extract a styled region from an image node.
 fn extract_image_region(node: &Node, text: &str) -> Option<StyledRegion> {
     let full_start = node.start_byte();
     let full_end = node.end_byte();
@@ -693,7 +610,6 @@ fn extract_image_region(node: &Node, text: &str) -> Option<StyledRegion> {
     })
 }
 
-/// Extract the language from a fenced_code_block node.
 fn extract_code_block_language(node: &tree_sitter::Node, text: &str) -> Option<String> {
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i as u32)
@@ -717,7 +633,6 @@ fn extract_code_block_language(node: &tree_sitter::Node, text: &str) -> Option<S
     None
 }
 
-/// Find a fenced_code_block node that contains the given position.
 fn find_containing_code_block<'a>(
     root: &tree_sitter::Node<'a>,
     pos: usize,
@@ -744,7 +659,6 @@ fn find_containing_code_block<'a>(
     search(*root, pos)
 }
 
-/// Detect if a line contains only an image (no other content except whitespace).
 fn detect_image_only_line(
     tree: &MarkdownTree,
     text: &str,

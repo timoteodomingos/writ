@@ -20,40 +20,26 @@ use crate::line_view::{
 };
 use crate::lines::{LineInfo, LineKind, extract_inline_styles, extract_lines};
 
-/// Code block range: (start_line_idx, end_line_idx or None for incomplete blocks)
 type CodeBlockRange = (usize, Option<usize>);
 
-/// The main editor component.
 pub struct Editor {
-    /// The text buffer
     buffer: Buffer,
-    /// Current selection (anchor and head). When collapsed, acts as cursor.
     selection: Selection,
-    /// Focus handle for keyboard input
     focus_handle: FocusHandle,
-    /// Scroll handle for scrolling cursor into view
     scroll_handle: ScrollHandle,
-    /// Child index of the cursor line in the scroll container (accounts for spacer and filtered lines)
     cursor_child_index: Option<usize>,
-    /// Whether a scroll to cursor is pending (set when cursor moves, cleared after scroll)
     scroll_to_cursor_pending: bool,
-    /// Whether user input is blocked (for demo mode)
     input_blocked: bool,
-    /// Whether streaming mode is active
     streaming_mode: bool,
-    /// Editor configuration (theme, fonts, etc.)
     config: EditorConfig,
-    /// Whether mouse is hovering over a link with Ctrl/Cmd held
     hovering_link: bool,
 }
 
 impl Editor {
-    /// Create a new editor with the given content and default configuration.
     pub fn new(content: &str, cx: &mut Context<Self>) -> Self {
         Self::with_config(content, EditorConfig::default(), cx)
     }
 
-    /// Create a new editor with custom configuration.
     pub fn with_config(content: &str, config: EditorConfig, cx: &mut Context<Self>) -> Self {
         let buffer: Buffer = content.parse().unwrap_or_default();
         let focus_handle = cx.focus_handle();
@@ -74,42 +60,29 @@ impl Editor {
         }
     }
 
-    /// Get the buffer contents.
     pub fn text(&self) -> String {
         self.buffer.text()
     }
 
-    /// Get the buffer length in bytes.
     pub fn len(&self) -> usize {
         self.buffer.len_bytes()
     }
 
-    /// Check if the buffer is empty.
     pub fn is_empty(&self) -> bool {
         self.buffer.len_bytes() == 0
     }
 
-    /// Replace the entire buffer contents.
-    ///
-    /// This resets cursor to position 0 and clears undo history.
     pub fn set_text(&mut self, content: &str, cx: &mut Context<Self>) {
         self.buffer = content.parse().unwrap_or_default();
         self.selection = Selection::new(0, 0);
         cx.notify();
     }
 
-    /// Insert text at the current cursor position.
-    ///
-    /// If there's a selection, it will be replaced.
     pub fn insert(&mut self, text: &str, cx: &mut Context<Self>) {
         self.insert_text(text);
         cx.notify();
     }
 
-    /// Append text at the end of the buffer.
-    ///
-    /// This is optimized for streaming scenarios where text arrives incrementally.
-    /// The cursor is moved to the end after appending.
     pub fn append(&mut self, text: &str, cx: &mut Context<Self>) {
         let end = self.buffer.len_bytes();
         self.buffer.insert(end, text, end);
@@ -118,21 +91,15 @@ impl Editor {
         cx.notify();
     }
 
-    /// Append text and scroll to keep the end visible.
-    ///
-    /// Useful for streaming scenarios where you want to follow new content.
     pub fn append_and_scroll(&mut self, text: &str, _window: &mut Window, cx: &mut Context<Self>) {
         self.append(text, cx);
         self.scroll_handle.scroll_to_bottom();
     }
 
-    /// Helper to get cursor position (selection head).
     fn cursor(&self) -> Cursor {
         self.selection.cursor()
     }
 
-    /// Helper to move cursor and update selection.
-    /// If extend is true, extends selection; otherwise collapses to new position.
     fn move_cursor(&mut self, new_cursor: Cursor, extend: bool) {
         if extend {
             self.selection = self.selection.extend_to(new_cursor.offset);
@@ -141,8 +108,6 @@ impl Editor {
         }
     }
 
-    /// Perform scroll to cursor if pending and bounds are available.
-    /// Called from render() - uses bounds from the previous layout.
     fn perform_pending_scroll(&mut self, margin: gpui::Pixels) {
         if !self.scroll_to_cursor_pending {
             return;
@@ -186,19 +151,10 @@ impl Editor {
         }
     }
 
-    /// Mark that we need to scroll to cursor on next render.
     fn request_scroll_to_cursor(&mut self) {
         self.scroll_to_cursor_pending = true;
     }
 
-    /// Compute the text to insert for Smart Enter (Shift+Enter).
-    ///
-    /// This continues the current line type at the same nesting level:
-    /// - Unordered list: `\n` + indentation + `- `
-    /// - Ordered list: `\n` + indentation + `1. ` (normalization fixes the number)
-    /// - Task list: `\n` + indentation + `- [ ] `
-    /// - Blockquote: `\n` + same `> ` prefix(es)
-    /// - Code block/regular text: just `\n`
     fn compute_smart_enter_text(&self, cursor_pos: usize) -> String {
         let lines = extract_lines(&self.buffer);
         let cursor_line_idx = self.buffer.byte_to_line(cursor_pos);
@@ -216,10 +172,6 @@ impl Editor {
         }
     }
 
-    /// Toggle the checkbox on a given line.
-    ///
-    /// Finds `[ ]` or `[x]`/`[X]` in the line and toggles it.
-    /// The cursor stays where it was.
     fn toggle_checkbox(&mut self, line_number: usize, cx: &mut Context<Self>) {
         let lines = extract_lines(&self.buffer);
         let Some(line) = lines.get(line_number) else {
@@ -278,11 +230,6 @@ impl Editor {
         cx.notify();
     }
 
-    // =========================================================================
-    // Core editing operations - used by both keyboard handler and execute()
-    // =========================================================================
-
-    /// Insert text at cursor, replacing selection if any.
     fn insert_text(&mut self, text: &str) {
         let cursor_before = self.cursor().offset;
         let insert_pos = if !self.selection.is_collapsed() {
@@ -297,7 +244,6 @@ impl Editor {
         self.selection = Selection::new(new_pos, new_pos);
     }
 
-    /// Delete backward (backspace behavior).
     fn delete_backward(&mut self) {
         if !self.selection.is_collapsed() {
             self.delete_selection();
@@ -310,7 +256,6 @@ impl Editor {
         }
     }
 
-    /// Delete forward (delete key behavior).
     fn delete_forward(&mut self) {
         if !self.selection.is_collapsed() {
             self.delete_selection();
@@ -322,7 +267,6 @@ impl Editor {
         }
     }
 
-    /// Delete the current selection.
     fn delete_selection(&mut self) {
         let range = self.selection.range();
         let cursor_before = self.cursor().offset;
@@ -330,7 +274,6 @@ impl Editor {
         self.selection = Selection::new(range.start, range.start);
     }
 
-    /// Move cursor in a direction, optionally extending selection.
     fn move_in_direction(&mut self, direction: Direction, extend: bool) {
         let new_cursor = match direction {
             Direction::Left => self.cursor().move_left(&self.buffer),
@@ -341,8 +284,6 @@ impl Editor {
         self.move_cursor(new_cursor, extend);
     }
 
-    /// Compute code block ranges from lines.
-    /// Returns (start_line_idx, end_line_idx or None for incomplete blocks).
     fn compute_code_block_ranges(lines: &[LineInfo]) -> Vec<CodeBlockRange> {
         let mut ranges = Vec::new();
         let mut i = 0;
@@ -376,7 +317,6 @@ impl Editor {
         ranges
     }
 
-    /// Handle a key down event.
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         // Block user input during demo mode
         if self.input_blocked {
@@ -500,26 +440,14 @@ impl Editor {
         }
     }
 
-    /// Block user input (for demo mode).
     pub fn set_input_blocked(&mut self, blocked: bool) {
         self.input_blocked = blocked;
     }
 
-    /// Check if user input is currently blocked.
     pub fn is_input_blocked(&self) -> bool {
         self.input_blocked
     }
 
-    // =========================================================================
-    // Streaming mode - for AI chat applications
-    // =========================================================================
-
-    /// Begin streaming mode.
-    ///
-    /// In streaming mode:
-    /// - User input is blocked
-    /// - Cursor is pinned to end of document
-    /// - Appends are optimized for frequent small updates
     pub fn begin_streaming(&mut self, cx: &mut Context<Self>) {
         self.streaming_mode = true;
         self.input_blocked = true;
@@ -529,28 +457,20 @@ impl Editor {
         cx.notify();
     }
 
-    /// End streaming mode and restore normal editing.
     pub fn end_streaming(&mut self, cx: &mut Context<Self>) {
         self.streaming_mode = false;
         self.input_blocked = false;
         cx.notify();
     }
 
-    /// Check if currently in streaming mode.
     pub fn is_streaming(&self) -> bool {
         self.streaming_mode
     }
 
-    // =========================================================================
-    // State queries
-    // =========================================================================
-
-    /// Get the current cursor position (byte offset).
     pub fn cursor_position(&self) -> usize {
         self.selection.head
     }
 
-    /// Get the current selection range, or None if collapsed (just a cursor).
     pub fn selection_range(&self) -> Option<std::ops::Range<usize>> {
         if self.selection.is_collapsed() {
             None
@@ -559,47 +479,39 @@ impl Editor {
         }
     }
 
-    /// Set the cursor position.
     pub fn set_cursor(&mut self, offset: usize, cx: &mut Context<Self>) {
         let offset = offset.min(self.buffer.len_bytes());
         self.selection = Selection::new(offset, offset);
         cx.notify();
     }
 
-    /// Move cursor to end of document.
     pub fn move_to_end(&mut self, cx: &mut Context<Self>) {
         let end = self.buffer.len_bytes();
         self.selection = Selection::new(end, end);
         cx.notify();
     }
 
-    /// Move cursor to start of document.
     pub fn move_to_start(&mut self, cx: &mut Context<Self>) {
         self.selection = Selection::new(0, 0);
         cx.notify();
     }
 
-    /// Check if the buffer has been modified since last `mark_clean()`.
     pub fn is_dirty(&self) -> bool {
         self.buffer.is_dirty()
     }
 
-    /// Mark the buffer as clean (call after saving).
     pub fn mark_clean(&mut self) {
         self.buffer.mark_clean();
     }
 
-    /// Check if undo is available.
     pub fn can_undo(&self) -> bool {
         self.buffer.can_undo()
     }
 
-    /// Check if redo is available.
     pub fn can_redo(&self) -> bool {
         self.buffer.can_redo()
     }
 
-    /// Undo the last edit.
     pub fn undo(&mut self, cx: &mut Context<Self>) {
         if let Some(cursor_pos) = self.buffer.undo() {
             self.selection = Selection::new(cursor_pos, cursor_pos);
@@ -607,7 +519,6 @@ impl Editor {
         }
     }
 
-    /// Redo the last undone edit.
     pub fn redo(&mut self, cx: &mut Context<Self>) {
         if let Some(cursor_pos) = self.buffer.redo() {
             self.selection = Selection::new(cursor_pos, cursor_pos);
@@ -615,7 +526,6 @@ impl Editor {
         }
     }
 
-    /// Execute an editor action programmatically.
     pub fn execute(&mut self, action: EditorAction, _window: &mut Window, cx: &mut Context<Self>) {
         match action {
             EditorAction::Type(c) => {

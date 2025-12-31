@@ -4,20 +4,13 @@ use gpui::Rems;
 
 use super::theme::{DEFAULT_CODE_FONT, DEFAULT_TEXT_FONT, EditorTheme};
 
-/// Configuration for the editor.
 #[derive(Clone)]
 pub struct EditorConfig {
-    /// Theme colors
     pub theme: EditorTheme,
-    /// Font for regular text
     pub text_font: String,
-    /// Font for code blocks and inline code
     pub code_font: String,
-    /// Base path for resolving relative image URLs
     pub base_path: Option<PathBuf>,
-    /// Horizontal padding (left and right)
     pub padding_x: Rems,
-    /// Vertical padding (top and bottom) - rendered as spacers that scroll with content
     pub padding_y: Rems,
 }
 

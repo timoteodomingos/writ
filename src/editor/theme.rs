@@ -18,9 +18,6 @@ pub const DEFAULT_TEXT_FONT: &str = "Liberation Sans";
 #[cfg(not(any(target_os = "windows", target_os = "macos")))]
 pub const DEFAULT_CODE_FONT: &str = "Liberation Mono";
 
-/// Theme colors for the editor.
-///
-/// Use `EditorTheme::dracula()` for the default Dracula theme.
 #[derive(Clone)]
 pub struct EditorTheme {
     pub background: Rgba,
@@ -38,7 +35,6 @@ pub struct EditorTheme {
 }
 
 impl EditorTheme {
-    /// The default Dracula theme.
     pub fn dracula() -> Self {
         Self {
             background: rgb(0x282A36),
@@ -55,7 +51,6 @@ impl EditorTheme {
         }
     }
 
-    /// Map a tree-sitter highlight capture name to a color.
     pub fn color_for_capture(&self, capture: &str) -> Rgba {
         // Handle specific sub-captures first
         match capture {
@@ -86,7 +81,6 @@ impl EditorTheme {
         }
     }
 
-    /// Map a tree-sitter highlight ID to a color.
     pub fn color_for_highlight(&self, highlight_id: usize) -> Rgba {
         let capture = HIGHLIGHT_NAMES.get(highlight_id).copied().unwrap_or("");
         self.color_for_capture(capture)

@@ -4,19 +4,12 @@ use std::num::NonZeroU16;
 use tree_sitter::{InputEdit, Language, Node, Parser, Point, Range, Tree, TreeCursor};
 use tree_sitter_md::{INLINE_LANGUAGE, LANGUAGE};
 
-/// A parser that produces [`MarkdownTree`]s.
-///
-/// This is a convenience wrapper around [`LANGUAGE`] and [`INLINE_LANGUAGE`].
 pub struct MarkdownParser {
     parser: Parser,
     block_language: Language,
     inline_language: Language,
 }
 
-/// A stateful object for walking a [`MarkdownTree`] efficiently.
-///
-/// This exposes the same methdos as [`TreeCursor`], but abstracts away the
-/// double block / inline structure of [`MarkdownTree`].
 pub struct MarkdownCursor<'a> {
     markdown_tree: &'a MarkdownTree,
     block_cursor: TreeCursor<'a>,
@@ -24,7 +17,6 @@ pub struct MarkdownCursor<'a> {
 }
 
 impl<'a> MarkdownCursor<'a> {
-    /// Get the cursor's current [`Node`].
     pub fn node(&self) -> Node<'a> {
         match &self.inline_cursor {
             Some(cursor) => cursor.node(),
@@ -32,20 +24,10 @@ impl<'a> MarkdownCursor<'a> {
         }
     }
 
-    /// Returns `true` if the current node is from the (inline language)[INLINE_LANGUAGE]
-    ///
-    /// This information is needed to handle "tree-sitter internal" data like
-    /// [`field_id`](Self::field_id) correctly.
     pub fn is_inline(&self) -> bool {
         self.inline_cursor.is_some()
     }
 
-    /// Get the numerical field id of this tree cursor’s current node.
-    ///
-    /// You will need to call [`is_inline`](Self::is_inline) to find out if the
-    /// current node is an inline or block node.
-    ///
-    /// See also [`field_name`](Self::field_name).
     pub fn field_id(&self) -> Option<NonZeroU16> {
         match &self.inline_cursor {
             Some(cursor) => cursor.field_id(),
@@ -53,10 +35,6 @@ impl<'a> MarkdownCursor<'a> {
         }
     }
 
-    /// Get the field name of this tree cursor’s current node.
-    ///
-    /// You will need to call [`is_inline`](Self::is_inline) to find out if the
-    /// current node is an inline or block node.
     pub fn field_name(&self) -> Option<&'static str> {
         match &self.inline_cursor {
             Some(cursor) => cursor.field_name(),
@@ -82,12 +60,6 @@ impl<'a> MarkdownCursor<'a> {
         self.inline_cursor = None;
     }
 
-    /// Move this cursor to the first child of its current node.
-    ///
-    /// This returns `true` if the cursor successfully moved, and returns `false` if there were no
-    /// children.
-    /// If the cursor is currently at a node in the block tree and it has an associated inline tree, it
-    /// will descend into the inline tree.
     pub fn goto_first_child(&mut self) -> bool {
         match &mut self.inline_cursor {
             Some(cursor) => cursor.goto_first_child(),
@@ -106,12 +78,6 @@ impl<'a> MarkdownCursor<'a> {
         }
     }
 
-    /// Move this cursor to the parent of its current node.
-    ///
-    /// This returns true if the cursor successfully moved, and returns false if there was no
-    /// parent node (the cursor was already on the root node).
-    /// If the cursor moves to the root node of an inline tree, the it ascents to the associated
-    /// node in the block tree.
     pub fn goto_parent(&mut self) -> bool {
         match &mut self.inline_cursor {
             Some(inline_cursor) => {
@@ -125,10 +91,6 @@ impl<'a> MarkdownCursor<'a> {
         }
     }
 
-    /// Move this cursor to the next sibling of its current node.
-    ///
-    /// This returns true if the cursor successfully moved, and returns false if there was no next
-    /// sibling node.
     pub fn goto_next_sibling(&mut self) -> bool {
         match &mut self.inline_cursor {
             Some(inline_cursor) => inline_cursor.goto_next_sibling(),
@@ -136,11 +98,6 @@ impl<'a> MarkdownCursor<'a> {
         }
     }
 
-    /// Move this cursor to the first child of its current node that extends beyond the given byte offset.
-    ///
-    /// This returns the index of the child node if one was found, and returns None if no such child was found.
-    /// If the cursor is currently at a node in the block tree and it has an associated inline tree, it
-    /// will descend into the inline tree.
     pub fn goto_first_child_for_byte(&mut self, index: usize) -> Option<usize> {
         match &mut self.inline_cursor {
             Some(cursor) => cursor.goto_first_child_for_byte(index),
@@ -157,11 +114,6 @@ impl<'a> MarkdownCursor<'a> {
         }
     }
 
-    /// Move this cursor to the first child of its current node that extends beyond the given point.
-    ///
-    /// This returns the index of the child node if one was found, and returns None if no such child was found.
-    /// If the cursor is currently at a node in the block tree and it has an associated inline tree, it
-    /// will descend into the inline tree.
     pub fn goto_first_child_for_point(&mut self, index: Point) -> Option<usize> {
         match &mut self.inline_cursor {
             Some(cursor) => cursor.goto_first_child_for_point(index),
@@ -179,7 +131,6 @@ impl<'a> MarkdownCursor<'a> {
     }
 }
 
-/// An object that holds a combined markdown tree.
 #[derive(Debug, Clone)]
 pub struct MarkdownTree {
     block_tree: Tree,
@@ -188,11 +139,6 @@ pub struct MarkdownTree {
 }
 
 impl MarkdownTree {
-    /// Edit the block tree and inline trees to keep them in sync with source code that has been
-    /// edited.
-    ///
-    /// You must describe the edit both in terms of byte offsets and in terms of
-    /// row/column coordinates.
     pub fn edit(&mut self, edit: &InputEdit) {
         self.block_tree.edit(edit);
         for inline_tree in self.inline_trees.iter_mut() {
@@ -200,26 +146,19 @@ impl MarkdownTree {
         }
     }
 
-    /// Returns the block tree for the parsed document
     pub fn block_tree(&self) -> &Tree {
         &self.block_tree
     }
 
-    /// Returns the inline tree for the given inline node.
-    ///
-    /// Returns `None` if the given node does not have an associated inline tree. Either because
-    /// the nodes type is not `inline` or because the inline content is empty.
     pub fn inline_tree(&self, parent: &Node) -> Option<&Tree> {
         let index = *self.inline_indices.get(&parent.id())?;
         Some(&self.inline_trees[index])
     }
 
-    /// Returns the list of all inline trees
     pub fn inline_trees(&self) -> &[Tree] {
         &self.inline_trees
     }
 
-    /// Create a new [`MarkdownCursor`] starting from the root of the tree.
     pub fn walk(&self) -> MarkdownCursor<'_> {
         MarkdownCursor {
             markdown_tree: self,
@@ -243,18 +182,6 @@ impl Default for MarkdownParser {
 }
 
 impl MarkdownParser {
-    /// Parse a slice of UTF8 text.
-    ///
-    /// # Arguments:
-    /// * `text` The UTF8-encoded text to parse.
-    /// * `old_tree` A previous syntax tree parsed from the same document.
-    ///   If the text of the document has changed since `old_tree` was
-    ///   created, then you must edit `old_tree` to match the new text using
-    ///   [MarkdownTree::edit].
-    ///
-    /// Returns a [MarkdownTree] if parsing succeeded, or `None` if:
-    ///  * The timeout set with [tree_sitter::Parser::set_timeout_micros] expired
-    ///  * The cancellation flag set with [tree_sitter::Parser::set_cancellation_flag] was flipped
     pub fn parse_with<T: AsRef<[u8]>, F: FnMut(usize, Point) -> T>(
         &mut self,
         callback: &mut F,
@@ -344,18 +271,6 @@ impl MarkdownParser {
         })
     }
 
-    /// Parse a slice of UTF8 text.
-    ///
-    /// # Arguments:
-    /// * `text` The UTF8-encoded text to parse.
-    /// * `old_tree` A previous syntax tree parsed from the same document.
-    ///   If the text of the document has changed since `old_tree` was
-    ///   created, then you must edit `old_tree` to match the new text using
-    ///   [MarkdownTree::edit].
-    ///
-    /// Returns a [MarkdownTree] if parsing succeeded, or `None` if:
-    ///  * The timeout set with [tree_sitter::Parser::set_timeout_micros] expired
-    ///  * The cancellation flag set with [tree_sitter::Parser::set_cancellation_flag] was flipped
     pub fn parse(&mut self, text: &[u8], old_tree: Option<&MarkdownTree>) -> Option<MarkdownTree> {
         self.parse_with(&mut |byte, _| &text[byte..], old_tree)
     }
