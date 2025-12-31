@@ -1,6 +1,8 @@
 # writ
 
 [![CI](https://github.com/wilfreddenton/writ/actions/workflows/ci.yml/badge.svg)](https://github.com/wilfreddenton/writ/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/writ.svg)](https://crates.io/crates/writ)
+[![docs.rs](https://docs.rs/writ/badge.svg)](https://docs.rs/writ)
 
 A hybrid markdown editor that seamlessly combines raw text editing with live inline rendering.
 

@@ -19,10 +19,13 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Cache cargo registry and build
+        uses: Swatinem/rust-cache@v2
+
       - name: Install system dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y libasound2-dev libxkbcommon-dev libwayland-dev
+          sudo apt-get install -y libasound2-dev libxkbcommon-dev libwayland-dev libxcb1-dev libxkbcommon-x11-dev
 
       - name: Check formatting
         run: cargo fmt --all -- --check
