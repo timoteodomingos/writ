@@ -38,6 +38,8 @@ cargo run --release -- --file path/to/document.md
 
 The `--release` flag is recommended even during development. Debug builds are noticeably slower due to the volume of text layout and rendering work on every frame.
 
+On Linux, using a faster linker significantly improves build times. See [Zed's linker documentation](https://github.com/zed-industries/zed/blob/main/docs/src/development/linux.md#linkers-linker) for setup instructions.
+
 ## Features
 
 ### Inline Rendering
