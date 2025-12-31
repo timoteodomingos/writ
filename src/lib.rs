@@ -49,4 +49,5 @@ pub mod line_view;
 pub mod lines;
 pub mod parser;
 pub mod title_bar;
+pub mod tree_walk;
 pub mod window;
