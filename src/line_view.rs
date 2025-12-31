@@ -877,9 +877,29 @@ impl IntoElement for LineView<'_> {
                 return line_div;
             } else {
                 // Cursor not on line: show only the image, hide text
-                return line_base(line_number)
+                // Clicking on the image positions cursor at end of line
+                let mut img_div = line_base(line_number)
                     .overflow_hidden()
                     .child(create_image(&image_source, alt_text));
+
+                if let Some(ref on_click) = self.on_click {
+                    let on_click = on_click.clone();
+                    let line_end = line_range.end;
+                    img_div = img_div.on_mouse_down(
+                        MouseButton::Left,
+                        move |event: &MouseDownEvent, window, cx| {
+                            on_click(
+                                line_end,
+                                event.modifiers.shift,
+                                event.click_count,
+                                window,
+                                cx,
+                            );
+                        },
+                    );
+                }
+
+                return img_div;
             }
         }
 
