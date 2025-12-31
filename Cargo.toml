@@ -9,6 +9,10 @@ edition = "2024"
 [lints.clippy]
 too_many_arguments = "allow"
 
+[lib]
+name = "writ"
+path = "src/lib.rs"
+
 [[bin]]
 name = "writ"
 path = "src/main.rs"

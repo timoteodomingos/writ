@@ -18,6 +18,12 @@ cargo install writ
 writ --file path/to/document.md
 ```
 
+To try writ without a file, use demo mode which opens and "plays" scripted input:
+
+```bash
+writ --demo
+```
+
 Fonts can be configured via command line arguments or environment variables:
 
 ```bash

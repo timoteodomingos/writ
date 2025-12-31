@@ -656,6 +656,7 @@ impl Render for Editor {
             border_color: theme.comment,
             fence_color: theme.comment,
             fence_lang_color: theme.green,
+            code_color: theme.pink,
             text_font: font(&self.config.text_font),
             code_font: font(&self.config.code_font),
         };

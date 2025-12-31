@@ -103,7 +103,7 @@ pub fn demo_script() -> Vec<DemoStep> {
         Action(A::Enter),
         Wait(500),
         Action(A::Enter),
-        Type("Inline `code` uses a monospace font.".into()),
+        Type("It uses a `monospace` font.".into()),
         Action(A::Enter),
         Action(A::Enter),
         Type("```rust".into()),

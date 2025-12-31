@@ -37,6 +37,7 @@ pub struct LineViewTheme {
     pub border_color: Rgba,
     pub fence_color: Rgba,
     pub fence_lang_color: Rgba,
+    pub code_color: Rgba,
     pub text_font: Font,
     pub code_font: Font,
 }
@@ -536,6 +537,9 @@ impl<'a> LineView<'a> {
             } else if let Some(highlight_color) = self.get_highlight_color_for_range(start, end) {
                 // Code block with syntax highlighting
                 highlight_color.into()
+            } else if is_code && !self.line.kind.is_code_block() {
+                // Inline code gets a distinct color
+                self.theme.code_color.into()
             } else {
                 self.theme.text_color.into()
             };
