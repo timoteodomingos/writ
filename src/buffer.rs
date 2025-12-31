@@ -373,8 +373,7 @@ impl BufferContent {
                 for i in 0..node.child_count() {
                     if let Some(child) = node.child(i as u32)
                         && child.kind() == "list_item"
-                    {
-                        if let Some((marker_range, current_number)) =
+                        && let Some((marker_range, current_number)) =
                             self.extract_ordered_marker(&child)
                         {
                             if current_number != item_number {
@@ -382,7 +381,6 @@ impl BufferContent {
                             }
                             item_number += 1;
                         }
-                    }
                 }
             }
         }
@@ -415,9 +413,9 @@ impl BufferContent {
         list_item: &tree_sitter::Node,
     ) -> Option<(Range<usize>, usize)> {
         for i in 0..list_item.child_count() {
-            if let Some(marker) = list_item.child(i as u32) {
-                if marker.kind().starts_with("list_marker_decimal")
-                    || marker.kind() == "list_marker_dot"
+            if let Some(marker) = list_item.child(i as u32)
+                && (marker.kind().starts_with("list_marker_decimal")
+                    || marker.kind() == "list_marker_dot")
                 {
                     let start = marker.start_byte();
                     let end = marker.end_byte();
@@ -433,7 +431,6 @@ impl BufferContent {
 
                     return Some((start..end, number));
                 }
-            }
         }
         None
     }

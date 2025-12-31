@@ -399,7 +399,7 @@ pub fn extract_lines_from_parts(text: &str, tree: Option<&MarkdownTree>) -> Vec<
         .map(|(line_num, range)| {
             // Check if this is an image-only line
             let (image_url, image_alt) = if let Some(tree) = &tree {
-                detect_image_only_line(tree, &text, &range)
+                detect_image_only_line(tree, text, &range)
             } else {
                 (None, None)
             };
@@ -407,18 +407,18 @@ pub fn extract_lines_from_parts(text: &str, tree: Option<&MarkdownTree>) -> Vec<
             // Find markers on this line
             let markers = if let Some(tree) = &tree {
                 let root = tree.block_tree().root_node();
-                find_markers_on_line(&root, &text, range.start, range.end)
+                find_markers_on_line(&root, text, range.start, range.end)
             } else {
                 Vec::new()
             };
 
             // Compute all marker-derived fields
-            let kind = compute_line_kind(tree, &text, &range, &markers);
+            let kind = compute_line_kind(tree, text, &range, &markers);
             let marker_range = compute_marker_range(&markers);
             let has_border = compute_has_border(&markers);
             let substitution = compute_substitution(&markers);
-            let continuation = compute_continuation(&text, &range, &markers);
-            let leading_whitespace = compute_leading_whitespace(&text, &range, &markers);
+            let continuation = compute_continuation(text, &range, &markers);
+            let leading_whitespace = compute_leading_whitespace(text, &range, &markers);
             let checkbox = compute_checkbox(&markers);
 
             LineInfo {
@@ -457,7 +457,7 @@ pub fn extract_inline_styles_from_parts(
 
     // Find the inline node that covers this line's content
     let root = tree.block_tree().root_node();
-    collect_inline_styles_in_range(&root, tree, &text, &line.range, &mut styles);
+    collect_inline_styles_in_range(&root, tree, text, &line.range, &mut styles);
 
     styles
 }
