@@ -3,19 +3,26 @@
 //! The core idea: probe at end of line, walk up ancestors, and the ancestor
 //! node types (block_quote, list_item, etc.) tell us what markers apply.
 
+use std::ops::Range;
 use tree_sitter::Node;
 
-/// A marker on a line, derived from ancestor node types.
+/// The type of marker on a line.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Marker {
+pub enum MarkerKind {
     BlockQuote,
     ListItem { ordered: bool },
     Checkbox { checked: bool },
     Heading(u8),
     CodeBlockFence { language: Option<String> },
-    CodeBlockContent,
     ThematicBreak,
     Indent,
+}
+
+/// A marker on a line with its byte range.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Marker {
+    pub kind: MarkerKind,
+    pub range: Range<usize>,
 }
 
 /// Find all markers for a line by probing at `probe_pos` and walking up ancestors.
@@ -35,22 +42,30 @@ pub fn markers_at(root: &Node, text: &str, line_start: usize, probe_pos: usize) 
             && sib.start_byte() >= line_start
             && sib.start_byte() < sib.end_byte()
         {
-            markers.push(Marker::Indent);
+            markers.push(Marker {
+                kind: MarkerKind::Indent,
+                range: sib.byte_range(),
+            });
         }
 
         match node.kind() {
             "block_continuation" => {
                 // Non-empty block_continuation on this line is an Indent marker
                 if node.start_byte() >= line_start && node.start_byte() < node.end_byte() {
-                    markers.push(Marker::Indent);
+                    markers.push(Marker {
+                        kind: MarkerKind::Indent,
+                        range: node.byte_range(),
+                    });
                 }
             }
             "block_quote" => {
-                // Only push if the block_quote_marker is on this line
                 if let Some(marker_node) = node.child(0)
                     && marker_node.kind() == "block_quote_marker"
                 {
-                    markers.push(Marker::BlockQuote);
+                    markers.push(Marker {
+                        kind: MarkerKind::BlockQuote,
+                        range: marker_node.byte_range(),
+                    });
                 }
             }
             "list_item" => {
@@ -61,16 +76,27 @@ pub fn markers_at(root: &Node, text: &str, line_start: usize, probe_pos: usize) 
                     let ordered = is_ordered_list(&node);
 
                     // Push checkbox first (so it comes before ListItem in stack)
-                    if let Some(cb) = get_checkbox(&node) {
-                        markers.push(cb);
+                    if let Some((cb_kind, cb_range)) = get_checkbox(&node) {
+                        markers.push(Marker {
+                            kind: cb_kind,
+                            range: cb_range,
+                        });
                     }
 
-                    markers.push(Marker::ListItem { ordered });
+                    markers.push(Marker {
+                        kind: MarkerKind::ListItem { ordered },
+                        range: marker_node.byte_range(),
+                    });
                 }
             }
             "atx_heading" => {
-                if let Some(level) = get_heading_level(&node) {
-                    markers.push(Marker::Heading(level));
+                if let Some(marker_node) = node.child(0)
+                    && let Some(level) = get_heading_level(&node)
+                {
+                    markers.push(Marker {
+                        kind: MarkerKind::Heading(level),
+                        range: marker_node.byte_range(),
+                    });
                 }
             }
             "fenced_code_block_delimiter" => {
@@ -88,7 +114,10 @@ pub fn markers_at(root: &Node, text: &str, line_start: usize, probe_pos: usize) 
                 } else {
                     None
                 };
-                markers.push(Marker::CodeBlockFence { language });
+                markers.push(Marker {
+                    kind: MarkerKind::CodeBlockFence { language },
+                    range: node.byte_range(),
+                });
             }
             "info_string" => {
                 let s = text[node.start_byte()..node.end_byte()].trim();
@@ -97,19 +126,21 @@ pub fn markers_at(root: &Node, text: &str, line_start: usize, probe_pos: usize) 
                 } else {
                     Some(s.to_string())
                 };
-                markers.push(Marker::CodeBlockFence { language });
-            }
-            "fenced_code_block" => {
-                // If we didn't already push a fence marker, this is content
-                if !matches!(markers.last(), Some(Marker::CodeBlockFence { .. })) {
-                    markers.push(Marker::CodeBlockContent);
+                // Range covers the delimiter, not the info_string
+                if let Some(parent) = node.parent()
+                    && let Some(delim) = parent.child(0)
+                {
+                    markers.push(Marker {
+                        kind: MarkerKind::CodeBlockFence { language },
+                        range: delim.byte_range(),
+                    });
                 }
             }
-            "indented_code_block" => {
-                markers.push(Marker::CodeBlockContent);
-            }
             "thematic_break" => {
-                markers.push(Marker::ThematicBreak);
+                markers.push(Marker {
+                    kind: MarkerKind::ThematicBreak,
+                    range: node.byte_range(),
+                });
             }
             _ => {}
         }
@@ -129,11 +160,15 @@ fn is_ordered_list(list_item: &Node) -> bool {
     false
 }
 
-fn get_checkbox(list_item: &Node) -> Option<Marker> {
+fn get_checkbox(list_item: &Node) -> Option<(MarkerKind, Range<usize>)> {
     if let Some(second) = list_item.child(1) {
         match second.kind() {
-            "task_list_marker_unchecked" => return Some(Marker::Checkbox { checked: false }),
-            "task_list_marker_checked" => return Some(Marker::Checkbox { checked: true }),
+            "task_list_marker_unchecked" => {
+                return Some((MarkerKind::Checkbox { checked: false }, second.byte_range()));
+            }
+            "task_list_marker_checked" => {
+                return Some((MarkerKind::Checkbox { checked: true }, second.byte_range()));
+            }
             _ => {}
         }
     }
@@ -157,6 +192,10 @@ fn get_heading_level(heading: &Node) -> Option<u8> {
 mod tests {
     use super::*;
     use crate::buffer::Buffer;
+
+    fn kinds(markers: &[Marker]) -> Vec<&MarkerKind> {
+        markers.iter().map(|m| &m.kind).collect()
+    }
 
     #[allow(dead_code)]
     fn print_tree(node: &tree_sitter::Node, text: &str, indent: usize) {
@@ -191,7 +230,10 @@ mod tests {
         let root = tree.block_tree().root_node();
 
         let markers = markers_at(&root, &text, 0, 5);
-        assert_eq!(markers, vec![Marker::ListItem { ordered: false }]);
+        assert_eq!(
+            kinds(&markers),
+            vec![&MarkerKind::ListItem { ordered: false }]
+        );
     }
 
     #[test]
@@ -209,12 +251,12 @@ mod tests {
         // Line 1: has the block_quote_marker
         let markers = markers_at(&root, &text, 0, 7);
         println!("Line 1 markers: {:?}", markers);
-        assert_eq!(markers, vec![Marker::BlockQuote]);
+        assert_eq!(kinds(&markers), vec![&MarkerKind::BlockQuote]);
 
         // Line 2: continuation - should also just be BlockQuote
         let markers = markers_at(&root, &text, 9, 16);
         println!("Line 2 markers: {:?}", markers);
-        assert_eq!(markers, vec![Marker::BlockQuote]);
+        assert_eq!(kinds(&markers), vec![&MarkerKind::BlockQuote]);
     }
 
     #[test]
@@ -230,7 +272,10 @@ mod tests {
 
         // Line 2: probe at byte 20, line starts at byte 10
         let markers = markers_at(&root, &text, 10, 20);
-        assert_eq!(markers, vec![Marker::BlockQuote, Marker::BlockQuote]);
+        assert_eq!(
+            kinds(&markers),
+            vec![&MarkerKind::BlockQuote, &MarkerKind::BlockQuote]
+        );
     }
 
     #[test]
@@ -242,8 +287,11 @@ mod tests {
 
         let markers = markers_at(&root, &text, 0, 7);
         assert_eq!(
-            markers,
-            vec![Marker::ListItem { ordered: false }, Marker::BlockQuote,]
+            kinds(&markers),
+            vec![
+                &MarkerKind::ListItem { ordered: false },
+                &MarkerKind::BlockQuote
+            ]
         );
     }
 
@@ -255,7 +303,10 @@ mod tests {
         let root = tree.block_tree().root_node();
 
         let markers = markers_at(&root, &text, 0, 7);
-        assert_eq!(markers, vec![Marker::ListItem { ordered: true }]);
+        assert_eq!(
+            kinds(&markers),
+            vec![&MarkerKind::ListItem { ordered: true }]
+        );
     }
 
     #[test]
@@ -268,20 +319,20 @@ mod tests {
         // Line 1: unchecked (stack order: innermost first)
         let markers = markers_at(&root, &text, 0, 9);
         assert_eq!(
-            markers,
+            kinds(&markers),
             vec![
-                Marker::Checkbox { checked: false },
-                Marker::ListItem { ordered: false },
+                &MarkerKind::Checkbox { checked: false },
+                &MarkerKind::ListItem { ordered: false },
             ]
         );
 
         // Line 2: checked
         let markers = markers_at(&root, &text, 11, 20);
         assert_eq!(
-            markers,
+            kinds(&markers),
             vec![
-                Marker::Checkbox { checked: true },
-                Marker::ListItem { ordered: false },
+                &MarkerKind::Checkbox { checked: true },
+                &MarkerKind::ListItem { ordered: false },
             ]
         );
     }
@@ -294,7 +345,7 @@ mod tests {
         let root = tree.block_tree().root_node();
 
         let markers = markers_at(&root, &text, 0, 9);
-        assert_eq!(markers, vec![Marker::Heading(2)]);
+        assert_eq!(kinds(&markers), vec![&MarkerKind::Heading(2)]);
     }
 
     #[test]
@@ -311,19 +362,22 @@ mod tests {
         // Line 1 (opening fence)
         let markers = markers_at(&root, &text, 0, 5);
         assert_eq!(
-            markers,
-            vec![Marker::CodeBlockFence {
+            kinds(&markers),
+            vec![&MarkerKind::CodeBlockFence {
                 language: Some("rust".to_string())
             }]
         );
 
-        // Line 2 (content)
+        // Line 2 (content) - no markers
         let markers = markers_at(&root, &text, 8, 12);
-        assert_eq!(markers, vec![Marker::CodeBlockContent]);
+        assert_eq!(kinds(&markers), vec![] as Vec<&MarkerKind>);
 
         // Line 3 (closing fence) - no language
         let markers = markers_at(&root, &text, 19, 21);
-        assert_eq!(markers, vec![Marker::CodeBlockFence { language: None }]);
+        assert_eq!(
+            kinds(&markers),
+            vec![&MarkerKind::CodeBlockFence { language: None }]
+        );
     }
 
     #[test]
@@ -371,13 +425,16 @@ fn main() {
 
             match i {
                 0 => assert_eq!(
-                    markers,
-                    vec![Marker::CodeBlockFence {
+                    kinds(&markers),
+                    vec![&MarkerKind::CodeBlockFence {
                         language: Some("rust".to_string())
                     }]
                 ),
-                1..=3 => assert_eq!(markers, vec![Marker::CodeBlockContent]),
-                4 => assert_eq!(markers, vec![Marker::CodeBlockFence { language: None }]),
+                1..=3 => assert_eq!(kinds(&markers), vec![] as Vec<&MarkerKind>),
+                4 => assert_eq!(
+                    kinds(&markers),
+                    vec![&MarkerKind::CodeBlockFence { language: None }]
+                ),
                 _ => {}
             }
 
@@ -392,11 +449,12 @@ fn main() {
         let tree = buf.tree().unwrap();
         let root = tree.block_tree().root_node();
 
+        // No markers for indented code blocks - they're just content
         let markers = markers_at(&root, &text, 0, 8);
-        assert_eq!(markers, vec![Marker::CodeBlockContent]);
+        assert_eq!(kinds(&markers), vec![] as Vec<&MarkerKind>);
 
         let markers = markers_at(&root, &text, 15, 22);
-        assert_eq!(markers, vec![Marker::CodeBlockContent]);
+        assert_eq!(kinds(&markers), vec![] as Vec<&MarkerKind>);
     }
 
     #[test]
@@ -407,7 +465,7 @@ fn main() {
         let root = tree.block_tree().root_node();
 
         let markers = markers_at(&root, &text, 0, 1);
-        assert_eq!(markers, vec![Marker::ThematicBreak]);
+        assert_eq!(kinds(&markers), vec![&MarkerKind::ThematicBreak]);
     }
 
     #[test]
@@ -424,7 +482,10 @@ fn main() {
 
         // Line 1: has the marker (bytes 0-12)
         let markers = markers_at(&root, &text, 0, 11);
-        assert_eq!(markers, vec![Marker::ListItem { ordered: false }]);
+        assert_eq!(
+            kinds(&markers),
+            vec![&MarkerKind::ListItem { ordered: false }]
+        );
 
         // Line 2: continuation within same paragraph
         // The "  " is just text the user typed, not a structural marker
@@ -432,7 +493,7 @@ fn main() {
         println!("\nProbing at line_start=13, probe_pos=26");
         let markers = markers_at(&root, &text, 13, 26);
         println!("markers: {:?}", markers);
-        assert_eq!(markers, vec![]);
+        assert_eq!(kinds(&markers), vec![] as Vec<&MarkerKind>);
     }
 
     #[test]
@@ -449,13 +510,16 @@ fn main() {
 
         // Line 1: has the marker
         let markers = markers_at(&root, &text, 0, 11);
-        assert_eq!(markers, vec![Marker::ListItem { ordered: false }]);
+        assert_eq!(
+            kinds(&markers),
+            vec![&MarkerKind::ListItem { ordered: false }]
+        );
 
         // Line 3: "  Second paragraph" - second paragraph in list item
         // block_continuation [14-16] is a sibling of paragraph [16-33]
         println!("\nProbing at line_start=14, probe_pos=31");
         let markers = markers_at(&root, &text, 14, 31);
         println!("markers: {:?}", markers);
-        assert_eq!(markers, vec![Marker::Indent]);
+        assert_eq!(kinds(&markers), vec![&MarkerKind::Indent]);
     }
 }
