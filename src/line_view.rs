@@ -972,13 +972,13 @@ impl IntoElement for LineView<'_> {
                     };
 
                     // Check if click is on checkbox in the prefix
-                    if let Some(ref range) = checkbox_click_range {
-                        if visual_index >= range.start && visual_index < range.end {
-                            if let Some(ref on_checkbox) = on_checkbox {
-                                on_checkbox(line_number, window, cx);
-                                return;
-                            }
-                        }
+                    if let Some(ref range) = checkbox_click_range
+                        && visual_index >= range.start
+                        && visual_index < range.end
+                        && let Some(ref on_checkbox) = on_checkbox
+                    {
+                        on_checkbox(line_number, window, cx);
+                        return;
                     }
 
                     // Adjust for substitution prefix (clicks in prefix map to start of content)

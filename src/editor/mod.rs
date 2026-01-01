@@ -540,7 +540,6 @@ impl Editor {
                     self.smart_tab();
                 }
                 cx.notify();
-                return; // Prevent key_char from also being processed
             }
             "a" if keystroke.modifiers.control || keystroke.modifiers.platform => {
                 self.selection = Selection::select_all(&self.buffer);
