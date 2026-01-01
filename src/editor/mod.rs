@@ -292,12 +292,40 @@ impl Editor {
         if !self.selection.is_collapsed() {
             self.delete_selection();
         } else if self.cursor().offset > 0 {
-            let cursor_before = self.cursor().offset;
-            let new_cursor = self.cursor().move_left(&self.buffer);
-            self.buffer
-                .delete(new_cursor.offset..cursor_before, cursor_before);
-            self.selection = Selection::new(new_cursor.offset, new_cursor.offset);
+            let cursor_pos = self.cursor().offset;
+
+            // Check if cursor is at the end of a marker - if so, delete the whole marker
+            if let Some(delete_range) = self.smart_backspace_range(cursor_pos) {
+                self.buffer.delete(delete_range.clone(), cursor_pos);
+                self.selection = Selection::new(delete_range.start, delete_range.start);
+            } else {
+                // Normal single-character delete
+                let new_cursor = self.cursor().move_left(&self.buffer);
+                self.buffer
+                    .delete(new_cursor.offset..cursor_pos, cursor_pos);
+                self.selection = Selection::new(new_cursor.offset, new_cursor.offset);
+            }
         }
+    }
+
+    /// Returns the range to delete if cursor is at the end of a block marker.
+    /// Markers are checked innermost first (e.g., checkbox before list item).
+    fn smart_backspace_range(&self, cursor_pos: usize) -> Option<std::ops::Range<usize>> {
+        let lines = extract_lines(&self.buffer);
+
+        // Find the line containing cursor
+        let line = lines
+            .iter()
+            .find(|l| cursor_pos >= l.range.start && cursor_pos <= l.range.end)?;
+
+        // Check each marker (innermost first) to see if cursor is at its end
+        for marker in &line.markers {
+            if cursor_pos == marker.range.end {
+                return Some(marker.range.clone());
+            }
+        }
+
+        None
     }
 
     fn delete_forward(&mut self) {
