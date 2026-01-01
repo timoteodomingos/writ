@@ -1,7 +1,7 @@
-//! Upward tree traversal for finding markers on a line.
+//! Line markers for markdown block-level elements.
 //!
-//! The core idea: probe at end of line, walk up ancestors, and the ancestor
-//! node types (block_quote, list_item, etc.) tell us what markers apply.
+//! This module provides types for representing markers (blockquotes, lists,
+//! headings, etc.) and functions for extracting them from the parse tree.
 
 use std::ops::Range;
 use tree_sitter::Node;
@@ -28,13 +28,13 @@ pub struct Marker {
 
 /// A line with its markers and metadata.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Line {
+pub struct LineMarkers {
     pub range: Range<usize>,
     pub line_number: usize,
     pub markers: Vec<Marker>,
 }
 
-impl Line {
+impl LineMarkers {
     /// Returns the combined byte range of all markers, or None if no markers.
     pub fn marker_range(&self) -> Option<Range<usize>> {
         if self.markers.is_empty() {
@@ -201,8 +201,8 @@ fn find_node_index(nodes: &[Node], target_byte: usize) -> usize {
 
 /// Find the nearest container to the left of cursor position.
 /// Returns the marker width needed to nest into that container.
-/// Uses cached Lines for O(log n) lookup instead of traversing nodes.
-pub fn find_container_indent_from_lines(lines: &[Line], cursor_pos: usize) -> Option<usize> {
+/// Uses cached LineMarkers for O(log n) lookup instead of traversing nodes.
+pub fn find_container_indent_from_lines(lines: &[LineMarkers], cursor_pos: usize) -> Option<usize> {
     // Binary search to find the line containing cursor_pos
     let line_idx = lines
         .binary_search_by(|line| {
@@ -735,8 +735,8 @@ mod tests {
     // Tests for Line struct methods
     // ========================================================================
 
-    fn make_line(range: Range<usize>, markers: Vec<Marker>) -> Line {
-        Line {
+    fn make_line(range: Range<usize>, markers: Vec<Marker>) -> LineMarkers {
+        LineMarkers {
             range,
             line_number: 0,
             markers,

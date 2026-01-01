@@ -15,11 +15,9 @@ use gpui::{
 
 use crate::buffer::Buffer;
 use crate::cursor::{Cursor, Selection};
-use crate::line_view::{
-    CheckboxCallback, ClickCallback, DragCallback, HoverCallback, LineView, LineViewTheme,
-};
+use crate::line::{CheckboxCallback, ClickCallback, DragCallback, HoverCallback, Line, LineTheme};
 use crate::lines::extract_inline_styles;
-use crate::tree_walk::{Line, find_container_indent_from_lines};
+use crate::marker::{LineMarkers, find_container_indent_from_lines};
 
 type CodeBlockRange = (usize, Option<usize>);
 
@@ -140,7 +138,7 @@ impl Editor {
 
     /// Find the line containing a byte position.
     /// Uses ropey's O(log n) byte_to_line, then O(1) array index.
-    fn find_line_at(&self, byte_pos: usize) -> Option<(usize, &Line)> {
+    fn find_line_at(&self, byte_pos: usize) -> Option<(usize, &LineMarkers)> {
         let idx = self.buffer.byte_to_line(byte_pos);
         self.buffer.lines().get(idx).map(|line| (idx, line))
     }
@@ -421,7 +419,7 @@ impl Editor {
         self.cursor().move_right(&self.buffer)
     }
 
-    fn compute_code_block_ranges(lines: &[Line]) -> Vec<CodeBlockRange> {
+    fn compute_code_block_ranges(lines: &[LineMarkers]) -> Vec<CodeBlockRange> {
         let mut ranges = Vec::new();
         let mut i = 0;
 
@@ -764,7 +762,7 @@ impl Focusable for Editor {
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let theme = self.config.theme.clone();
-        let line_theme = LineViewTheme {
+        let line_theme = LineTheme {
             text_color: theme.foreground,
             cursor_color: theme.purple,
             link_color: theme.cyan,
@@ -883,7 +881,7 @@ impl Render for Editor {
                     .map(|span| (span.clone(), theme.color_for_highlight(span.highlight_id)))
                     .collect();
 
-                LineView::new(
+                Line::new(
                     line,
                     &buffer_text,
                     cursor_offset,

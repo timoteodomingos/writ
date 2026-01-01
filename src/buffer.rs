@@ -6,8 +6,8 @@ use undo::Record;
 
 use crate::highlight::{HighlightSpan, Highlighter};
 use crate::lines::extract_lines_from_parts;
+use crate::marker::{LineMarkers, MarkerKind};
 use crate::parser::{MarkdownParser, MarkdownTree};
-use crate::tree_walk::{Line, MarkerKind};
 
 #[derive(Clone, Debug, Default)]
 struct CodeHighlightCache {
@@ -64,7 +64,7 @@ pub struct BufferContent {
     highlighter: Highlighter,
     code_highlight_cache: CodeHighlightCache,
     /// Cached line info, updated when tree changes.
-    lines: Vec<Line>,
+    lines: Vec<LineMarkers>,
 }
 
 impl BufferContent {
@@ -185,7 +185,7 @@ impl BufferContent {
         self.tree.as_ref()
     }
 
-    pub fn lines(&self) -> &[Line] {
+    pub fn lines(&self) -> &[LineMarkers] {
         &self.lines
     }
 
@@ -467,7 +467,7 @@ impl Buffer {
         self.content.tree()
     }
 
-    pub fn lines(&self) -> &[Line] {
+    pub fn lines(&self) -> &[LineMarkers] {
         self.content.lines()
     }
 

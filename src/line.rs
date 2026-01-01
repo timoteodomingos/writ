@@ -9,8 +9,73 @@ use gpui::{
 };
 
 use crate::highlight::HighlightSpan;
-use crate::lines::StyledRegion;
-use crate::tree_walk::{Line, MarkerKind};
+use crate::marker::{LineMarkers, MarkerKind};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct TextStyle {
+    pub bold: bool,
+    pub italic: bool,
+    pub code: bool,
+    pub strikethrough: bool,
+    pub heading_level: u8,
+}
+
+impl TextStyle {
+    pub fn bold() -> Self {
+        Self {
+            bold: true,
+            ..Default::default()
+        }
+    }
+
+    pub fn italic() -> Self {
+        Self {
+            italic: true,
+            ..Default::default()
+        }
+    }
+
+    pub fn code() -> Self {
+        Self {
+            code: true,
+            ..Default::default()
+        }
+    }
+
+    pub fn strikethrough() -> Self {
+        Self {
+            strikethrough: true,
+            ..Default::default()
+        }
+    }
+
+    pub fn heading(level: u8) -> Self {
+        Self {
+            heading_level: level,
+            bold: true,
+            ..Default::default()
+        }
+    }
+
+    pub fn merge(&self, other: &TextStyle) -> Self {
+        Self {
+            bold: self.bold || other.bold,
+            italic: self.italic || other.italic,
+            code: self.code || other.code,
+            strikethrough: self.strikethrough || other.strikethrough,
+            heading_level: self.heading_level.max(other.heading_level),
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct StyledRegion {
+    pub full_range: Range<usize>,
+    pub content_range: Range<usize>,
+    pub style: TextStyle,
+    pub link_url: Option<String>,
+    pub is_image: bool,
+}
 
 pub type ClickCallback = Rc<dyn Fn(usize, bool, usize, &mut Window, &mut App)>;
 pub type DragCallback = Rc<dyn Fn(usize, &mut Window, &mut App)>;
@@ -19,7 +84,7 @@ pub type CheckboxCallback = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 pub type HoverCallback = Rc<dyn Fn(bool, bool, &mut Window, &mut App)>;
 
 #[derive(Clone)]
-pub struct LineViewTheme {
+pub struct LineTheme {
     pub text_color: Rgba,
     pub cursor_color: Rgba,
     pub link_color: Rgba,
@@ -32,12 +97,12 @@ pub struct LineViewTheme {
     pub code_font: Font,
 }
 
-pub struct LineView<'a> {
-    line: &'a Line,
+pub struct Line<'a> {
+    line: &'a LineMarkers,
     text: &'a str,
     cursor_offset: usize,
     inline_styles: Vec<StyledRegion>,
-    theme: LineViewTheme,
+    theme: LineTheme,
     selection_range: Option<Range<usize>>,
     code_highlights: Vec<(HighlightSpan, Rgba)>,
     base_path: Option<PathBuf>,
@@ -48,13 +113,13 @@ pub struct LineView<'a> {
     scroll_anchor: Option<ScrollAnchor>,
 }
 
-impl<'a> LineView<'a> {
+impl<'a> Line<'a> {
     pub fn new(
-        line: &'a Line,
+        line: &'a LineMarkers,
         text: &'a str,
         cursor_offset: usize,
         inline_styles: Vec<StyledRegion>,
-        theme: LineViewTheme,
+        theme: LineTheme,
         selection_range: Option<Range<usize>>,
         code_highlights: Vec<(HighlightSpan, Rgba)>,
         base_path: Option<PathBuf>,
@@ -752,7 +817,7 @@ fn line_base(line_number: usize) -> gpui::Stateful<gpui::Div> {
         .mx_auto()
 }
 
-impl IntoElement for LineView<'_> {
+impl IntoElement for Line<'_> {
     type Element = gpui::Stateful<gpui::Div>;
 
     fn into_element(self) -> Self::Element {

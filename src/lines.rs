@@ -1,80 +1,17 @@
 use crate::buffer::Buffer;
+use crate::marker::{LineMarkers, collect_nodes, markers_at};
 use crate::parser::MarkdownTree;
-use crate::tree_walk::{Line, collect_nodes, markers_at};
 use std::ops::Range;
 use tree_sitter::Node;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub struct TextStyle {
-    pub bold: bool,
-    pub italic: bool,
-    pub code: bool,
-    pub strikethrough: bool,
-    pub heading_level: u8,
-}
+// Re-export for backwards compatibility
+pub use crate::line::{StyledRegion, TextStyle};
 
-impl TextStyle {
-    pub fn bold() -> Self {
-        Self {
-            bold: true,
-            ..Default::default()
-        }
-    }
-
-    pub fn italic() -> Self {
-        Self {
-            italic: true,
-            ..Default::default()
-        }
-    }
-
-    pub fn code() -> Self {
-        Self {
-            code: true,
-            ..Default::default()
-        }
-    }
-
-    pub fn strikethrough() -> Self {
-        Self {
-            strikethrough: true,
-            ..Default::default()
-        }
-    }
-
-    pub fn heading(level: u8) -> Self {
-        Self {
-            heading_level: level,
-            bold: true,
-            ..Default::default()
-        }
-    }
-
-    pub fn merge(&self, other: &TextStyle) -> Self {
-        Self {
-            bold: self.bold || other.bold,
-            italic: self.italic || other.italic,
-            code: self.code || other.code,
-            strikethrough: self.strikethrough || other.strikethrough,
-            heading_level: self.heading_level.max(other.heading_level),
-        }
-    }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct StyledRegion {
-    pub full_range: Range<usize>,
-    pub content_range: Range<usize>,
-    pub style: TextStyle,
-    pub link_url: Option<String>,
-    pub is_image: bool,
-}
-
-pub fn extract_lines(buffer: &Buffer) -> Vec<Line> {
+pub fn extract_lines(buffer: &Buffer) -> Vec<LineMarkers> {
     extract_lines_from_parts(&buffer.text(), buffer.tree())
 }
 
-pub fn extract_lines_from_parts(text: &str, tree: Option<&MarkdownTree>) -> Vec<Line> {
+pub fn extract_lines_from_parts(text: &str, tree: Option<&MarkdownTree>) -> Vec<LineMarkers> {
     // First, split the buffer into lines
     let mut lines = Vec::new();
     let mut line_start = 0;
@@ -110,7 +47,7 @@ pub fn extract_lines_from_parts(text: &str, tree: Option<&MarkdownTree>) -> Vec<
                 Vec::new()
             };
 
-            Line {
+            LineMarkers {
                 range,
                 line_number: line_num,
                 markers,
@@ -119,14 +56,14 @@ pub fn extract_lines_from_parts(text: &str, tree: Option<&MarkdownTree>) -> Vec<
         .collect()
 }
 
-pub fn extract_inline_styles(buffer: &Buffer, line: &Line) -> Vec<StyledRegion> {
+pub fn extract_inline_styles(buffer: &Buffer, line: &LineMarkers) -> Vec<StyledRegion> {
     extract_inline_styles_from_parts(&buffer.text(), buffer.tree(), line)
 }
 
 pub fn extract_inline_styles_from_parts(
     text: &str,
     tree: Option<&MarkdownTree>,
-    line: &Line,
+    line: &LineMarkers,
 ) -> Vec<StyledRegion> {
     let Some(tree) = tree else {
         return Vec::new();
@@ -365,7 +302,7 @@ fn extract_image_region(node: &Node, text: &str) -> Option<StyledRegion> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tree_walk::MarkerKind;
+    use crate::marker::MarkerKind;
 
     #[test]
     fn test_extract_lines_empty_buffer() {
@@ -604,168 +541,185 @@ mod tests {
     }
 }
 
-    #[test]
-    fn test_code_block_fence_detection() {
-        // Simple code block
-        let buf: Buffer = "```rust\nfn main() {}\n```\n".parse().unwrap();
-        let lines = extract_lines(&buf);
-        
-        println!("Simple code block:");
-        for (i, line) in lines.iter().enumerate() {
-            println!("  Line {}: is_fence={}", i, line.is_fence());
-        }
-        
-        assert!(lines[0].is_fence(), "Line 0 should be fence");
-        assert!(!lines[1].is_fence(), "Line 1 should not be fence");
-        assert!(lines[2].is_fence(), "Line 2 should be fence");
-        
-        // Code block in blockquote
-        let buf2: Buffer = "> ```rust\n> fn main() {}\n> ```\n".parse().unwrap();
-        let lines2 = extract_lines(&buf2);
-        
-        println!("\nCode block in blockquote:");
-        for (i, line) in lines2.iter().enumerate() {
-            println!("  Line {}: is_fence={}", i, line.is_fence());
-        }
-        
-        assert!(lines2[0].is_fence(), "Line 0 should be fence");
-        assert!(!lines2[1].is_fence(), "Line 1 should not be fence");
-        assert!(lines2[2].is_fence(), "Line 2 should be fence");
+#[test]
+fn test_code_block_fence_detection() {
+    // Simple code block
+    let buf: Buffer = "```rust\nfn main() {}\n```\n".parse().unwrap();
+    let lines = extract_lines(&buf);
+
+    println!("Simple code block:");
+    for (i, line) in lines.iter().enumerate() {
+        println!("  Line {}: is_fence={}", i, line.is_fence());
     }
 
-    #[test]
-    fn test_code_block_content_markers() {
-        // Code block in blockquote - check content line markers
-        let buf: Buffer = "> ```rust\n> fn main() {}\n> ```\n".parse().unwrap();
-        let lines = extract_lines(&buf);
-        
-        println!("Content line (line 1) markers: {:?}", lines[1].markers);
-        println!("Content line substitution: {:?}", lines[1].substitution(&buf.text()));
+    assert!(lines[0].is_fence(), "Line 0 should be fence");
+    assert!(!lines[1].is_fence(), "Line 1 should not be fence");
+    assert!(lines[2].is_fence(), "Line 2 should be fence");
+
+    // Code block in blockquote
+    let buf2: Buffer = "> ```rust\n> fn main() {}\n> ```\n".parse().unwrap();
+    let lines2 = extract_lines(&buf2);
+
+    println!("\nCode block in blockquote:");
+    for (i, line) in lines2.iter().enumerate() {
+        println!("  Line {}: is_fence={}", i, line.is_fence());
     }
 
-    #[test]
-    fn test_simple_code_block_content_markers() {
-        // Simple code block - check content line markers
-        let buf: Buffer = "```rust\nfn main() {}\n```\n".parse().unwrap();
-        let lines = extract_lines(&buf);
-        
-        println!("Content line (line 1) markers: {:?}", lines[1].markers);
-        println!("Content line substitution: {:?}", lines[1].substitution(&buf.text()));
-        println!("Content line range: {:?}", lines[1].range);
-        println!("Content line text: {:?}", &buf.text()[lines[1].range.clone()]);
-    }
+    assert!(lines2[0].is_fence(), "Line 0 should be fence");
+    assert!(!lines2[1].is_fence(), "Line 1 should not be fence");
+    assert!(lines2[2].is_fence(), "Line 2 should be fence");
+}
 
-    #[test]
-    fn test_cursor_in_code_block_detection() {
-        use crate::tree_walk::Line;
-        
-        fn compute_code_block_ranges(lines: &[Line]) -> Vec<(usize, Option<usize>)> {
-            let mut ranges = Vec::new();
-            let mut i = 0;
+#[test]
+fn test_code_block_content_markers() {
+    // Code block in blockquote - check content line markers
+    let buf: Buffer = "> ```rust\n> fn main() {}\n> ```\n".parse().unwrap();
+    let lines = extract_lines(&buf);
 
-            while i < lines.len() {
-                if lines[i].is_fence() {
-                    let start = i;
-                    i += 1;
-                    let mut found_close = false;
+    println!("Content line (line 1) markers: {:?}", lines[1].markers);
+    println!(
+        "Content line substitution: {:?}",
+        lines[1].substitution(&buf.text())
+    );
+}
 
-                    while i < lines.len() {
-                        if lines[i].is_fence() {
-                            ranges.push((start, Some(i)));
-                            i += 1;
-                            found_close = true;
-                            break;
-                        }
+#[test]
+fn test_simple_code_block_content_markers() {
+    // Simple code block - check content line markers
+    let buf: Buffer = "```rust\nfn main() {}\n```\n".parse().unwrap();
+    let lines = extract_lines(&buf);
+
+    println!("Content line (line 1) markers: {:?}", lines[1].markers);
+    println!(
+        "Content line substitution: {:?}",
+        lines[1].substitution(&buf.text())
+    );
+    println!("Content line range: {:?}", lines[1].range);
+    println!(
+        "Content line text: {:?}",
+        &buf.text()[lines[1].range.clone()]
+    );
+}
+
+#[test]
+fn test_cursor_in_code_block_detection() {
+    use crate::marker::LineMarkers;
+
+    fn compute_code_block_ranges(lines: &[LineMarkers]) -> Vec<(usize, Option<usize>)> {
+        let mut ranges = Vec::new();
+        let mut i = 0;
+
+        while i < lines.len() {
+            if lines[i].is_fence() {
+                let start = i;
+                i += 1;
+                let mut found_close = false;
+
+                while i < lines.len() {
+                    if lines[i].is_fence() {
+                        ranges.push((start, Some(i)));
                         i += 1;
+                        found_close = true;
+                        break;
                     }
-
-                    if !found_close {
-                        ranges.push((start, None));
-                    }
-                } else {
                     i += 1;
                 }
-            }
 
-            ranges
-        }
-        
-        fn cursor_in_code_block(lines: &[Line], cursor_line: usize) -> bool {
-            let ranges = compute_code_block_ranges(lines);
-            for (start, end) in ranges {
-                let block_end = end.unwrap_or(lines.len().saturating_sub(1));
-                if cursor_line >= start && cursor_line <= block_end {
-                    return true;
+                if !found_close {
+                    ranges.push((start, None));
                 }
+            } else {
+                i += 1;
             }
-            false
         }
-        
-        // Simple code block
-        let buf: Buffer = "```rust\nfn main() {}\n```\n".parse().unwrap();
-        let lines = extract_lines(&buf);
-        
-        println!("Simple code block:");
-        let ranges = compute_code_block_ranges(&lines);
-        println!("  Ranges: {:?}", ranges);
-        println!("  Line 0 in block: {}", cursor_in_code_block(&lines, 0));
-        println!("  Line 1 in block: {}", cursor_in_code_block(&lines, 1));
-        println!("  Line 2 in block: {}", cursor_in_code_block(&lines, 2));
-        
-        assert!(cursor_in_code_block(&lines, 0));
-        assert!(cursor_in_code_block(&lines, 1));
-        assert!(cursor_in_code_block(&lines, 2));
-        
-        // Code block in blockquote
-        let buf2: Buffer = "> ```rust\n> fn main() {}\n> ```\n".parse().unwrap();
-        let lines2 = extract_lines(&buf2);
-        
-        println!("\nCode block in blockquote:");
-        let ranges2 = compute_code_block_ranges(&lines2);
-        println!("  Ranges: {:?}", ranges2);
-        println!("  Line 0 in block: {}", cursor_in_code_block(&lines2, 0));
-        println!("  Line 1 in block: {}", cursor_in_code_block(&lines2, 1));
-        println!("  Line 2 in block: {}", cursor_in_code_block(&lines2, 2));
-        
-        assert!(cursor_in_code_block(&lines2, 0));
-        assert!(cursor_in_code_block(&lines2, 1));
-        assert!(cursor_in_code_block(&lines2, 2));
+
+        ranges
     }
 
-    #[test]
-    fn test_code_block_after_tab() {
-        // Simulate: type ```rust, enter, tab, type "fn foo()"
-        let text = "```rust\n    fn foo()\n```\n";
-        let buf: Buffer = text.parse().unwrap();
-        let lines = extract_lines(&buf);
-        
-        println!("Text: {:?}", text);
-        println!("\nLines:");
-        for (i, line) in lines.iter().enumerate() {
-            let line_text = &text[line.range.clone()];
-            println!("  Line {}: range={:?} text={:?}", i, line.range, line_text);
-            println!("    markers: {:?}", line.markers);
-            println!("    is_fence: {}", line.is_fence());
-            println!("    substitution: {:?}", line.substitution(text));
-            println!("    marker_range: {:?}", line.marker_range());
+    fn cursor_in_code_block(lines: &[LineMarkers], cursor_line: usize) -> bool {
+        let ranges = compute_code_block_ranges(lines);
+        for (start, end) in ranges {
+            let block_end = end.unwrap_or(lines.len().saturating_sub(1));
+            if cursor_line >= start && cursor_line <= block_end {
+                return true;
+            }
         }
-        
-        // Print tree structure
-        if let Some(tree) = buf.tree() {
-            println!("\nBlock tree:");
-            fn print_node(node: tree_sitter::Node, text: &str, indent: usize) {
-                let spacing = "  ".repeat(indent);
-                let preview: String = text[node.start_byte()..node.end_byte().min(node.start_byte() + 30)]
-                    .chars()
-                    .flat_map(|c| if c == '\n' { vec!['\\', 'n'] } else { vec![c] })
-                    .collect();
-                println!("{}{} [{}-{}] {:?}", spacing, node.kind(), node.start_byte(), node.end_byte(), preview);
-                for i in 0..node.child_count() {
-                    if let Some(child) = node.child(i as u32) {
-                        print_node(child, text, indent + 1);
-                    }
+        false
+    }
+
+    // Simple code block
+    let buf: Buffer = "```rust\nfn main() {}\n```\n".parse().unwrap();
+    let lines = extract_lines(&buf);
+
+    println!("Simple code block:");
+    let ranges = compute_code_block_ranges(&lines);
+    println!("  Ranges: {:?}", ranges);
+    println!("  Line 0 in block: {}", cursor_in_code_block(&lines, 0));
+    println!("  Line 1 in block: {}", cursor_in_code_block(&lines, 1));
+    println!("  Line 2 in block: {}", cursor_in_code_block(&lines, 2));
+
+    assert!(cursor_in_code_block(&lines, 0));
+    assert!(cursor_in_code_block(&lines, 1));
+    assert!(cursor_in_code_block(&lines, 2));
+
+    // Code block in blockquote
+    let buf2: Buffer = "> ```rust\n> fn main() {}\n> ```\n".parse().unwrap();
+    let lines2 = extract_lines(&buf2);
+
+    println!("\nCode block in blockquote:");
+    let ranges2 = compute_code_block_ranges(&lines2);
+    println!("  Ranges: {:?}", ranges2);
+    println!("  Line 0 in block: {}", cursor_in_code_block(&lines2, 0));
+    println!("  Line 1 in block: {}", cursor_in_code_block(&lines2, 1));
+    println!("  Line 2 in block: {}", cursor_in_code_block(&lines2, 2));
+
+    assert!(cursor_in_code_block(&lines2, 0));
+    assert!(cursor_in_code_block(&lines2, 1));
+    assert!(cursor_in_code_block(&lines2, 2));
+}
+
+#[test]
+fn test_code_block_after_tab() {
+    // Simulate: type ```rust, enter, tab, type "fn foo()"
+    let text = "```rust\n    fn foo()\n```\n";
+    let buf: Buffer = text.parse().unwrap();
+    let lines = extract_lines(&buf);
+
+    println!("Text: {:?}", text);
+    println!("\nLines:");
+    for (i, line) in lines.iter().enumerate() {
+        let line_text = &text[line.range.clone()];
+        println!("  Line {}: range={:?} text={:?}", i, line.range, line_text);
+        println!("    markers: {:?}", line.markers);
+        println!("    is_fence: {}", line.is_fence());
+        println!("    substitution: {:?}", line.substitution(text));
+        println!("    marker_range: {:?}", line.marker_range());
+    }
+
+    // Print tree structure
+    if let Some(tree) = buf.tree() {
+        println!("\nBlock tree:");
+        fn print_node(node: tree_sitter::Node, text: &str, indent: usize) {
+            let spacing = "  ".repeat(indent);
+            let preview: String = text
+                [node.start_byte()..node.end_byte().min(node.start_byte() + 30)]
+                .chars()
+                .flat_map(|c| if c == '\n' { vec!['\\', 'n'] } else { vec![c] })
+                .collect();
+            println!(
+                "{}{} [{}-{}] {:?}",
+                spacing,
+                node.kind(),
+                node.start_byte(),
+                node.end_byte(),
+                preview
+            );
+            for i in 0..node.child_count() {
+                if let Some(child) = node.child(i as u32) {
+                    print_node(child, text, indent + 1);
                 }
             }
-            print_node(tree.block_tree().root_node(), text, 0);
         }
+        print_node(tree.block_tree().root_node(), text, 0);
     }
+}
