@@ -842,11 +842,25 @@ impl IntoElement for LineView<'_> {
 
         line_div = line_div.child(text_container);
 
-        // Add click handler for text content (not checkbox - that has its own handler)
+        // Add click handler for text content
         if let Some(ref on_click) = self.on_click {
             let on_click = on_click.clone();
+            let on_checkbox = self.on_checkbox.clone();
             let layout_for_click = text_layout.clone();
             let content_range = self.content_range();
+            let line_number = self.line.line_number;
+
+            // Calculate checkbox click range within the prefix (if this line has a checkbox)
+            let checkbox_click_range: Option<std::ops::Range<usize>> =
+                if self.line.checkbox().is_some() {
+                    self.get_substitution().and_then(|prefix| {
+                        let start = prefix.find('[')?;
+                        let end = prefix.find(']').map(|i| i + 1)?; // include ']'
+                        Some(start..end)
+                    })
+                } else {
+                    None
+                };
 
             // Extract link regions for Ctrl/Cmd+click handling
             let link_regions: Vec<_> = self
@@ -899,6 +913,16 @@ impl IntoElement for LineView<'_> {
                         Ok(idx) => idx,
                         Err(idx) => idx,
                     };
+
+                    // Check if click is on checkbox in the prefix
+                    if let Some(ref range) = checkbox_click_range {
+                        if visual_index >= range.start && visual_index < range.end {
+                            if let Some(ref on_checkbox) = on_checkbox {
+                                on_checkbox(line_number, window, cx);
+                                return;
+                            }
+                        }
+                    }
 
                     // Adjust for substitution prefix (clicks in prefix map to start of content)
                     let content_visual_index = visual_index.saturating_sub(prefix_len);
@@ -960,7 +984,7 @@ impl IntoElement for LineView<'_> {
             );
         }
 
-        // Add mouse move handler for drag and link hover detection
+        // Add mouse move handler for drag and link/checkbox hover detection
         {
             let on_drag = self.on_drag.clone();
             let on_link_hover = self.on_link_hover.clone();
@@ -970,6 +994,17 @@ impl IntoElement for LineView<'_> {
 
             // Calculate prefix length for visual-to-buffer conversion
             let prefix_len = self.get_substitution().map(|s| s.len()).unwrap_or(0);
+
+            // Calculate checkbox hover range within the prefix (if this line has a checkbox)
+            let checkbox_hover_range: Option<Range<usize>> = if self.line.checkbox().is_some() {
+                self.get_substitution().and_then(|prefix| {
+                    let start = prefix.find('[')?;
+                    let end = prefix.find(']').map(|i| i + 1)?;
+                    Some(start..end)
+                })
+            } else {
+                None
+            };
 
             // Extract link content ranges for hover detection
             let link_content_ranges: Vec<Range<usize>> = self
@@ -996,32 +1031,40 @@ impl IntoElement for LineView<'_> {
                     on_drag(buffer_offset, window, cx);
                 }
 
-                // Handle link hover detection when Ctrl/Cmd is held
+                // Handle link and checkbox hover detection
                 if let Some(ref on_link_hover) = on_link_hover {
-                    let is_ctrl_held = event.modifiers.control || event.modifiers.platform;
+                    let visual_index = match layout_for_move.index_for_position(event.position) {
+                        Ok(idx) => idx,
+                        Err(idx) => idx,
+                    };
 
-                    if is_ctrl_held && !link_content_ranges.is_empty() {
-                        // Get buffer offset from mouse position
-                        let visual_index = match layout_for_move.index_for_position(event.position)
-                        {
-                            Ok(idx) => idx,
-                            Err(idx) => idx,
-                        };
+                    // Check if hovering over checkbox in prefix (no modifier needed)
+                    let hovering_checkbox = checkbox_hover_range.as_ref().is_some_and(|range| {
+                        visual_index >= range.start && visual_index < range.end
+                    });
 
-                        // Adjust for substitution prefix
-                        let content_visual_index = visual_index.saturating_sub(prefix_len);
-                        let buffer_offset = (content_range.start + content_visual_index)
-                            .min(line_range_for_move.end);
-
-                        // Check if we're over a link
-                        let hovering_link = link_content_ranges
-                            .iter()
-                            .any(|range| buffer_offset >= range.start && buffer_offset < range.end);
-
-                        on_link_hover(hovering_link, window, cx);
+                    if hovering_checkbox {
+                        on_link_hover(true, window, cx);
                     } else {
-                        // Not holding Ctrl or no links - not hovering
-                        on_link_hover(false, window, cx);
+                        // Check for link hover (requires Ctrl/Cmd)
+                        let is_ctrl_held = event.modifiers.control || event.modifiers.platform;
+
+                        if is_ctrl_held && !link_content_ranges.is_empty() {
+                            // Adjust for substitution prefix
+                            let content_visual_index = visual_index.saturating_sub(prefix_len);
+                            let buffer_offset = (content_range.start + content_visual_index)
+                                .min(line_range_for_move.end);
+
+                            // Check if we're over a link
+                            let hovering_link = link_content_ranges.iter().any(|range| {
+                                buffer_offset >= range.start && buffer_offset < range.end
+                            });
+
+                            on_link_hover(hovering_link, window, cx);
+                        } else {
+                            // Not hovering over anything clickable
+                            on_link_hover(false, window, cx);
+                        }
                     }
                 }
             });
