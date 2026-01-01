@@ -761,9 +761,6 @@ impl Render for Editor {
             Some(self.selection.range())
         };
 
-        // Get the base path for resolving relative image paths
-        let _base_path = self.config.base_path.clone();
-
         let buffer_text = self.buffer.text();
 
         // Create click callback that updates cursor position
@@ -908,6 +905,7 @@ impl Render for Editor {
                     line_theme.clone(),
                     selection_range.clone(),
                     code_highlights,
+                    self.config.base_path.clone(),
                 )
                 .on_click(on_click.clone())
                 .on_drag(on_drag.clone())

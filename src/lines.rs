@@ -67,6 +67,7 @@ pub struct StyledRegion {
     pub content_range: Range<usize>,
     pub style: TextStyle,
     pub link_url: Option<String>,
+    pub is_image: bool,
 }
 
 pub fn extract_lines(buffer: &Buffer) -> Vec<Line> {
@@ -248,6 +249,7 @@ fn extract_emphasis_region(node: &Node, style: TextStyle) -> Option<StyledRegion
         content_range: content_start..content_end,
         style,
         link_url: None,
+        is_image: false,
     })
 }
 
@@ -275,6 +277,7 @@ fn extract_code_span_region(node: &Node) -> Option<StyledRegion> {
         content_range: content_start..content_end,
         style: TextStyle::code(),
         link_url: None,
+        is_image: false,
     })
 }
 
@@ -318,6 +321,7 @@ fn extract_link_region(node: &Node, text: &str) -> Option<StyledRegion> {
         content_range: content_start..content_end,
         style: TextStyle::default(),
         link_url: url,
+        is_image: false,
     })
 }
 
@@ -354,6 +358,7 @@ fn extract_image_region(node: &Node, text: &str) -> Option<StyledRegion> {
         content_range: content_start..content_end,
         style: TextStyle::default(),
         link_url: Some(url),
+        is_image: true,
     })
 }
 
