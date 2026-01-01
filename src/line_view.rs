@@ -2,7 +2,7 @@ use std::ops::Range;
 use std::rc::Rc;
 
 use gpui::{
-    App, CursorStyle, Font, FontStyle, FontWeight, Hsla, IntoElement, MouseButton, MouseDownEvent,
+    App, Font, FontStyle, FontWeight, Hsla, IntoElement, MouseButton, MouseDownEvent,
     MouseMoveEvent, Rgba, ScrollAnchor, SharedString, StyledText, TextRun, Window, canvas, div,
     point, prelude::*, px, rems,
 };
@@ -42,7 +42,6 @@ pub struct LineView<'a> {
     on_drag: Option<DragCallback>,
     on_checkbox: Option<CheckboxCallback>,
     on_link_hover: Option<LinkHoverCallback>,
-    show_block_markers: bool,
     scroll_anchor: Option<ScrollAnchor>,
 }
 
@@ -55,7 +54,6 @@ impl<'a> LineView<'a> {
         theme: LineViewTheme,
         selection_range: Option<Range<usize>>,
         code_highlights: Vec<(HighlightSpan, Rgba)>,
-        show_block_markers: bool,
     ) -> Self {
         Self {
             line,
@@ -69,7 +67,6 @@ impl<'a> LineView<'a> {
             on_drag: None,
             on_checkbox: None,
             on_link_hover: None,
-            show_block_markers,
             scroll_anchor: None,
         }
     }
@@ -120,18 +117,12 @@ impl<'a> LineView<'a> {
         }
     }
 
-    fn should_show_raw_markers(&self) -> bool {
-        self.cursor_on_line() || self.selection_on_line() || self.show_block_markers
-    }
-
     fn content_range(&self) -> Range<usize> {
         let range = &self.line.range;
 
-        // Block markers are shown when cursor/selection is on line
-        if self.should_show_raw_markers() {
-            range.clone()
-        } else if let Some(marker_range) = self.line.marker_range() {
-            // For ordered lists, don't hide the marker (no substitution available)
+        // Always hide block markers (they're replaced by substitution)
+        // Exception: ordered lists have no substitution, so show the marker
+        if let Some(marker_range) = self.line.marker_range() {
             if self
                 .line
                 .markers
@@ -148,36 +139,13 @@ impl<'a> LineView<'a> {
         }
     }
 
-    fn checkbox_state(&self) -> Option<bool> {
-        // Only show checkbox when not showing raw markers
-        if self.should_show_raw_markers() {
-            return None;
-        }
-        self.line.checkbox()
-    }
-
-    fn get_non_checkbox_substitution(&self) -> Option<String> {
-        // Only substitute when not showing raw markers
-        if self.should_show_raw_markers() {
-            return None;
-        }
-        // If this is a checkbox line, don't return substitution (checkbox rendered separately)
-        if self.line.checkbox().is_some() {
-            return None;
-        }
+    fn get_substitution(&self) -> Option<String> {
+        // Always substitute block markers (not conditional on cursor position)
         let substitution = self.line.substitution(self.text);
         if substitution.is_empty() {
             None
         } else {
             Some(substitution)
-        }
-    }
-
-    fn leading_whitespace(&self) -> String {
-        if self.should_show_raw_markers() {
-            String::new()
-        } else {
-            self.line.leading_whitespace(self.text)
         }
     }
 
@@ -262,7 +230,7 @@ impl<'a> LineView<'a> {
 
     fn build_styled_content(&self) -> (String, Vec<TextRun>) {
         // Handle fence lines specially when cursor is not on them
-        if self.line.is_fence() && !self.should_show_raw_markers() {
+        if self.line.is_fence() && !self.cursor_on_line() && !self.selection_on_line() {
             return self.build_fence_content();
         }
 
@@ -271,18 +239,66 @@ impl<'a> LineView<'a> {
         let mut display_text = String::new();
         let mut runs: Vec<TextRun> = Vec::new();
 
-        // Add marker substitution prefix if applicable (bullet, etc.)
-        // Note: substitution includes indentation via Indent markers
-        // Note: checkboxes are rendered separately as a larger element
-        if let Some(prefix) = self.get_non_checkbox_substitution()
+        // Add marker substitution prefix if applicable (bullet, indent, checkbox, etc.)
+        // Use monospace font so indentation aligns correctly
+        // Checkboxes are colored differently to indicate they're interactive
+        if let Some(prefix) = self.get_substitution()
             && !prefix.is_empty()
         {
-            display_text.push_str(&prefix);
-            runs.push(self.text_run(
-                prefix.len(),
-                self.theme.text_font.clone(),
-                self.theme.text_color,
-            ));
+            // Check if this line has a checkbox and find its position in the prefix
+            if let Some(_) = self.line.checkbox() {
+                // Find the checkbox pattern in the prefix ([ ] or [x])
+                if let Some(checkbox_start) = prefix.find('[') {
+                    let checkbox_end = prefix.find(']').map(|i| i + 2).unwrap_or(prefix.len()); // include "] "
+
+                    // Part before checkbox (indent + bullet)
+                    if checkbox_start > 0 {
+                        let before = &prefix[..checkbox_start];
+                        display_text.push_str(before);
+                        runs.push(self.text_run(
+                            before.len(),
+                            self.theme.code_font.clone(),
+                            self.theme.text_color,
+                        ));
+                    }
+
+                    // Checkbox portion in accent color
+                    let checkbox = &prefix[checkbox_start..checkbox_end.min(prefix.len())];
+                    display_text.push_str(checkbox);
+                    runs.push(self.text_run(
+                        checkbox.len(),
+                        self.theme.code_font.clone(),
+                        self.theme.link_color,
+                    ));
+
+                    // Part after checkbox (if any)
+                    if checkbox_end < prefix.len() {
+                        let after = &prefix[checkbox_end..];
+                        display_text.push_str(after);
+                        runs.push(self.text_run(
+                            after.len(),
+                            self.theme.code_font.clone(),
+                            self.theme.text_color,
+                        ));
+                    }
+                } else {
+                    // Fallback: no bracket found, render normally
+                    display_text.push_str(&prefix);
+                    runs.push(self.text_run(
+                        prefix.len(),
+                        self.theme.code_font.clone(),
+                        self.theme.text_color,
+                    ));
+                }
+            } else {
+                // No checkbox, render prefix normally
+                display_text.push_str(&prefix);
+                runs.push(self.text_run(
+                    prefix.len(),
+                    self.theme.code_font.clone(),
+                    self.theme.text_color,
+                ));
+            }
         }
 
         if content_range.start >= content_range.end {
@@ -514,13 +530,16 @@ impl<'a> LineView<'a> {
     fn buffer_to_visual_pos(&self, buffer_offset: usize, display_text: &str) -> usize {
         let content_range = self.content_range();
 
+        // Prefix is shown when raw markers are hidden
+        let prefix_len = self.get_substitution().map(|s| s.len()).unwrap_or(0);
+
         if content_range.start >= content_range.end {
-            return 0;
+            return prefix_len;
         }
 
         let clamped_offset = buffer_offset.clamp(content_range.start, content_range.end);
 
-        // If selection is on line, all markers are shown - direct mapping
+        // If selection is on line, all markers are shown - direct mapping (no prefix)
         if self.selection_on_line() {
             let visual_pos = clamped_offset.saturating_sub(content_range.start);
             return visual_pos.min(display_text.len());
@@ -528,7 +547,7 @@ impl<'a> LineView<'a> {
 
         let hidden = self.hidden_bytes_before(clamped_offset, &content_range);
         let buffer_pos_in_content = clamped_offset.saturating_sub(content_range.start);
-        let visual_pos = buffer_pos_in_content.saturating_sub(hidden);
+        let visual_pos = prefix_len + buffer_pos_in_content.saturating_sub(hidden);
 
         visual_pos.min(display_text.len())
     }
@@ -732,13 +751,11 @@ impl IntoElement for LineView<'_> {
                     };
                 }
                 MarkerKind::BlockQuote => {
-                    // Only show left border when cursor is away (hiding the > markers)
-                    if !self.should_show_raw_markers() {
-                        line_div = line_div
-                            .pl_3()
-                            .border_l_2()
-                            .border_color(self.theme.border_color);
-                    }
+                    // Always show left border for blockquotes
+                    line_div = line_div
+                        .pl_3()
+                        .border_l_2()
+                        .border_color(self.theme.border_color);
                 }
                 MarkerKind::CodeBlockFence { .. } | MarkerKind::CodeBlockContent => {
                     line_div = line_div.text_size(rems(0.9));
@@ -746,7 +763,7 @@ impl IntoElement for LineView<'_> {
                 MarkerKind::ThematicBreak => {
                     // When cursor is on line, show raw markers (---, ***, ___)
                     // When cursor is away, render invisible text with HR line behind it
-                    if !self.should_show_raw_markers() {
+                    if !self.cursor_on_line() && !self.selection_on_line() {
                         // Build invisible text runs (same text, transparent color)
                         let line_text = &self.text[self.line.range.clone()];
                         let invisible_run = TextRun {
@@ -804,53 +821,9 @@ impl IntoElement for LineView<'_> {
                     }
                 }
                 MarkerKind::ListItem { .. } | MarkerKind::Checkbox { .. } | MarkerKind::Indent => {
-                    // These are handled elsewhere (substitution, checkbox rendering, etc.)
+                    // These are handled via substitution text
                 }
             }
-        }
-
-        // For checkbox lines, render checkbox as a styled box element
-        if let Some(checked) = self.checkbox_state() {
-            let on_checkbox = self.on_checkbox.clone();
-            let line_num = self.line.line_number;
-            let check_color = self.theme.text_color;
-
-            // Get leading whitespace for indentation (rendered before checkbox)
-            let indent = self.leading_whitespace();
-            let indent_width = indent.len() as f32 * 0.6; // Approximate character width in rems
-
-            // Outer box: square matching line height
-            let box_size = rems(1.0);
-            let inner_size = rems(0.6);
-            let mut checkbox_div = div()
-                .size(box_size)
-                .border_1()
-                .border_color(self.theme.text_color)
-                .cursor(CursorStyle::PointingHand)
-                .mr_2()
-                .ml(rems(indent_width)) // Add left margin for indentation
-                .flex()
-                .items_center()
-                .justify_center()
-                .on_mouse_down(MouseButton::Left, move |_event, window, cx: &mut App| {
-                    cx.stop_propagation();
-                    if let Some(ref cb) = on_checkbox {
-                        cb(line_num, window, cx);
-                    }
-                });
-
-            // Add filled inner square when checked (with gap from border)
-            if checked {
-                let inner_box = div().size(inner_size).bg(check_color);
-                checkbox_div = checkbox_div.child(inner_box);
-            }
-
-            // Make line a flex row with checkbox + content
-            line_div = line_div
-                .flex()
-                .flex_row()
-                .items_center()
-                .child(checkbox_div);
         }
 
         // Wrap text content in a relative div for overlays
@@ -922,6 +895,9 @@ impl IntoElement for LineView<'_> {
                     .collect()
             };
 
+            // Calculate prefix length for visual-to-buffer conversion
+            let prefix_len = self.get_substitution().map(|s| s.len()).unwrap_or(0);
+
             line_div = line_div.on_mouse_down(
                 MouseButton::Left,
                 move |event: &MouseDownEvent, window, cx| {
@@ -929,6 +905,9 @@ impl IntoElement for LineView<'_> {
                         Ok(idx) => idx,
                         Err(idx) => idx,
                     };
+
+                    // Adjust for substitution prefix (clicks in prefix map to start of content)
+                    let content_visual_index = visual_index.saturating_sub(prefix_len);
 
                     // Convert visual index to buffer offset, accounting for hidden markers
                     let buffer_offset = {
@@ -938,7 +917,9 @@ impl IntoElement for LineView<'_> {
                             let mut buffer_pos = content_range.start;
                             let mut visible_count = 0usize;
 
-                            while buffer_pos < content_range.end && visible_count < visual_index {
+                            while buffer_pos < content_range.end
+                                && visible_count < content_visual_index
+                            {
                                 // Check if this position is inside a hidden marker region
                                 let mut is_hidden = false;
                                 for &(opening_start, opening_end, closing_start, closing_end) in
@@ -993,6 +974,9 @@ impl IntoElement for LineView<'_> {
             let line_range_for_move = self.line.range.clone();
             let content_range = self.content_range();
 
+            // Calculate prefix length for visual-to-buffer conversion
+            let prefix_len = self.get_substitution().map(|s| s.len()).unwrap_or(0);
+
             // Extract link content ranges for hover detection
             let link_content_ranges: Vec<Range<usize>> = self
                 .inline_styles
@@ -1011,9 +995,10 @@ impl IntoElement for LineView<'_> {
                         Err(idx) => idx,
                     };
 
-                    // Simple mapping: visual index to buffer offset
+                    // Adjust for substitution prefix
+                    let content_visual_index = visual_index.saturating_sub(prefix_len);
                     let buffer_offset =
-                        (line_range_for_move.start + visual_index).min(line_range_for_move.end);
+                        (content_range.start + content_visual_index).min(line_range_for_move.end);
                     on_drag(buffer_offset, window, cx);
                 }
 
@@ -1028,8 +1013,11 @@ impl IntoElement for LineView<'_> {
                             Ok(idx) => idx,
                             Err(idx) => idx,
                         };
-                        let buffer_offset =
-                            (content_range.start + visual_index).min(line_range_for_move.end);
+
+                        // Adjust for substitution prefix
+                        let content_visual_index = visual_index.saturating_sub(prefix_len);
+                        let buffer_offset = (content_range.start + content_visual_index)
+                            .min(line_range_for_move.end);
 
                         // Check if we're over a link
                         let hovering_link = link_content_ranges

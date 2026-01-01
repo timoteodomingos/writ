@@ -777,9 +777,6 @@ impl Render for Editor {
                 }
                 child_index += 1;
 
-                // Show block markers for fence lines when cursor is in the code block
-                let show_block_markers = is_fence && cursor_in_block;
-
                 // Extract inline styles for this line
                 let inline_styles = extract_inline_styles(&self.buffer, line);
 
@@ -799,7 +796,6 @@ impl Render for Editor {
                     line_theme.clone(),
                     selection_range.clone(),
                     code_highlights,
-                    show_block_markers,
                 )
                 .on_click(on_click.clone())
                 .on_drag(on_drag.clone())

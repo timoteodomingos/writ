@@ -59,7 +59,7 @@ impl Line {
     }
 
     /// Returns the visual substitution text for all markers.
-    /// E.g., "• " for unordered list, "☐ " for unchecked task.
+    /// E.g., "• " for unordered list, "[ ] " for unchecked task.
     /// Computes leading whitespace from line start to the first non-whitespace
     /// character, to respect user's manual indentation.
     pub fn substitution(&self, text: &str) -> String {
@@ -152,11 +152,11 @@ impl MarkerKind {
     /// Visual substitution text for this marker kind.
     pub fn substitution(&self) -> &'static str {
         match self {
-            MarkerKind::BlockQuote => "",
+            MarkerKind::BlockQuote => "  ", // Replace "> " with spaces, border shows visually
             MarkerKind::ListItem { ordered: false } => "• ",
             MarkerKind::ListItem { ordered: true } => "",
-            MarkerKind::Checkbox { checked: false } => "☐ ",
-            MarkerKind::Checkbox { checked: true } => "☑ ",
+            MarkerKind::Checkbox { checked: false } => "[ ] ",
+            MarkerKind::Checkbox { checked: true } => "[x] ",
             MarkerKind::Heading(_) => "",
             MarkerKind::CodeBlockFence { .. } => "",
             MarkerKind::CodeBlockContent => "",
@@ -758,7 +758,8 @@ mod tests {
             ],
         );
         let text = "> - Item text here";
-        assert_eq!(line.substitution(text), "• ");
+        // Blockquote substitutes "> " with "  " (spaces), plus bullet "• "
+        assert_eq!(line.substitution(text), "  • ");
     }
 
     #[test]
@@ -779,7 +780,7 @@ mod tests {
             ],
         );
         // Substitution reverses to outermost first: bullet then checkbox
-        assert_eq!(line.substitution(text), "• ☐ ");
+        assert_eq!(line.substitution(text), "• [ ] ");
     }
 
     #[test]
