@@ -530,7 +530,7 @@ impl<'a> LineView<'a> {
     fn buffer_to_visual_pos(&self, buffer_offset: usize, display_text: &str) -> usize {
         let content_range = self.content_range();
 
-        // Prefix is shown when raw markers are hidden
+        // Block markers are always substituted now
         let prefix_len = self.get_substitution().map(|s| s.len()).unwrap_or(0);
 
         if content_range.start >= content_range.end {
@@ -538,12 +538,6 @@ impl<'a> LineView<'a> {
         }
 
         let clamped_offset = buffer_offset.clamp(content_range.start, content_range.end);
-
-        // If selection is on line, all markers are shown - direct mapping (no prefix)
-        if self.selection_on_line() {
-            let visual_pos = clamped_offset.saturating_sub(content_range.start);
-            return visual_pos.min(display_text.len());
-        }
 
         let hidden = self.hidden_bytes_before(clamped_offset, &content_range);
         let buffer_pos_in_content = clamped_offset.saturating_sub(content_range.start);
