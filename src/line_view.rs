@@ -126,14 +126,37 @@ impl<'a> LineView<'a> {
         self.cursor_offset >= region.full_range.start && self.cursor_offset <= region.full_range.end
     }
 
-    /// Returns true if this line has images that should be rendered (cursor not inside them).
-    fn has_visible_images(&self) -> bool {
-        self.inline_styles.iter().any(|s| {
-            s.is_image
-                && s.link_url.is_some()
-                && !self.cursor_inside_region(s)
-                && !self.selection_on_line()
-        })
+    /// Returns the image URL if this line contains only a standalone image
+    /// (no other content, no block markers, cursor not on line).
+    fn standalone_image_url(&self) -> Option<&str> {
+        // Don't render image if cursor or selection is on this line
+        if self.cursor_on_line() || self.selection_on_line() {
+            return None;
+        }
+
+        // Must have no block markers (not in list, blockquote, etc.)
+        if !self.line.markers.is_empty() {
+            return None;
+        }
+
+        // Must have exactly one inline style and it must be an image
+        if self.inline_styles.len() != 1 {
+            return None;
+        }
+
+        let style = &self.inline_styles[0];
+        if !style.is_image {
+            return None;
+        }
+
+        // Image must span the entire line (allowing for trailing newline)
+        let line_content = self.text[self.line.range.clone()].trim_end();
+        let image_text = &self.text[style.full_range.clone()];
+        if line_content != image_text {
+            return None;
+        }
+
+        style.link_url.as_deref()
     }
 
     fn content_range(&self) -> Range<usize> {
@@ -535,80 +558,6 @@ impl<'a> LineView<'a> {
         gpui::ImageSource::from(resolved_path)
     }
 
-    /// Build mixed content with text and inline images.
-    /// Returns a div containing text segments and image elements in a flex row.
-    fn build_mixed_content(&self) -> gpui::Div {
-        let content_range = self.content_range();
-
-        // Collect visible images (cursor not inside them)
-        let mut visible_images: Vec<&StyledRegion> = self
-            .inline_styles
-            .iter()
-            .filter(|s| {
-                s.is_image
-                    && s.link_url.is_some()
-                    && !self.cursor_inside_region(s)
-                    && s.full_range.start >= content_range.start
-                    && s.full_range.end <= content_range.end
-            })
-            .collect();
-        visible_images.sort_by_key(|s| s.full_range.start);
-
-        let mut container = div().flex().flex_row().flex_wrap().items_end();
-
-        // Add marker substitution prefix if applicable
-        if let Some(prefix) = self.get_substitution() {
-            if !prefix.is_empty() {
-                let prefix_run = self.text_run(
-                    prefix.len(),
-                    self.theme.code_font.clone(),
-                    self.theme.text_color,
-                );
-                let shared_prefix: SharedString = prefix.into();
-                let styled_prefix = StyledText::new(shared_prefix).with_runs(vec![prefix_run]);
-                container = container.child(styled_prefix);
-            }
-        }
-
-        // Build segments between images
-        let mut pos = content_range.start;
-        for image in &visible_images {
-            // Text before this image
-            if pos < image.full_range.start {
-                let text_segment = &self.text[pos..image.full_range.start];
-                if !text_segment.is_empty() {
-                    let run =
-                        self.text_run(text_segment.len(), self.line_font(), self.theme.text_color);
-                    let shared_text: SharedString = text_segment.to_string().into();
-                    let styled_text = StyledText::new(shared_text).with_runs(vec![run]);
-                    container = container.child(styled_text);
-                }
-            }
-
-            // The image itself
-            if let Some(url) = &image.link_url {
-                let source = self.resolve_image_source(url);
-                container = container.child(img(source).max_h(px(300.0)));
-            }
-
-            pos = image.full_range.end;
-        }
-
-        // Text after last image
-        if pos < content_range.end {
-            let text_segment = &self.text[pos..content_range.end];
-            if !text_segment.is_empty() {
-                let run =
-                    self.text_run(text_segment.len(), self.line_font(), self.theme.text_color);
-                let shared_text: SharedString = text_segment.to_string().into();
-                let styled_text = StyledText::new(shared_text).with_runs(vec![run]);
-                container = container.child(styled_text);
-            }
-        }
-
-        container
-    }
-
     fn hidden_bytes_before(&self, offset: usize, content_range: &Range<usize>) -> usize {
         let mut hidden = 0usize;
         for region in &self.inline_styles {
@@ -823,10 +772,10 @@ impl IntoElement for LineView<'_> {
         let line_number = self.line.line_number;
         let line_range = self.line.range.clone();
 
-        // If line has visible images (cursor not on them), render mixed content
-        if self.has_visible_images() {
-            let mixed_content = self.build_mixed_content();
-            return line_base(line_number).relative().child(mixed_content);
+        // If line is a standalone image (only content, cursor not on line), render just the image
+        if let Some(url) = self.standalone_image_url() {
+            let source = self.resolve_image_source(url);
+            return line_base(line_number).child(img(source).max_w_full());
         }
 
         // Build styled content
