@@ -39,7 +39,7 @@ The default fonts are platform-specific: Segoe UI and Consolas on Windows, the s
 ## Development
 
 ```bash
-git clone https://github.com/wilfred/writ
+git clone https://github.com/wilfreddenton/writ
 cd writ
 cargo run --release -- --file path/to/document.md
 ```
@@ -159,9 +159,9 @@ editor.read(cx).can_redo();
 
 The buffer stores raw markdown text using ropey, a rope data structure that provides O(log n) insertions and deletions. On every edit, tree-sitter incrementally reparses the document. Tree-sitter-md produces two parse trees: a block tree representing document structure (paragraphs, headings, lists, code blocks) and separate inline trees for each paragraph's inline content (bold, italic, links). The parser maintains both trees and provides a unified cursor that transparently switches between them when traversing.
 
-Each render frame, the editor extracts line information from the buffer. A line is represented as a stack of layers, where each layer corresponds to a nesting level in the document structure. For example, a task item inside a blockquote produces two layers: `[BlockQuote, ListItem]`. Each layer knows its marker range (the bytes to hide when the cursor is away), its visual substitution (e.g., `-` becomes `•`), and its continuation text for smart enter.
+Line information is derived from the parse tree. A preorder traversal collects all nodes in document order, then for each line, binary search finds the relevant nodes and extracts markers. Each line has a list of markers representing block-level syntax elements—a task item inside a blockquote has two markers: `[Checkbox, BlockQuote]` (innermost to outermost). Each marker knows its byte range (the bytes to hide when the cursor is away), its visual substitution (e.g., `-` becomes `•`), and its continuation text for smart enter.
 
-The line view component renders each line independently. It determines whether to show or hide markers based on cursor position: if the cursor is on the line, raw markdown syntax is visible for editing; otherwise, markers are hidden and substitutions are shown. For inline styles like bold or italic, the same logic applies per-span. Click handling maps visual positions back to buffer offsets by accounting for hidden characters.
+The line component renders each line independently. It determines whether to show or hide markers based on cursor position: if the cursor is on the line, raw markdown syntax is visible for editing; otherwise, markers are hidden and substitutions are shown. For inline styles like bold or italic, the same logic applies per-span. Click handling maps visual positions back to buffer offsets by accounting for hidden characters.
 
 ### Incremental Parsing
 

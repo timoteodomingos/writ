@@ -168,9 +168,7 @@ impl<'a> Line<'a> {
 
     fn cursor_on_line(&self) -> bool {
         let range = &self.line.range;
-        // Cursor is on this line if it's within the range, or at the end for empty lines
         if range.start == range.end {
-            // Empty line - cursor is here if it equals the position
             self.cursor_offset == range.start
         } else {
             self.cursor_offset >= range.start && self.cursor_offset <= range.end
@@ -180,32 +178,25 @@ impl<'a> Line<'a> {
     fn selection_on_line(&self) -> bool {
         if let Some(ref sel) = self.selection_range {
             let line_range = &self.line.range;
-            // Selection intersects if it overlaps with line range
             sel.start < line_range.end && sel.end > line_range.start
         } else {
             false
         }
     }
 
-    /// Returns true if this line is inside a code block (has syntax highlighting).
     fn is_code_block_line(&self) -> bool {
         !self.code_highlights.is_empty() || self.line.is_fence()
     }
 
-    /// Returns the image URL if this line contains only a standalone image
-    /// (no other content, no block markers, cursor not on line).
     fn standalone_image_url(&self) -> Option<&str> {
-        // Don't render image if cursor or selection is on this line
         if self.cursor_on_line() || self.selection_on_line() {
             return None;
         }
 
-        // Must have no block markers (not in list, blockquote, etc.)
         if !self.line.markers.is_empty() {
             return None;
         }
 
-        // Must have exactly one inline style and it must be an image
         if self.inline_styles.len() != 1 {
             return None;
         }
@@ -215,7 +206,6 @@ impl<'a> Line<'a> {
             return None;
         }
 
-        // Image must span the entire line (allowing for trailing newline)
         let line_content = self.text[self.line.range.clone()].trim_end();
         let image_text = &self.text[style.full_range.clone()];
         if line_content != image_text {
@@ -228,9 +218,6 @@ impl<'a> Line<'a> {
     fn content_range(&self) -> Range<usize> {
         let range = &self.line.range;
 
-        // Always hide block markers (they're replaced by substitution)
-        // Exception: ordered lists have no substitution, so show the marker
-        // Exception: fence lines - show from fence start (hide only preceding markers like blockquote)
         if let Some(marker_range) = self.line.marker_range() {
             if self
                 .line
@@ -245,10 +232,8 @@ impl<'a> Line<'a> {
                 .iter()
                 .find(|m| matches!(m.kind, MarkerKind::CodeBlockFence { .. }))
             {
-                // For fence lines, show from fence start (keeps ```lang visible)
                 fence_marker.range.start..range.end
             } else {
-                // Hide the block marker
                 marker_range.end..range.end
             }
         } else {
@@ -257,7 +242,6 @@ impl<'a> Line<'a> {
     }
 
     fn get_substitution(&self) -> Option<String> {
-        // Always substitute block markers (not conditional on cursor position)
         let substitution = self.line.substitution(self.text);
         if substitution.is_empty() {
             None
@@ -278,7 +262,6 @@ impl<'a> Line<'a> {
     }
 
     fn line_font(&self) -> Font {
-        // Headings are bold
         if self.line.heading_level().is_some() {
             Font {
                 weight: FontWeight::BOLD,
@@ -291,7 +274,6 @@ impl<'a> Line<'a> {
 
     fn get_highlight_color_for_range(&self, start: usize, end: usize) -> Option<Rgba> {
         for (span, color) in &self.code_highlights {
-            // Check if this highlight span contains our range
             if span.range.start <= start && end <= span.range.end {
                 return Some(*color);
             }
@@ -305,19 +287,13 @@ impl<'a> Line<'a> {
         let mut display_text = String::new();
         let mut runs: Vec<TextRun> = Vec::new();
 
-        // Add marker substitution prefix if applicable (bullet, indent, checkbox, etc.)
-        // Use monospace font so indentation aligns correctly
-        // Checkboxes are colored differently to indicate they're interactive
         if let Some(prefix) = self.get_substitution()
             && !prefix.is_empty()
         {
-            // Check if this line has a checkbox and find its position in the prefix
             if self.line.checkbox().is_some() {
-                // Find the checkbox pattern in the prefix ([ ] or [x])
                 if let Some(checkbox_start) = prefix.find('[') {
-                    let checkbox_end = prefix.find(']').map(|i| i + 2).unwrap_or(prefix.len()); // include "] "
+                    let checkbox_end = prefix.find(']').map(|i| i + 2).unwrap_or(prefix.len());
 
-                    // Part before checkbox (indent + bullet)
                     if checkbox_start > 0 {
                         let before = &prefix[..checkbox_start];
                         display_text.push_str(before);
@@ -328,7 +304,6 @@ impl<'a> Line<'a> {
                         ));
                     }
 
-                    // Checkbox portion in accent color
                     let checkbox = &prefix[checkbox_start..checkbox_end.min(prefix.len())];
                     display_text.push_str(checkbox);
                     runs.push(self.text_run(
@@ -337,7 +312,6 @@ impl<'a> Line<'a> {
                         self.theme.link_color,
                     ));
 
-                    // Part after checkbox (if any)
                     if checkbox_end < prefix.len() {
                         let after = &prefix[checkbox_end..];
                         display_text.push_str(after);
@@ -348,7 +322,6 @@ impl<'a> Line<'a> {
                         ));
                     }
                 } else {
-                    // Fallback: no bracket found, render normally
                     display_text.push_str(&prefix);
                     runs.push(self.text_run(
                         prefix.len(),
@@ -357,7 +330,6 @@ impl<'a> Line<'a> {
                     ));
                 }
             } else {
-                // No checkbox, render prefix normally
                 display_text.push_str(&prefix);
                 runs.push(self.text_run(
                     prefix.len(),
@@ -371,13 +343,11 @@ impl<'a> Line<'a> {
             return (display_text, runs);
         }
 
-        // Handle fence lines specially - color backticks and language
         if self.line.is_fence() {
             let fence_text = &self.text[content_range.clone()];
             let backticks: String = fence_text.chars().take_while(|&c| c == '`').collect();
             let language = fence_text[backticks.len()..].trim_end();
 
-            // Add backticks in fence color (comment)
             if !backticks.is_empty() {
                 display_text.push_str(&backticks);
                 runs.push(self.text_run(
@@ -387,7 +357,6 @@ impl<'a> Line<'a> {
                 ));
             }
 
-            // Add language in green
             if !language.is_empty() {
                 display_text.push_str(language);
                 runs.push(self.text_run(
@@ -400,28 +369,20 @@ impl<'a> Line<'a> {
             return (display_text, runs);
         }
 
-        // Collect all boundary points from inline styles
         let mut boundaries: Vec<usize> = vec![content_range.start, content_range.end];
-
-        // If selection is on this line, show ALL inline markers
-        // Otherwise, only show markers for regions where cursor is inside
         let show_all_markers = self.selection_on_line();
 
         for region in &self.inline_styles {
-            // Only include boundaries within our content range
             if region.full_range.end > content_range.start
                 && region.full_range.start < content_range.end
             {
-                // Check if cursor is inside this specific region
                 let cursor_inside = self.cursor_offset >= region.full_range.start
                     && self.cursor_offset <= region.full_range.end;
 
                 if show_all_markers || cursor_inside {
-                    // Show full range including markers
                     boundaries.push(region.full_range.start.max(content_range.start));
                     boundaries.push(region.full_range.end.min(content_range.end));
                 } else {
-                    // Hide markers, show content range boundaries
                     boundaries.push(region.full_range.start.max(content_range.start));
                     boundaries.push(region.content_range.start.max(content_range.start));
                     boundaries.push(region.content_range.end.min(content_range.end));
@@ -430,7 +391,6 @@ impl<'a> Line<'a> {
             }
         }
 
-        // Add boundaries from syntax highlighting spans
         for (span, _) in &self.code_highlights {
             if span.range.end > content_range.start && span.range.start < content_range.end {
                 boundaries.push(span.range.start.max(content_range.start));
@@ -438,12 +398,10 @@ impl<'a> Line<'a> {
             }
         }
 
-        // Filter, sort, dedup
         boundaries.retain(|&b| b >= content_range.start && b <= content_range.end);
         boundaries.sort();
         boundaries.dedup();
 
-        // Build spans
         for window in boundaries.windows(2) {
             let start = window[0];
             let end = window[1];
@@ -452,7 +410,6 @@ impl<'a> Line<'a> {
                 continue;
             }
 
-            // Check if this range should be hidden (inline marker when cursor outside region)
             let mut is_hidden = false;
             if !show_all_markers {
                 for region in &self.inline_styles {
@@ -477,12 +434,10 @@ impl<'a> Line<'a> {
                 continue;
             }
 
-            // Add text
             let span_text = &self.text[start..end];
             let span_len = span_text.len();
             display_text.push_str(span_text);
 
-            // Compute merged style for this span
             let mut is_bold = false;
             let mut is_italic = false;
             let mut is_code = false;
@@ -490,11 +445,9 @@ impl<'a> Line<'a> {
             let mut is_link = false;
 
             for region in &self.inline_styles {
-                // Check if cursor is inside this specific region
                 let cursor_inside = self.cursor_offset >= region.full_range.start
                     && self.cursor_offset <= region.full_range.end;
 
-                // Use full_range when showing markers (selection or cursor inside), content_range otherwise
                 let style_range = if show_all_markers || cursor_inside {
                     &region.full_range
                 } else {
@@ -520,8 +473,6 @@ impl<'a> Line<'a> {
                 }
             }
 
-            // Build the font for this run
-            // Use code font for: inline code spans, or any line inside a code block
             let base_font = if is_code || self.is_code_block_line() {
                 self.theme.code_font.clone()
             } else {
@@ -542,20 +493,16 @@ impl<'a> Line<'a> {
                 ..base_font
             };
 
-            // Determine text color
             let color: Hsla = if is_link {
                 self.theme.link_color.into()
             } else if let Some(highlight_color) = self.get_highlight_color_for_range(start, end) {
-                // Code block with syntax highlighting
                 highlight_color.into()
             } else if is_code && !self.is_code_block_line() {
-                // Inline code gets a distinct color
                 self.theme.code_color.into()
             } else {
                 self.theme.text_color.into()
             };
 
-            // Build underline/strikethrough
             let underline = if is_link {
                 Some(gpui::UnderlineStyle {
                     thickness: px(1.0),
@@ -588,16 +535,11 @@ impl<'a> Line<'a> {
         (display_text, runs)
     }
 
-    /// Resolve an image URL to an ImageSource.
-    /// - HTTP/HTTPS URLs use string source
-    /// - Local paths use PathBuf source
     fn resolve_image_source(&self, url: &str) -> gpui::ImageSource {
-        // HTTP URLs pass through as strings
         if url.starts_with("http://") || url.starts_with("https://") {
             return gpui::ImageSource::from(url.to_string());
         }
 
-        // Local file path - resolve and use PathBuf
         let path = std::path::Path::new(url);
         let resolved_path = if path.is_absolute() {
             PathBuf::from(url)
@@ -613,20 +555,18 @@ impl<'a> Line<'a> {
     fn hidden_bytes_before(&self, offset: usize, content_range: &Range<usize>) -> usize {
         let mut hidden = 0usize;
         for region in &self.inline_styles {
-            // If cursor is inside this region, its markers are visible (not hidden)
             let cursor_inside = self.cursor_offset >= region.full_range.start
                 && self.cursor_offset <= region.full_range.end;
             if cursor_inside {
                 continue;
             }
 
-            // Opening marker
             let opening_start = region.full_range.start.max(content_range.start);
             let opening_end = region.content_range.start.min(content_range.end);
             if opening_end > opening_start && offset > opening_end {
                 hidden += opening_end - opening_start;
             }
-            // Closing marker
+
             let closing_start = region.content_range.end.max(content_range.start);
             let closing_end = region.full_range.end.min(content_range.end);
             if closing_end > closing_start && offset > closing_end {
@@ -645,8 +585,6 @@ impl<'a> Line<'a> {
 
     fn buffer_to_visual_pos(&self, buffer_offset: usize, display_text: &str) -> usize {
         let content_range = self.content_range();
-
-        // Block markers are always substituted now
         let prefix_len = self.get_substitution().map(|s| s.len()).unwrap_or(0);
 
         if content_range.start >= content_range.end {
@@ -666,16 +604,12 @@ impl<'a> Line<'a> {
         let selection = self.selection_range.as_ref()?;
         let line_range = &self.line.range;
 
-        // Check if selection intersects this line
         if selection.end <= line_range.start || selection.start >= line_range.end {
             return None;
         }
 
-        // Clamp selection to line bounds
         let sel_start = selection.start.max(line_range.start);
         let sel_end = selection.end.min(line_range.end);
-
-        // Convert to visual positions
         let visual_start = self.buffer_to_visual_pos(sel_start, display_text);
         let visual_end = self.buffer_to_visual_pos(sel_end, display_text);
 
@@ -708,9 +642,7 @@ impl<'a> Line<'a> {
                         .line_height
                         .to_pixels(font_size.into(), window.rem_size());
 
-                    // Check if selection spans multiple visual lines (wrapped text)
                     if start.y == end.y {
-                        // Single line selection
                         let rect = gpui::Bounds {
                             origin: point(start.x, start.y),
                             size: gpui::Size {
@@ -720,12 +652,8 @@ impl<'a> Line<'a> {
                         };
                         window.paint_quad(gpui::fill(rect, selection_color));
                     } else {
-                        // Multi-line selection (wrapped text)
-                        // Use a large width to ensure we cover to the edge
-                        // The parent div clips, so this is safe
                         let full_width = px(10000.0);
 
-                        // First line: from start.x to end of line
                         let first_rect = gpui::Bounds {
                             origin: point(start.x, start.y),
                             size: gpui::Size {
@@ -735,7 +663,6 @@ impl<'a> Line<'a> {
                         };
                         window.paint_quad(gpui::fill(first_rect, selection_color));
 
-                        // Middle lines: full width
                         let mut y = start.y + line_height;
                         while y < end.y {
                             let mid_rect = gpui::Bounds {
@@ -749,7 +676,6 @@ impl<'a> Line<'a> {
                             y += line_height;
                         }
 
-                        // Last line: from start to end.x
                         let last_rect = gpui::Bounds {
                             origin: point(px(0.0), end.y),
                             size: gpui::Size {
@@ -824,33 +750,27 @@ impl IntoElement for Line<'_> {
         let line_number = self.line.line_number;
         let line_range = self.line.range.clone();
 
-        // If line is a standalone image (only content, cursor not on line), render just the image
         if let Some(url) = self.standalone_image_url() {
             let source = self.resolve_image_source(url);
             return line_base(line_number).child(img(source).max_w_full());
         }
 
-        // Build styled content
         let (display_text, mut runs) = self.build_styled_content();
         let visual_cursor_pos = self.compute_visual_cursor_pos(&display_text);
 
-        // For blank lines, we need some content for the cursor to attach to
         let display_text = if display_text.is_empty() {
-            // Add a run for the placeholder space (for cursor or to maintain line height)
             runs.push(self.text_run(1, self.line_font(), self.theme.text_color));
             " ".to_string()
         } else {
             display_text
         };
 
-        // Compute selection range before converting display_text
         let visual_selection = self.compute_visual_selection_range(&display_text);
 
         let shared_text: SharedString = display_text.into();
         let styled_text = StyledText::new(shared_text).with_runs(runs);
         let text_layout = styled_text.layout().clone();
 
-        // Base div with marker-driven styling
         let mut line_div = line_base(line_number).relative();
 
         for marker in &self.line.markers {
@@ -867,7 +787,6 @@ impl IntoElement for Line<'_> {
                     };
                 }
                 MarkerKind::BlockQuote => {
-                    // Always show left border for blockquotes
                     line_div = line_div
                         .pl_3()
                         .border_l_2()
@@ -877,10 +796,7 @@ impl IntoElement for Line<'_> {
                     line_div = line_div.text_size(rems(0.9));
                 }
                 MarkerKind::ThematicBreak => {
-                    // When cursor is on line, show raw markers (---, ***, ___)
-                    // When cursor is away, render invisible text with HR line behind it
                     if !self.cursor_on_line() && !self.selection_on_line() {
-                        // Build invisible text runs (same text, transparent color)
                         let line_text = &self.text[self.line.range.clone()];
                         let invisible_run = TextRun {
                             len: line_text.len(),
@@ -895,7 +811,6 @@ impl IntoElement for Line<'_> {
                             StyledText::new(shared_text).with_runs(vec![invisible_run]);
                         let text_layout = styled_text.layout().clone();
 
-                        // Horizontal line overlay (doesn't affect text layout)
                         let hr_line = div()
                             .absolute()
                             .top_1_2() // Center vertically
@@ -909,7 +824,6 @@ impl IntoElement for Line<'_> {
                             .child(styled_text)
                             .child(hr_line);
 
-                        // Add click handler using the text layout for positioning
                         if let Some(ref on_click) = self.on_click {
                             let on_click = on_click.clone();
                             hr_div = hr_div.on_mouse_down(
@@ -936,35 +850,24 @@ impl IntoElement for Line<'_> {
                         return hr_div;
                     }
                 }
-                MarkerKind::ListItem { .. } | MarkerKind::Checkbox { .. } | MarkerKind::Indent => {
-                    // These are handled via substitution text
-                }
+                MarkerKind::ListItem { .. } | MarkerKind::Checkbox { .. } | MarkerKind::Indent => {}
             }
         }
 
-        // Wrap text content in a relative div for overlays
         let mut text_container = div().relative().child(styled_text);
 
-        // Add selection overlay (positioned absolutely, so appears behind text visually)
         if let Some(sel_range) = visual_selection {
             text_container =
                 text_container.child(self.render_selection(sel_range, text_layout.clone()));
         }
 
-        // Add cursor overlay if cursor is on this line
         if let Some(cursor_pos) = visual_cursor_pos {
             text_container =
                 text_container.child(self.render_cursor(cursor_pos, text_layout.clone()));
         }
 
-        // TODO: Ctrl+hover link cursor not yet implemented
-        // The canvas-based approach doesn't work because position_for_index
-        // returns None in the prepaint callback (text not yet laid out).
-        // Need to implement at Editor level with proper state tracking.
-
         line_div = line_div.child(text_container);
 
-        // Add click handler for text content
         if let Some(ref on_click) = self.on_click {
             let on_click = on_click.clone();
             let on_checkbox = self.on_checkbox.clone();
@@ -972,19 +875,17 @@ impl IntoElement for Line<'_> {
             let content_range = self.content_range();
             let line_number = self.line.line_number;
 
-            // Calculate checkbox click range within the prefix (if this line has a checkbox)
             let checkbox_click_range: Option<std::ops::Range<usize>> =
                 if self.line.checkbox().is_some() {
                     self.get_substitution().and_then(|prefix| {
                         let start = prefix.find('[')?;
-                        let end = prefix.find(']').map(|i| i + 1)?; // include ']'
+                        let end = prefix.find(']').map(|i| i + 1)?;
                         Some(start..end)
                     })
                 } else {
                     None
                 };
 
-            // Extract link regions for Ctrl/Cmd+click handling
             let link_regions: Vec<_> = self
                 .inline_styles
                 .iter()
@@ -996,11 +897,6 @@ impl IntoElement for Line<'_> {
                 })
                 .collect();
 
-            // Extract hidden marker regions for visual-to-buffer conversion
-            // Each entry is (opening_start, opening_end, closing_start, closing_end)
-            // Markers are visible (not hidden) if:
-            // - selection is on line (show_all_markers), OR
-            // - cursor is inside that specific region
             let show_all_markers = self.selection_on_line();
             let cursor_offset = self.cursor_offset;
             let hidden_regions: Vec<(usize, usize, usize, usize)> = if show_all_markers {
@@ -1009,11 +905,10 @@ impl IntoElement for Line<'_> {
                 self.inline_styles
                     .iter()
                     .filter_map(|region| {
-                        // If cursor is inside this region, its markers are visible
                         let cursor_inside = cursor_offset >= region.full_range.start
                             && cursor_offset <= region.full_range.end;
                         if cursor_inside {
-                            None // Not hidden
+                            None
                         } else {
                             let opening_start = region.full_range.start.max(content_range.start);
                             let opening_end = region.content_range.start.min(content_range.end);
@@ -1025,7 +920,6 @@ impl IntoElement for Line<'_> {
                     .collect()
             };
 
-            // Calculate prefix length for visual-to-buffer conversion
             let prefix_len = self.get_substitution().map(|s| s.len()).unwrap_or(0);
 
             line_div = line_div.on_mouse_down(
@@ -1036,7 +930,6 @@ impl IntoElement for Line<'_> {
                         Err(idx) => idx,
                     };
 
-                    // Check if click is on checkbox in the prefix
                     if let Some(ref range) = checkbox_click_range
                         && visual_index >= range.start
                         && visual_index < range.end
@@ -1046,10 +939,8 @@ impl IntoElement for Line<'_> {
                         return;
                     }
 
-                    // Adjust for substitution prefix (clicks in prefix map to start of content)
                     let content_visual_index = visual_index.saturating_sub(prefix_len);
 
-                    // Convert visual index to buffer offset, accounting for hidden markers
                     let buffer_offset = {
                         if content_range.start >= content_range.end {
                             content_range.start
@@ -1060,7 +951,6 @@ impl IntoElement for Line<'_> {
                             while buffer_pos < content_range.end
                                 && visible_count < content_visual_index
                             {
-                                // Check if this position is inside a hidden marker region
                                 let mut is_hidden = false;
                                 for &(opening_start, opening_end, closing_start, closing_end) in
                                     &hidden_regions
@@ -1084,11 +974,9 @@ impl IntoElement for Line<'_> {
                     };
                     let buffer_offset = buffer_offset.min(line_range.end);
 
-                    // Check for Ctrl/Cmd+click on a link
                     if event.modifiers.control || event.modifiers.platform {
                         for (range, url) in &link_regions {
                             if buffer_offset >= range.start && buffer_offset <= range.end {
-                                // Open the URL
                                 let _ = open::that(url);
                                 return;
                             }
@@ -1106,18 +994,14 @@ impl IntoElement for Line<'_> {
             );
         }
 
-        // Add mouse move handler for drag and link/checkbox hover detection
         {
             let on_drag = self.on_drag.clone();
             let on_hover = self.on_hover.clone();
             let layout_for_move = text_layout;
             let line_range_for_move = self.line.range.clone();
             let content_range = self.content_range();
-
-            // Calculate prefix length for visual-to-buffer conversion
             let prefix_len = self.get_substitution().map(|s| s.len()).unwrap_or(0);
 
-            // Calculate checkbox hover range within the prefix (if this line has a checkbox)
             let checkbox_hover_range: Option<Range<usize>> = if self.line.checkbox().is_some() {
                 self.get_substitution().and_then(|prefix| {
                     let start = prefix.find('[')?;
@@ -1128,7 +1012,6 @@ impl IntoElement for Line<'_> {
                 None
             };
 
-            // Extract link content ranges for hover detection
             let link_content_ranges: Vec<Range<usize>> = self
                 .inline_styles
                 .iter()
@@ -1137,7 +1020,6 @@ impl IntoElement for Line<'_> {
                 .collect();
 
             line_div = line_div.on_mouse_move(move |event: &MouseMoveEvent, window, cx| {
-                // Handle drag when left button is pressed
                 if event.pressed_button == Some(MouseButton::Left)
                     && let Some(ref on_drag) = on_drag
                 {
@@ -1146,26 +1028,22 @@ impl IntoElement for Line<'_> {
                         Err(idx) => idx,
                     };
 
-                    // Adjust for substitution prefix
                     let content_visual_index = visual_index.saturating_sub(prefix_len);
                     let buffer_offset =
                         (content_range.start + content_visual_index).min(line_range_for_move.end);
                     on_drag(buffer_offset, window, cx);
                 }
 
-                // Handle link and checkbox hover detection
                 if let Some(ref on_hover) = on_hover {
                     let visual_index = match layout_for_move.index_for_position(event.position) {
                         Ok(idx) => idx,
                         Err(idx) => idx,
                     };
 
-                    // Check if hovering over checkbox in prefix
                     let hovering_checkbox = checkbox_hover_range.as_ref().is_some_and(|range| {
                         visual_index >= range.start && visual_index < range.end
                     });
 
-                    // Check if hovering over a link region
                     let content_visual_index = visual_index.saturating_sub(prefix_len);
                     let buffer_offset =
                         (content_range.start + content_visual_index).min(line_range_for_move.end);
@@ -1178,7 +1056,6 @@ impl IntoElement for Line<'_> {
             });
         }
 
-        // Attach scroll anchor if this is the cursor line
         line_div.anchor_scroll(self.scroll_anchor)
     }
 }

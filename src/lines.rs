@@ -12,7 +12,6 @@ pub fn extract_lines(buffer: &Buffer) -> Vec<LineMarkers> {
 }
 
 pub fn extract_lines_from_parts(text: &str, tree: Option<&MarkdownTree>) -> Vec<LineMarkers> {
-    // First, split the buffer into lines
     let mut lines = Vec::new();
     let mut line_start = 0;
     let mut line_number = 0;
@@ -24,23 +23,20 @@ pub fn extract_lines_from_parts(text: &str, tree: Option<&MarkdownTree>) -> Vec<
             line_number += 1;
         }
     }
-    // Handle last line if it doesn't end with newline
+
     if line_start < text.len() {
         lines.push((line_number, line_start..text.len()));
     }
-    // Handle empty buffer or buffer ending with newline (adds empty final line)
+
     if text.is_empty() || text.ends_with('\n') {
         lines.push((line_number, line_start..line_start));
     }
 
-    // Collect nodes once for the whole buffer
     let nodes = tree.map(|t| collect_nodes(&t.block_tree().root_node()));
 
-    // Build Line for each line
     lines
         .into_iter()
         .map(|(line_num, range)| {
-            // Find markers on this line using tree_walk
             let markers = if let Some(nodes) = &nodes {
                 markers_at(nodes, text, range.start, range.end)
             } else {
@@ -70,8 +66,6 @@ pub fn extract_inline_styles_from_parts(
     };
 
     let mut styles = Vec::new();
-
-    // Find the inline node that covers this line's content
     let root = tree.block_tree().root_node();
     collect_inline_styles_in_range(&root, tree, text, &line.range, &mut styles);
 

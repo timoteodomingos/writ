@@ -136,8 +136,6 @@ impl Editor {
         }
     }
 
-    /// Find the line containing a byte position.
-    /// Uses ropey's O(log n) byte_to_line, then O(1) array index.
     fn find_line_at(&self, byte_pos: usize) -> Option<(usize, &LineMarkers)> {
         let idx = self.buffer.byte_to_line(byte_pos);
         self.buffer.lines().get(idx).map(|line| (idx, line))
@@ -156,27 +154,22 @@ impl Editor {
             return;
         };
 
-        // Clear the pending flag now that we have bounds
         self.scroll_to_cursor_pending = false;
 
         let viewport = self.scroll_handle.bounds();
         let offset = self.scroll_handle.offset();
 
-        // Calculate item position relative to viewport
         let item_top = item_bounds.origin.y + offset.y;
         let item_bottom = item_top + item_bounds.size.height;
 
         let visible_top = viewport.origin.y + margin;
         let visible_bottom = viewport.origin.y + viewport.size.height - margin;
 
-        // Check if we need to scroll
         if item_top < visible_top {
-            // Item is above visible area - scroll up
             let new_offset_y = viewport.origin.y - item_bounds.origin.y + margin;
             self.scroll_handle
                 .set_offset(gpui::point(offset.x, new_offset_y));
         } else if item_bottom > visible_bottom {
-            // Item is below visible area - scroll down
             let new_offset_y = viewport.origin.y + viewport.size.height
                 - item_bounds.origin.y
                 - item_bounds.size.height
@@ -194,12 +187,10 @@ impl Editor {
         let lines = self.buffer.lines();
         let cursor_line_idx = self.buffer.byte_to_line(cursor_pos);
 
-        // Find the line info for the current line
         let Some(line_info) = lines.get(cursor_line_idx) else {
             return "\n".to_string();
         };
 
-        // Use continuation from Line
         let buffer_text = self.buffer.text();
         let continuation = line_info.continuation(&buffer_text);
         if continuation.is_empty() {
@@ -209,22 +200,16 @@ impl Editor {
         }
     }
 
-    /// Computes the indentation to insert for smart tab.
-    /// Uses cached lines to find the nearest container to nest into.
     fn compute_smart_tab_indent(&self, cursor_pos: usize) -> Option<String> {
         find_container_indent_from_lines(self.buffer.lines(), cursor_pos)
             .map(|width| " ".repeat(width))
     }
 
-    /// Performs smart tab: indents the current line to nest under the previous sibling.
-    /// Does nothing if there's no valid previous sibling to nest under.
     fn smart_tab(&mut self) {
         if let Some(indent) = self.compute_smart_tab_indent(self.cursor().offset) {
-            // Insert at line start to indent the whole line
             let cursor_offset = self.cursor().offset;
             let line_start = self.cursor().move_to_line_start(&self.buffer).offset;
             self.buffer.insert(line_start, &indent, cursor_offset);
-            // Move cursor by the indent amount
             let new_offset = cursor_offset + indent.len();
             self.selection = Selection::new(new_offset, new_offset);
         }
@@ -236,16 +221,12 @@ impl Editor {
             return;
         };
 
-        // Only toggle task list items
         let buffer_text = self.buffer.text();
         let Some(is_checked) = line.checkbox() else {
             return;
         };
 
-        // Find the checkbox pattern in the line
         let line_text = &buffer_text[line.range.clone()];
-
-        // Find the position of [ ] or [x]/[X] in the line
         let checkbox_pattern = if is_checked { "[x]" } else { "[ ]" };
         let alt_pattern = if is_checked { "[X]" } else { "" };
 
@@ -261,11 +242,8 @@ impl Editor {
             return;
         };
 
-        // Calculate the absolute buffer position of the checkbox content (the x or space)
-        let checkbox_content_start = line.range.start + relative_offset + 1; // skip '['
-        let checkbox_content_end = checkbox_content_start + 1; // just the 'x' or ' '
-
-        // Toggle the content
+        let checkbox_content_start = line.range.start + relative_offset + 1;
+        let checkbox_content_end = checkbox_content_start + 1;
         let new_content = if is_checked { " " } else { "x" };
         let cursor_before = self.cursor().offset;
 
@@ -275,9 +253,6 @@ impl Editor {
             cursor_before,
         );
 
-        // Keep cursor where it was (don't update selection)
-        // The replace returns a new position, but we want to keep the old one
-        // unless the cursor was inside the checkbox area
         self.selection = Selection::new(cursor_before, cursor_before);
 
         cx.notify();
@@ -303,12 +278,10 @@ impl Editor {
         } else if self.cursor().offset > 0 {
             let cursor_pos = self.cursor().offset;
 
-            // Check if cursor is at the end of a marker - if so, delete the whole marker
             if let Some(delete_range) = self.smart_backspace_range(cursor_pos) {
                 self.buffer.delete(delete_range.clone(), cursor_pos);
                 self.selection = Selection::new(delete_range.start, delete_range.start);
             } else {
-                // Normal single-character delete
                 let new_cursor = self.cursor().move_left(&self.buffer);
                 self.buffer
                     .delete(new_cursor.offset..cursor_pos, cursor_pos);
@@ -317,14 +290,9 @@ impl Editor {
         }
     }
 
-    /// Returns the range to delete if cursor is at the end of a block marker.
-    /// Markers are checked innermost first (e.g., checkbox before list item).
-    /// Uses cached self.lines from last render.
     fn smart_backspace_range(&self, cursor_pos: usize) -> Option<std::ops::Range<usize>> {
-        // Find the line containing cursor (using binary search on cached lines)
         let (_, line) = self.find_line_at(cursor_pos)?;
 
-        // Check each marker (innermost first) to see if cursor is at its end
         for marker in &line.markers {
             if cursor_pos == marker.range.end {
                 return Some(marker.range.clone());
@@ -362,37 +330,27 @@ impl Editor {
         self.move_cursor(new_cursor, extend);
     }
 
-    /// Move left, skipping over marker regions.
-    /// Uses cached self.lines from last render.
     fn smart_move_left(&self) -> Cursor {
         let cursor_pos = self.cursor().offset;
         if cursor_pos == 0 {
             return self.cursor();
         }
 
-        // Find the line containing cursor (using binary search on cached lines)
         if let Some((line_idx, line)) = self.find_line_at(cursor_pos)
             && let Some(marker_range) = line.marker_range()
+            && cursor_pos <= marker_range.end
         {
-            // If cursor is at content start or inside markers, jump to previous line end
-            if cursor_pos <= marker_range.end {
-                if line_idx > 0 {
-                    // Go to end of previous line (before the newline)
-                    let prev_line = &self.buffer.lines()[line_idx - 1];
-                    return Cursor::new(prev_line.range.end);
-                } else {
-                    // First line, stay at content start
-                    return Cursor::new(marker_range.end);
-                }
+            if line_idx > 0 {
+                let prev_line = &self.buffer.lines()[line_idx - 1];
+                return Cursor::new(prev_line.range.end);
+            } else {
+                return Cursor::new(marker_range.end);
             }
         }
 
-        // Normal movement
         self.cursor().move_left(&self.buffer)
     }
 
-    /// Move right, skipping over marker regions.
-    /// Uses cached self.lines from last render.
     fn smart_move_right(&self) -> Cursor {
         let cursor_pos = self.cursor().offset;
         let len = self.buffer.len_bytes();
@@ -400,22 +358,17 @@ impl Editor {
             return self.cursor();
         }
 
-        // Find the line containing cursor (using binary search on cached lines)
-        if let Some((_, line)) = self.find_line_at(cursor_pos) {
-            // Check if cursor is at line start and there are markers
-            if let Some(marker_range) = line.marker_range() {
-                if cursor_pos == line.range.start {
-                    // Jump to end of marker region (start of content)
-                    return Cursor::new(marker_range.end);
-                }
-                // If cursor is inside marker region, jump to content start
-                if cursor_pos > marker_range.start && cursor_pos < marker_range.end {
-                    return Cursor::new(marker_range.end);
-                }
+        if let Some((_, line)) = self.find_line_at(cursor_pos)
+            && let Some(marker_range) = line.marker_range()
+        {
+            if cursor_pos == line.range.start {
+                return Cursor::new(marker_range.end);
+            }
+            if cursor_pos > marker_range.start && cursor_pos < marker_range.end {
+                return Cursor::new(marker_range.end);
             }
         }
 
-        // Normal movement
         self.cursor().move_right(&self.buffer)
     }
 
@@ -429,7 +382,6 @@ impl Editor {
                 i += 1;
                 let mut found_close = false;
 
-                // Find closing fence
                 while i < lines.len() {
                     if lines[i].is_fence() {
                         ranges.push((start, Some(i)));
@@ -440,7 +392,6 @@ impl Editor {
                     i += 1;
                 }
 
-                // Incomplete block - no closing fence found
                 if !found_close {
                     ranges.push((start, None));
                 }
@@ -452,7 +403,6 @@ impl Editor {
         ranges
     }
 
-    /// Returns true if the cursor is currently inside a code block.
     fn cursor_in_code_block(&self) -> bool {
         let lines = self.buffer.lines();
         let cursor_line = self.buffer.byte_to_line(self.cursor().offset);
@@ -468,7 +418,6 @@ impl Editor {
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
-        // Block user input during demo mode
         if self.input_blocked {
             return;
         }
@@ -476,7 +425,6 @@ impl Editor {
         let keystroke = &event.keystroke;
         let extend = keystroke.modifiers.shift;
 
-        // Handle special keys
         match keystroke.key.as_str() {
             "backspace" => {
                 self.delete_backward();
@@ -530,8 +478,6 @@ impl Editor {
                 cx.notify();
             }
             "tab" => {
-                // Inside code blocks, insert spaces for indentation
-                // Outside code blocks, use smart tab for nesting
                 if self.cursor_in_code_block() {
                     self.insert_text("    ");
                 } else {
@@ -584,19 +530,14 @@ impl Editor {
                     cx.notify();
                 }
             }
-            "s" if keystroke.modifiers.control || keystroke.modifiers.platform => {
-                // Save is handled by the application, not the editor component
-            }
+            "s" if keystroke.modifiers.control || keystroke.modifiers.platform => {}
 
             _ => {
                 if let Some(key_char) = &keystroke.key_char {
-                    // Prevent space at the beginning of lines (use tab for indentation)
-                    // Exception: allow spaces inside code blocks for indentation
                     if key_char == " " && !self.cursor_in_code_block() {
                         let cursor = self.cursor();
                         let line_start = cursor.move_to_line_start(&self.buffer).offset;
                         if cursor.offset == line_start {
-                            // At line start outside code block - ignore space
                             return;
                         }
                     }
@@ -783,32 +724,26 @@ impl Render for Editor {
 
         let buffer_text = self.buffer.text();
 
-        // Create click callback that updates cursor position
         let entity = cx.entity().clone();
         let on_click: ClickCallback =
             Rc::new(move |buffer_offset, shift_held, click_count, _window, cx| {
                 entity.update(cx, |editor, cx| {
-                    // Block user input during demo mode
                     if editor.input_blocked {
                         return;
                     }
                     if shift_held {
-                        // Extend selection to click position
                         editor.selection = editor.selection.extend_to(buffer_offset);
                     } else {
                         match click_count {
                             2 => {
-                                // Double-click: select word
                                 editor.selection =
                                     Selection::select_word_at(buffer_offset, &editor.buffer);
                             }
                             3 => {
-                                // Triple-click: select line
                                 editor.selection =
                                     Selection::select_line_at(buffer_offset, &editor.buffer);
                             }
                             _ => {
-                                // Single click: collapse selection to click position
                                 editor.selection = Selection::new(buffer_offset, buffer_offset);
                             }
                         }
@@ -817,25 +752,20 @@ impl Render for Editor {
                 });
             });
 
-        // Create drag callback that extends selection during mouse drag
         let entity = cx.entity().clone();
         let on_drag: DragCallback = Rc::new(move |buffer_offset, _window, cx| {
             entity.update(cx, |editor, cx| {
-                // Block user input during demo mode
                 if editor.input_blocked {
                     return;
                 }
-                // Extend selection to drag position (keep anchor, move head)
                 editor.selection = editor.selection.extend_to(buffer_offset);
                 cx.notify();
             });
         });
 
-        // Create checkbox toggle callback
         let entity = cx.entity().clone();
         let on_checkbox: CheckboxCallback = Rc::new(move |line_number, _window, cx| {
             entity.update(cx, |editor, cx| {
-                // Block user input during demo mode
                 if editor.input_blocked {
                     return;
                 }
@@ -843,7 +773,6 @@ impl Render for Editor {
             });
         });
 
-        // Create hover callback for checkbox and link hover detection
         let entity = cx.entity().clone();
         let on_hover: HoverCallback = Rc::new(
             move |hovering_checkbox, hovering_link_region, _window, cx| {
@@ -859,21 +788,15 @@ impl Render for Editor {
             },
         );
 
-        // Use cached lines from buffer (updated on buffer changes, not on every render)
         let lines = self.buffer.lines().to_vec();
         let cursor_line = self.buffer.byte_to_line(cursor_offset);
-
-        // Build line views with click and drag handling
-        // Track child index for cursor line (accounting for top spacer)
-        let cursor_child_index = Some(cursor_line + 1); // +1 for top_spacer
+        let cursor_child_index = Some(cursor_line + 1);
 
         let line_views: Vec<_> = lines
             .iter()
             .map(|line| {
-                // Extract inline styles for this line
                 let inline_styles = extract_inline_styles(&self.buffer, line);
 
-                // Get code highlights for this line's range
                 let code_highlights: Vec<_> = self
                     .buffer
                     .code_highlights_for_range(line.range.clone())
@@ -898,20 +821,16 @@ impl Render for Editor {
             })
             .collect();
 
-        // Check if cursor moved to a different child
         let cursor_moved = self.cursor_child_index != cursor_child_index;
         self.cursor_child_index = cursor_child_index;
 
-        // If cursor moved, request scroll on next render (when bounds will be available)
         if cursor_moved {
             self.request_scroll_to_cursor();
         }
 
-        // Perform any pending scroll (uses bounds from previous layout)
         let margin = self.config.padding_y.to_pixels(window.rem_size());
         self.perform_pending_scroll(margin);
 
-        // Create spacer elements for vertical padding (these scroll with content)
         let top_spacer = div().h(self.config.padding_y);
         let bottom_spacer = div().h(self.config.padding_y);
 
