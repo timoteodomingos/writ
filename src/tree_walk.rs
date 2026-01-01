@@ -288,15 +288,27 @@ pub fn markers_at(nodes: &[Node], text: &str, line_start: usize, line_end: usize
                 });
             }
             "task_list_marker_unchecked" => {
+                // Include trailing space after ] if present
+                let range_end = if text.as_bytes().get(end) == Some(&b' ') {
+                    end + 1
+                } else {
+                    end
+                };
                 markers.push(Marker {
                     kind: MarkerKind::Checkbox { checked: false },
-                    range: start..end,
+                    range: start..range_end,
                 });
             }
             "task_list_marker_checked" => {
+                // Include trailing space after ] if present
+                let range_end = if text.as_bytes().get(end) == Some(&b' ') {
+                    end + 1
+                } else {
+                    end
+                };
                 markers.push(Marker {
                     kind: MarkerKind::Checkbox { checked: true },
-                    range: start..end,
+                    range: start..range_end,
                 });
             }
             "atx_h1_marker" => {
