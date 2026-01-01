@@ -9,14 +9,14 @@ pub use theme::EditorTheme;
 use std::rc::Rc;
 
 use gpui::{
-    App, Context, CursorStyle, FocusHandle, Focusable, IntoElement, KeyDownEvent, ScrollHandle,
-    Window, div, font, prelude::*,
+    App, Context, CursorStyle, FocusHandle, Focusable, IntoElement, KeyDownEvent,
+    ModifiersChangedEvent, ScrollHandle, Window, div, font, prelude::*,
 };
 
 use crate::buffer::Buffer;
 use crate::cursor::{Cursor, Selection};
 use crate::line_view::{
-    CheckboxCallback, ClickCallback, DragCallback, LineView, LineViewTheme, LinkHoverCallback,
+    CheckboxCallback, ClickCallback, DragCallback, HoverCallback, LineView, LineViewTheme,
 };
 use crate::lines::{extract_inline_styles, extract_lines};
 use crate::tree_walk::{Line, collect_nodes, find_container_indent};
@@ -44,7 +44,12 @@ pub struct Editor {
     input_blocked: bool,
     streaming_mode: bool,
     config: EditorConfig,
-    hovering_link: bool,
+    /// Whether mouse is over a checkbox.
+    hovering_checkbox: bool,
+    /// Whether mouse is over a link (regardless of Ctrl state).
+    hovering_link_region: bool,
+    /// Whether Ctrl/Cmd is currently held.
+    ctrl_held: bool,
     /// Cached line info, updated when buffer changes.
     lines: Vec<Line>,
 }
@@ -73,7 +78,9 @@ impl Editor {
             input_blocked: false,
             streaming_mode: false,
             config,
-            hovering_link: false,
+            hovering_checkbox: false,
+            hovering_link_region: false,
+            ctrl_held: false,
             lines,
         }
     }
@@ -568,6 +575,7 @@ impl Editor {
             "s" if keystroke.modifiers.control || keystroke.modifiers.platform => {
                 // Save is handled by the application, not the editor component
             }
+
             _ => {
                 if let Some(key_char) = &keystroke.key_char {
                     // Prevent space at the beginning of lines (use tab for indentation)
@@ -583,6 +591,19 @@ impl Editor {
                     cx.notify();
                 }
             }
+        }
+    }
+
+    fn on_modifiers_changed(
+        &mut self,
+        event: &ModifiersChangedEvent,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let ctrl_held = event.modifiers.control || event.modifiers.platform;
+        if self.ctrl_held != ctrl_held {
+            self.ctrl_held = ctrl_held;
+            cx.notify();
         }
     }
 
@@ -812,16 +833,21 @@ impl Render for Editor {
             });
         });
 
-        // Create link hover callback
+        // Create hover callback for checkbox and link hover detection
         let entity = cx.entity().clone();
-        let on_link_hover: LinkHoverCallback = Rc::new(move |hovering, _window, cx| {
-            entity.update(cx, |editor, cx| {
-                if editor.hovering_link != hovering {
-                    editor.hovering_link = hovering;
-                    cx.notify();
-                }
-            });
-        });
+        let on_hover: HoverCallback = Rc::new(
+            move |hovering_checkbox, hovering_link_region, _window, cx| {
+                entity.update(cx, |editor, cx| {
+                    if editor.hovering_checkbox != hovering_checkbox
+                        || editor.hovering_link_region != hovering_link_region
+                    {
+                        editor.hovering_checkbox = hovering_checkbox;
+                        editor.hovering_link_region = hovering_link_region;
+                        cx.notify();
+                    }
+                });
+            },
+        );
 
         // Extract lines fresh on each render (tree-sitter walking is fast)
         // Store in self.lines so smart cursor movement can use it
@@ -896,7 +922,7 @@ impl Render for Editor {
                 .on_click(on_click.clone())
                 .on_drag(on_drag.clone())
                 .on_checkbox(on_checkbox.clone())
-                .on_link_hover(on_link_hover.clone());
+                .on_hover(on_hover.clone());
 
                 Some(line_view)
             })
@@ -924,17 +950,20 @@ impl Render for Editor {
             .track_focus(&self.focus_handle)
             .key_context("Editor")
             .on_key_down(cx.listener(Self::on_key_down))
+            .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
             .size_full()
             .overflow_scroll()
             .track_scroll(&self.scroll_handle)
             .px(self.config.padding_x)
             .font(line_theme.text_font.clone())
             .text_color(line_theme.text_color)
-            .cursor(if self.hovering_link {
-                CursorStyle::PointingHand
-            } else {
-                CursorStyle::IBeam
-            })
+            .cursor(
+                if self.hovering_checkbox || (self.hovering_link_region && self.ctrl_held) {
+                    CursorStyle::PointingHand
+                } else {
+                    CursorStyle::IBeam
+                },
+            )
             .child(top_spacer)
             .children(line_views)
             .child(bottom_spacer)

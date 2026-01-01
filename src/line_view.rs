@@ -14,7 +14,8 @@ use crate::tree_walk::{Line, MarkerKind};
 pub type ClickCallback = Rc<dyn Fn(usize, bool, usize, &mut Window, &mut App)>;
 pub type DragCallback = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 pub type CheckboxCallback = Rc<dyn Fn(usize, &mut Window, &mut App)>;
-pub type LinkHoverCallback = Rc<dyn Fn(bool, &mut Window, &mut App)>;
+/// Callback for hover state changes: (hovering_checkbox, hovering_link_region)
+pub type HoverCallback = Rc<dyn Fn(bool, bool, &mut Window, &mut App)>;
 
 #[derive(Clone)]
 pub struct LineViewTheme {
@@ -41,7 +42,7 @@ pub struct LineView<'a> {
     on_click: Option<ClickCallback>,
     on_drag: Option<DragCallback>,
     on_checkbox: Option<CheckboxCallback>,
-    on_link_hover: Option<LinkHoverCallback>,
+    on_hover: Option<HoverCallback>,
     scroll_anchor: Option<ScrollAnchor>,
 }
 
@@ -66,7 +67,7 @@ impl<'a> LineView<'a> {
             on_click: None,
             on_drag: None,
             on_checkbox: None,
-            on_link_hover: None,
+            on_hover: None,
             scroll_anchor: None,
         }
     }
@@ -91,8 +92,8 @@ impl<'a> LineView<'a> {
         self
     }
 
-    pub fn on_link_hover(mut self, callback: LinkHoverCallback) -> Self {
-        self.on_link_hover = Some(callback);
+    pub fn on_hover(mut self, callback: HoverCallback) -> Self {
+        self.on_hover = Some(callback);
         self
     }
 
@@ -987,7 +988,7 @@ impl IntoElement for LineView<'_> {
         // Add mouse move handler for drag and link/checkbox hover detection
         {
             let on_drag = self.on_drag.clone();
-            let on_link_hover = self.on_link_hover.clone();
+            let on_hover = self.on_hover.clone();
             let layout_for_move = text_layout;
             let line_range_for_move = self.line.range.clone();
             let content_range = self.content_range();
@@ -1032,40 +1033,26 @@ impl IntoElement for LineView<'_> {
                 }
 
                 // Handle link and checkbox hover detection
-                if let Some(ref on_link_hover) = on_link_hover {
+                if let Some(ref on_hover) = on_hover {
                     let visual_index = match layout_for_move.index_for_position(event.position) {
                         Ok(idx) => idx,
                         Err(idx) => idx,
                     };
 
-                    // Check if hovering over checkbox in prefix (no modifier needed)
+                    // Check if hovering over checkbox in prefix
                     let hovering_checkbox = checkbox_hover_range.as_ref().is_some_and(|range| {
                         visual_index >= range.start && visual_index < range.end
                     });
 
-                    if hovering_checkbox {
-                        on_link_hover(true, window, cx);
-                    } else {
-                        // Check for link hover (requires Ctrl/Cmd)
-                        let is_ctrl_held = event.modifiers.control || event.modifiers.platform;
+                    // Check if hovering over a link region
+                    let content_visual_index = visual_index.saturating_sub(prefix_len);
+                    let buffer_offset =
+                        (content_range.start + content_visual_index).min(line_range_for_move.end);
+                    let hovering_link_region = link_content_ranges
+                        .iter()
+                        .any(|range| buffer_offset >= range.start && buffer_offset < range.end);
 
-                        if is_ctrl_held && !link_content_ranges.is_empty() {
-                            // Adjust for substitution prefix
-                            let content_visual_index = visual_index.saturating_sub(prefix_len);
-                            let buffer_offset = (content_range.start + content_visual_index)
-                                .min(line_range_for_move.end);
-
-                            // Check if we're over a link
-                            let hovering_link = link_content_ranges.iter().any(|range| {
-                                buffer_offset >= range.start && buffer_offset < range.end
-                            });
-
-                            on_link_hover(hovering_link, window, cx);
-                        } else {
-                            // Not hovering over anything clickable
-                            on_link_hover(false, window, cx);
-                        }
-                    }
+                    on_hover(hovering_checkbox, hovering_link_region, window, cx);
                 }
             });
         }
