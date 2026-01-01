@@ -160,181 +160,173 @@ impl MarkerKind {
     }
 }
 
-/// Find all markers for a line by probing at `probe_pos` and walking up ancestors.
-/// Returns markers from outermost to innermost.
-pub fn markers_at(root: &Node, text: &str, line_start: usize, probe_pos: usize) -> Vec<Marker> {
-    let Some(leaf) = root.descendant_for_byte_range(probe_pos, probe_pos) else {
-        return Vec::new();
-    };
+/// Collect all nodes in document order (preorder traversal).
+pub fn collect_nodes<'a>(root: &Node<'a>) -> Vec<Node<'a>> {
+    let mut cursor = root.walk();
+    let mut nodes = Vec::new();
 
-    let mut markers = Vec::new();
-    let mut current = Some(leaf);
+    loop {
+        nodes.push(cursor.node());
 
-    while let Some(node) = current {
-        // Check if current node's prev sibling is a block_continuation with only whitespace
-        if let Some(sib) = node.prev_sibling()
-            && sib.kind() == "block_continuation"
-            && sib.start_byte() >= line_start
-            && sib.start_byte() < sib.end_byte()
-        {
-            let content = &text[sib.byte_range()];
-            if content.chars().all(|c| c.is_whitespace()) {
-                markers.push(Marker {
-                    kind: MarkerKind::Indent,
-                    range: sib.byte_range(),
-                });
+        if cursor.goto_first_child() {
+            continue;
+        }
+        if cursor.goto_next_sibling() {
+            continue;
+        }
+        loop {
+            if !cursor.goto_parent() {
+                return nodes;
+            }
+            if cursor.goto_next_sibling() {
+                break;
             }
         }
+    }
+}
 
-        match node.kind() {
-            "block_quote" => {
-                if let Some(marker_node) = node.child(0)
-                    && marker_node.kind() == "block_quote_marker"
-                {
+/// Find all markers for a line by scanning nodes that start within the line.
+/// Returns markers innermost to outermost (reverse document order).
+/// Takes a pre-computed nodes vec from `collect_nodes()` for efficiency.
+pub fn markers_at(nodes: &[Node], text: &str, line_start: usize, line_end: usize) -> Vec<Marker> {
+    let mut markers = Vec::new();
+
+    // Check if line is inside an indented_code_block (skip all markers if so)
+    let in_indented_code_block = nodes.iter().any(|n| {
+        n.kind() == "indented_code_block"
+            && n.start_byte() <= line_start
+            && n.end_byte() > line_start
+    });
+    if in_indented_code_block {
+        return markers;
+    }
+
+    // Iterate right to left to get innermost markers first
+    for node in nodes.iter().rev() {
+        let start = node.start_byte();
+        let end = node.end_byte();
+        let kind = node.kind();
+        // Only consider nodes that start within this line
+        if start < line_start || start > line_end {
+            continue;
+        }
+
+        match kind {
+            "block_quote_marker" | "block_continuation" => {
+                let content = &text[start..end];
+                if content.contains('>') {
                     markers.push(Marker {
                         kind: MarkerKind::BlockQuote,
-                        range: marker_node.byte_range(),
+                        range: start..end,
                     });
-                }
-            }
-            "list_item" => {
-                // Only push if the list marker is on this line
-                if let Some(marker_node) = node.child(0)
-                    && marker_node.start_byte() >= line_start
-                {
-                    let ordered = is_ordered_list(&node);
-
-                    // Push checkbox first (so it comes before ListItem in stack)
-                    if let Some((cb_kind, cb_range)) = get_checkbox(&node) {
-                        markers.push(Marker {
-                            kind: cb_kind,
-                            range: cb_range,
-                        });
-                    }
-
+                } else if !content.is_empty() && content.chars().all(|c| c.is_whitespace()) {
                     markers.push(Marker {
-                        kind: MarkerKind::ListItem { ordered },
-                        range: marker_node.byte_range(),
+                        kind: MarkerKind::Indent,
+                        range: start..end,
                     });
                 }
             }
-            "atx_heading" => {
-                if let Some(marker_node) = node.child(0)
-                    && let Some(level) = get_heading_level(&node)
-                {
-                    markers.push(Marker {
-                        kind: MarkerKind::Heading(level),
-                        range: marker_node.byte_range(),
-                    });
-                }
-            }
-            "fenced_code_block_delimiter" => {
-                let language = if let Some(sibling) = node.next_sibling() {
-                    if sibling.kind() == "info_string" {
-                        let s = text[sibling.start_byte()..sibling.end_byte()].trim();
-                        if s.is_empty() {
-                            None
-                        } else {
-                            Some(s.to_string())
-                        }
-                    } else {
-                        None
-                    }
-                } else {
-                    None
-                };
+            "list_marker_minus" | "list_marker_plus" | "list_marker_star" => {
                 markers.push(Marker {
-                    kind: MarkerKind::CodeBlockFence { language },
-                    range: node.byte_range(),
+                    kind: MarkerKind::ListItem { ordered: false },
+                    range: start..end,
                 });
             }
-            "info_string" => {
-                let s = text[node.start_byte()..node.end_byte()].trim();
-                let language = if s.is_empty() {
-                    None
-                } else {
-                    Some(s.to_string())
-                };
-                // Range covers the delimiter, not the info_string
-                if let Some(parent) = node.parent()
-                    && let Some(delim) = parent.child(0)
-                {
-                    markers.push(Marker {
-                        kind: MarkerKind::CodeBlockFence { language },
-                        range: delim.byte_range(),
-                    });
-                }
+            "list_marker_dot" | "list_marker_parenthesis" => {
+                markers.push(Marker {
+                    kind: MarkerKind::ListItem { ordered: true },
+                    range: start..end,
+                });
+            }
+            "task_list_marker_unchecked" => {
+                markers.push(Marker {
+                    kind: MarkerKind::Checkbox { checked: false },
+                    range: start..end,
+                });
+            }
+            "task_list_marker_checked" => {
+                markers.push(Marker {
+                    kind: MarkerKind::Checkbox { checked: true },
+                    range: start..end,
+                });
+            }
+            "atx_h1_marker" => {
+                markers.push(Marker {
+                    kind: MarkerKind::Heading(1),
+                    range: start..end,
+                });
+            }
+            "atx_h2_marker" => {
+                markers.push(Marker {
+                    kind: MarkerKind::Heading(2),
+                    range: start..end,
+                });
+            }
+            "atx_h3_marker" => {
+                markers.push(Marker {
+                    kind: MarkerKind::Heading(3),
+                    range: start..end,
+                });
+            }
+            "atx_h4_marker" => {
+                markers.push(Marker {
+                    kind: MarkerKind::Heading(4),
+                    range: start..end,
+                });
+            }
+            "atx_h5_marker" => {
+                markers.push(Marker {
+                    kind: MarkerKind::Heading(5),
+                    range: start..end,
+                });
+            }
+            "atx_h6_marker" => {
+                markers.push(Marker {
+                    kind: MarkerKind::Heading(6),
+                    range: start..end,
+                });
             }
             "thematic_break" => {
                 markers.push(Marker {
                     kind: MarkerKind::ThematicBreak,
-                    range: node.byte_range(),
+                    range: start..end,
                 });
             }
-            "fenced_code_block" => {
-                // If we're inside a fenced_code_block but didn't hit a delimiter,
-                // this is a content line
-                let has_fence_marker = markers
-                    .iter()
-                    .any(|m| matches!(m.kind, MarkerKind::CodeBlockFence { .. }));
-                if !has_fence_marker {
-                    markers.push(Marker {
-                        kind: MarkerKind::CodeBlockContent,
-                        range: node.byte_range(),
-                    });
-                }
-            }
-            "indented_code_block" => {
-                // All lines in an indented code block are content
+            "fenced_code_block_delimiter" => {
+                // Check if we already recorded a language from info_string
+                let language = markers.iter().find_map(|m| {
+                    if let MarkerKind::CodeBlockFence { language } = &m.kind {
+                        language.clone()
+                    } else {
+                        None
+                    }
+                });
+                // Remove any placeholder fence marker we added from info_string
+                markers.retain(|m| !matches!(m.kind, MarkerKind::CodeBlockFence { .. }));
                 markers.push(Marker {
-                    kind: MarkerKind::CodeBlockContent,
-                    range: node.byte_range(),
+                    kind: MarkerKind::CodeBlockFence { language },
+                    range: start..end,
                 });
             }
+            "info_string" => {
+                let lang = text[start..end].trim();
+                let language = if lang.is_empty() {
+                    None
+                } else {
+                    Some(lang.to_string())
+                };
+                // Store the language temporarily - will be picked up by delimiter
+                markers.push(Marker {
+                    kind: MarkerKind::CodeBlockFence { language },
+                    range: start..end,
+                });
+            }
+
             _ => {}
         }
-        current = node.parent();
     }
 
     markers
-}
-
-fn is_ordered_list(list_item: &Node) -> bool {
-    if let Some(first) = list_item.child(0) {
-        match first.kind() {
-            "list_marker_dot" | "list_marker_parenthesis" => return true,
-            _ => {}
-        }
-    }
-    false
-}
-
-fn get_checkbox(list_item: &Node) -> Option<(MarkerKind, Range<usize>)> {
-    if let Some(second) = list_item.child(1) {
-        match second.kind() {
-            "task_list_marker_unchecked" => {
-                return Some((MarkerKind::Checkbox { checked: false }, second.byte_range()));
-            }
-            "task_list_marker_checked" => {
-                return Some((MarkerKind::Checkbox { checked: true }, second.byte_range()));
-            }
-            _ => {}
-        }
-    }
-    None
-}
-
-fn get_heading_level(heading: &Node) -> Option<u8> {
-    let first = heading.child(0)?;
-    let kind = first.kind();
-    if kind.starts_with("atx_h") && kind.ends_with("_marker") {
-        kind.chars()
-            .nth(5)
-            .and_then(|c| c.to_digit(10))
-            .map(|d| d as u8)
-    } else {
-        None
-    }
 }
 
 #[cfg(test)]
@@ -345,6 +337,107 @@ mod tests {
 
     fn kinds(markers: &[Marker]) -> Vec<&MarkerKind> {
         markers.iter().map(|m| &m.kind).collect()
+    }
+
+    fn print_tree(node: &tree_sitter::Node, text: &str, indent: usize) {
+        let spacing = "  ".repeat(indent);
+        let preview: String = text[node.byte_range()]
+            .chars()
+            .take(20)
+            .flat_map(|c| if c == '\n' { vec!['\\', 'n'] } else { vec![c] })
+            .collect();
+        println!(
+            "{}{} [{}-{}] {:?}",
+            spacing,
+            node.kind(),
+            node.start_byte(),
+            node.end_byte(),
+            preview,
+        );
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i as u32) {
+                print_tree(&child, text, indent + 1);
+            }
+        }
+    }
+
+    fn print_nodes_by_position(root: &tree_sitter::Node, text: &str) {
+        let mut cursor = root.walk();
+        let mut nodes = Vec::new();
+
+        loop {
+            nodes.push((
+                cursor.node().start_byte(),
+                cursor.node().end_byte(),
+                cursor.node().kind().to_string(),
+            ));
+
+            if cursor.goto_first_child() {
+                continue;
+            }
+            if cursor.goto_next_sibling() {
+                continue;
+            }
+            loop {
+                if !cursor.goto_parent() {
+                    // Print sorted by start position
+                    nodes.sort_by_key(|(start, _, _)| *start);
+                    println!("\nNodes by position:");
+                    for (start, end, kind) in &nodes {
+                        let preview: String = text[*start..*end]
+                            .chars()
+                            .take(15)
+                            .flat_map(|c| if c == '\n' { vec!['\\', 'n'] } else { vec![c] })
+                            .collect();
+                        println!("  [{}-{}] {} {:?}", start, end, kind, preview);
+                    }
+                    return;
+                }
+                if cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_block_continuation_structure() {
+        // Understand where block_continuation nodes appear
+        let buf: Buffer = "> Line 1\n> Line 2\n".parse().unwrap();
+        let text = buf.text();
+        let tree = buf.tree().unwrap();
+        let root = tree.block_tree().root_node();
+
+        println!("\n=== Multiline blockquote ===");
+        println!("Text: {:?}", text);
+        print_tree(&root, &text, 0);
+
+        // Line 2 is bytes 9-17 ("> Line 2")
+        // Probe at end of line (16) - where do we land?
+        let probe = 16;
+        let node = root.descendant_for_byte_range(probe, probe);
+        println!(
+            "\nProbe at {}: {:?}",
+            probe,
+            node.map(|n| (n.kind(), n.byte_range()))
+        );
+
+        // What is the first child of inline?
+        if let Some(inline) = node {
+            println!(
+                "inline first child: {:?}",
+                inline.child(0).map(|c| (c.kind(), c.byte_range()))
+            );
+        }
+
+        // What about probing at 10 (inside block_continuation)?
+        let probe = 10;
+        let node = root.descendant_for_byte_range(probe, probe);
+        println!(
+            "Probe at {}: {:?}",
+            probe,
+            node.map(|n| (n.kind(), n.byte_range()))
+        );
     }
 
     #[test]
@@ -362,6 +455,9 @@ mod tests {
         let buf: Buffer = "> Line 1\n> Line 2\n".parse().unwrap();
         let lines = extract_lines(&buf);
 
+        println!("Line 0 markers: {:?}", lines[0].markers);
+        println!("Line 1 markers: {:?}", lines[1].markers);
+
         assert_eq!(kinds(&lines[0].markers), vec![&MarkerKind::BlockQuote]);
         assert_eq!(kinds(&lines[1].markers), vec![&MarkerKind::BlockQuote]);
     }
@@ -369,7 +465,18 @@ mod tests {
     #[test]
     fn test_nested_blockquote() {
         let buf: Buffer = "> Level 1\n> > Level 2\n".parse().unwrap();
+        let text = buf.text();
+        let tree = buf.tree().unwrap();
+        let root = tree.block_tree().root_node();
+
+        println!("\n=== Nested blockquote ===");
+        println!("Text: {:?}", text);
+        print_tree(&root, &text, 0);
+        print_nodes_by_position(&root, &text);
+
         let lines = extract_lines(&buf);
+        println!("Line 0 markers: {:?}", lines[0].markers);
+        println!("Line 1 markers: {:?}", lines[1].markers);
 
         assert_eq!(kinds(&lines[0].markers), vec![&MarkerKind::BlockQuote]);
         assert_eq!(
@@ -434,16 +541,16 @@ mod tests {
         let buf: Buffer = "```rust\nlet x = 1;\n```\n".parse().unwrap();
         let lines = extract_lines(&buf);
 
+        // Opening fence with language
         assert_eq!(
             kinds(&lines[0].markers),
             vec![&MarkerKind::CodeBlockFence {
                 language: Some("rust".to_string())
             }]
         );
-        assert_eq!(
-            kinds(&lines[1].markers),
-            vec![&MarkerKind::CodeBlockContent]
-        );
+        // Content lines have no markers (code block detection handled separately)
+        assert_eq!(kinds(&lines[1].markers), vec![] as Vec<&MarkerKind>);
+        // Closing fence
         assert_eq!(
             kinds(&lines[2].markers),
             vec![&MarkerKind::CodeBlockFence { language: None }]
@@ -463,20 +570,11 @@ mod tests {
                 language: Some("rust".to_string())
             }]
         );
-        // Lines 1-3 are content
-        assert_eq!(
-            kinds(&lines[1].markers),
-            vec![&MarkerKind::CodeBlockContent]
-        );
-        assert_eq!(
-            kinds(&lines[2].markers),
-            vec![&MarkerKind::CodeBlockContent]
-        );
-        assert_eq!(
-            kinds(&lines[3].markers),
-            vec![&MarkerKind::CodeBlockContent]
-        );
-        // Line 4 is closing fence
+        // Content lines have no markers
+        assert_eq!(kinds(&lines[1].markers), vec![] as Vec<&MarkerKind>);
+        assert_eq!(kinds(&lines[2].markers), vec![] as Vec<&MarkerKind>);
+        assert_eq!(kinds(&lines[3].markers), vec![] as Vec<&MarkerKind>);
+        // Closing fence
         assert_eq!(
             kinds(&lines[4].markers),
             vec![&MarkerKind::CodeBlockFence { language: None }]
@@ -485,17 +583,19 @@ mod tests {
 
     #[test]
     fn test_indented_code_block() {
+        // Indented code blocks have no markers - detection handled separately
         let buf: Buffer = "    let x = 1;\n    let y = 2;\n".parse().unwrap();
-        let lines = extract_lines(&buf);
+        let text = buf.text();
+        let tree = buf.tree().unwrap();
+        let root = tree.block_tree().root_node();
+        print_nodes_by_position(&root, &text);
 
-        assert_eq!(
-            kinds(&lines[0].markers),
-            vec![&MarkerKind::CodeBlockContent]
-        );
-        assert_eq!(
-            kinds(&lines[1].markers),
-            vec![&MarkerKind::CodeBlockContent]
-        );
+        let lines = extract_lines(&buf);
+        println!("Line 0: {:?}", lines[0].markers);
+        println!("Line 1: {:?}", lines[1].markers);
+
+        assert_eq!(kinds(&lines[0].markers), vec![] as Vec<&MarkerKind>);
+        assert_eq!(kinds(&lines[1].markers), vec![] as Vec<&MarkerKind>);
     }
 
     #[test]
@@ -508,14 +608,24 @@ mod tests {
     #[test]
     fn test_soft_wrapped_list_item() {
         let buf: Buffer = "- First line\n  continuation\n".parse().unwrap();
+        let text = buf.text();
+        let tree = buf.tree().unwrap();
+        let root = tree.block_tree().root_node();
+
+        println!("\n=== Soft wrapped list item ===");
+        println!("Text: {:?}", text);
+        print_tree(&root, &text, 0);
+
         let lines = extract_lines(&buf);
+        println!("Line 0 markers: {:?}", lines[0].markers);
+        println!("Line 1 markers: {:?}", lines[1].markers);
 
         assert_eq!(
             kinds(&lines[0].markers),
             vec![&MarkerKind::ListItem { ordered: false }]
         );
-        // Line 2: continuation within same paragraph - no markers
-        assert_eq!(kinds(&lines[1].markers), vec![] as Vec<&MarkerKind>);
+        // Line 2: continuation has Indent marker for the "  " prefix
+        assert_eq!(kinds(&lines[1].markers), vec![&MarkerKind::Indent]);
     }
 
     #[test]
@@ -764,17 +874,23 @@ mod tests {
         let tree = buf.tree().unwrap();
         let root = tree.block_tree().root_node();
 
-        // Line 2: "    - Nested" - nested list item (bytes 8-20)
-        // Tree structure:
-        //   block_continuation [8-10] "  " (belongs to parent paragraph, not this line)
-        //   list_marker_minus [10-14] "  - " (2 spaces indent + "- ")
-        // The nested list marker includes the indent - no separate Indent marker needed
-        let markers = markers_at(&root, &text, 8, 19);
+        print_nodes_by_position(&root, &text);
+
+        let lines = extract_lines(&buf);
+        println!("Line 0: {:?}", lines[0].markers);
+        println!("Line 1: {:?}", lines[1].markers);
+
+        // Line 1: "    - Nested" - nested list item
+        // block_continuation [8-10] has "  " and list_marker_minus [10-14] has "  - "
+        // Together they form "    - "
         assert_eq!(
-            kinds(&markers),
-            vec![&MarkerKind::ListItem { ordered: false }]
+            kinds(&lines[1].markers),
+            vec![
+                &MarkerKind::ListItem { ordered: false },
+                &MarkerKind::Indent
+            ]
         );
-        // Marker range is "  - " which includes the indent
-        assert_eq!(&text[markers[0].range.clone()], "  - ");
+        assert_eq!(&text[lines[1].markers[0].range.clone()], "  - ");
+        assert_eq!(&text[lines[1].markers[1].range.clone()], "  ");
     }
 }

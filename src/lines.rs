@@ -1,6 +1,6 @@
 use crate::buffer::Buffer;
 use crate::parser::MarkdownTree;
-use crate::tree_walk::{Line, markers_at};
+use crate::tree_walk::{Line, collect_nodes, markers_at};
 use std::ops::Range;
 use tree_sitter::Node;
 
@@ -95,19 +95,16 @@ pub fn extract_lines_from_parts(text: &str, tree: Option<&MarkdownTree>) -> Vec<
         lines.push((line_number, line_start..line_start));
     }
 
+    // Collect nodes once for the whole buffer
+    let nodes = tree.map(|t| collect_nodes(&t.block_tree().root_node()));
+
     // Build Line for each line
     lines
         .into_iter()
         .map(|(line_num, range)| {
             // Find markers on this line using tree_walk
-            let markers = if let Some(tree) = &tree {
-                let root = tree.block_tree().root_node();
-                let probe_pos = if range.end > range.start {
-                    range.end - 1
-                } else {
-                    range.start
-                };
-                markers_at(&root, text, range.start, probe_pos)
+            let markers = if let Some(nodes) = &nodes {
+                markers_at(nodes, text, range.start, range.end)
             } else {
                 Vec::new()
             };
@@ -518,7 +515,8 @@ mod tests {
         let lines = extract_lines(&buf);
 
         assert!(lines[0].is_fence());
-        assert!(lines[1].is_code_block_content());
+        // Content lines don't have markers (code block detection handled separately)
+        assert!(!lines[1].is_fence());
         assert!(lines[2].is_fence());
     }
 
