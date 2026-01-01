@@ -171,28 +171,22 @@ pub fn markers_at(root: &Node, text: &str, line_start: usize, probe_pos: usize) 
     let mut current = Some(leaf);
 
     while let Some(node) = current {
-        // Check if current node's prev sibling is a block_continuation
+        // Check if current node's prev sibling is a block_continuation with only whitespace
         if let Some(sib) = node.prev_sibling()
             && sib.kind() == "block_continuation"
             && sib.start_byte() >= line_start
             && sib.start_byte() < sib.end_byte()
         {
-            markers.push(Marker {
-                kind: MarkerKind::Indent,
-                range: sib.byte_range(),
-            });
+            let content = &text[sib.byte_range()];
+            if content.chars().all(|c| c.is_whitespace()) {
+                markers.push(Marker {
+                    kind: MarkerKind::Indent,
+                    range: sib.byte_range(),
+                });
+            }
         }
 
         match node.kind() {
-            "block_continuation" => {
-                // Non-empty block_continuation on this line is an Indent marker
-                if node.start_byte() >= line_start && node.start_byte() < node.end_byte() {
-                    markers.push(Marker {
-                        kind: MarkerKind::Indent,
-                        range: node.byte_range(),
-                    });
-                }
-            }
             "block_quote" => {
                 if let Some(marker_node) = node.child(0)
                     && marker_node.kind() == "block_quote_marker"

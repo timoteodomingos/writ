@@ -555,4 +555,37 @@ mod tests {
         let sub = lines[0].substitution();
         assert!(sub.contains('•') || sub.contains('-'));
     }
+
+    #[test]
+    fn test_list_in_blockquote_continuation() {
+        let buf: Buffer = "> - Item\n".parse().unwrap();
+        let text = buf.text();
+        let lines = extract_lines(&buf);
+
+        // Continuation should be "> - " (one blockquote marker, one list marker)
+        let continuation = lines[0].continuation(&text);
+        assert_eq!(continuation, "> - ");
+    }
+
+    #[test]
+    fn test_multiline_blockquote_with_list_continuation() {
+        // Multi-line blockquote with list on line 3
+        let buf: Buffer = "> hey\n>\n> - foo\n".parse().unwrap();
+        let text = buf.text();
+        let lines = extract_lines(&buf);
+
+        println!("Lines:");
+        for (i, line) in lines.iter().enumerate() {
+            println!(
+                "  {}: {:?} markers: {:?}",
+                i,
+                &text[line.range.clone()],
+                line.markers
+            );
+        }
+
+        // Line 3 ("> - foo") continuation should be "> - "
+        let continuation = lines[2].continuation(&text);
+        assert_eq!(continuation, "> - ");
+    }
 }
