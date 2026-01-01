@@ -25,6 +25,106 @@ pub struct Marker {
     pub range: Range<usize>,
 }
 
+/// A line with its markers and metadata.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Line {
+    pub range: Range<usize>,
+    pub line_number: usize,
+    pub markers: Vec<Marker>,
+}
+
+impl Line {
+    /// Returns the combined byte range of all markers, or None if no markers.
+    pub fn marker_range(&self) -> Option<Range<usize>> {
+        if self.markers.is_empty() {
+            return None;
+        }
+        let start = self.markers.first()?.range.start;
+        let end = self.markers.last()?.range.end;
+        Some(start..end)
+    }
+
+    /// Returns the visual substitution text for all markers.
+    /// E.g., "• " for unordered list, "☐ " for unchecked task.
+    pub fn substitution(&self) -> String {
+        self.markers.iter().map(|m| m.kind.substitution()).collect()
+    }
+
+    /// Returns the continuation text to insert on Enter.
+    /// E.g., "> " for blockquote, "- " for list.
+    /// For Indent markers, extracts the actual whitespace from the text.
+    pub fn continuation(&self, text: &str) -> String {
+        self.markers
+            .iter()
+            .map(|m| match &m.kind {
+                MarkerKind::Indent => text[m.range.clone()].to_string(),
+                _ => m.kind.continuation().to_string(),
+            })
+            .collect()
+    }
+
+    /// Returns true if any marker has a left border (blockquotes).
+    pub fn has_border(&self) -> bool {
+        self.markers.iter().any(|m| m.kind.has_border())
+    }
+
+    /// Returns the checkbox state if this line has a task list marker.
+    pub fn checkbox(&self) -> Option<bool> {
+        for m in &self.markers {
+            if let MarkerKind::Checkbox { checked } = m.kind {
+                return Some(checked);
+            }
+        }
+        None
+    }
+
+    /// Returns the leading whitespace before the first marker.
+    pub fn leading_whitespace(&self, text: &str) -> String {
+        if let Some(first) = self.markers.first()
+            && first.range.start > self.range.start
+        {
+            return text[self.range.start..first.range.start].to_string();
+        }
+        String::new()
+    }
+}
+
+impl MarkerKind {
+    /// Visual substitution text for this marker kind.
+    pub fn substitution(&self) -> &'static str {
+        match self {
+            MarkerKind::BlockQuote => "",
+            MarkerKind::ListItem { ordered: false } => "• ",
+            MarkerKind::ListItem { ordered: true } => "",
+            MarkerKind::Checkbox { checked: false } => "☐ ",
+            MarkerKind::Checkbox { checked: true } => "☑ ",
+            MarkerKind::Heading(_) => "",
+            MarkerKind::CodeBlockFence { .. } => "",
+            MarkerKind::ThematicBreak => "",
+            MarkerKind::Indent => "",
+        }
+    }
+
+    /// Continuation text to insert on Enter.
+    pub fn continuation(&self) -> &'static str {
+        match self {
+            MarkerKind::BlockQuote => "> ",
+            MarkerKind::ListItem { ordered: false } => "- ",
+            MarkerKind::ListItem { ordered: true } => "1. ",
+            MarkerKind::Checkbox { .. } => "- [ ] ",
+            MarkerKind::Heading(_) => "",
+            MarkerKind::CodeBlockFence { .. } => "",
+            MarkerKind::ThematicBreak => "",
+            MarkerKind::Indent => "",
+        }
+    }
+
+    /// Whether this marker has a left border.
+    pub fn has_border(&self) -> bool {
+        matches!(self, MarkerKind::BlockQuote)
+    }
+}
+
 /// Find all markers for a line by probing at `probe_pos` and walking up ancestors.
 /// Returns markers from outermost to innermost.
 pub fn markers_at(root: &Node, text: &str, line_start: usize, probe_pos: usize) -> Vec<Marker> {
@@ -521,5 +621,211 @@ fn main() {
         let markers = markers_at(&root, &text, 14, 31);
         println!("markers: {:?}", markers);
         assert_eq!(kinds(&markers), vec![&MarkerKind::Indent]);
+    }
+
+    // ========================================================================
+    // Tests for Line struct methods
+    // ========================================================================
+
+    fn make_line(range: Range<usize>, markers: Vec<Marker>) -> Line {
+        Line {
+            range,
+            line_number: 0,
+            markers,
+        }
+    }
+
+    #[test]
+    fn test_line_marker_range_empty() {
+        let line = make_line(0..10, vec![]);
+        assert_eq!(line.marker_range(), None);
+    }
+
+    #[test]
+    fn test_line_marker_range_single() {
+        let line = make_line(
+            0..10,
+            vec![Marker {
+                kind: MarkerKind::ListItem { ordered: false },
+                range: 0..2,
+            }],
+        );
+        assert_eq!(line.marker_range(), Some(0..2));
+    }
+
+    #[test]
+    fn test_line_marker_range_multiple() {
+        let line = make_line(
+            0..15,
+            vec![
+                Marker {
+                    kind: MarkerKind::BlockQuote,
+                    range: 0..2,
+                },
+                Marker {
+                    kind: MarkerKind::ListItem { ordered: false },
+                    range: 2..4,
+                },
+            ],
+        );
+        assert_eq!(line.marker_range(), Some(0..4));
+    }
+
+    #[test]
+    fn test_line_substitution() {
+        let line = make_line(
+            0..15,
+            vec![
+                Marker {
+                    kind: MarkerKind::BlockQuote,
+                    range: 0..2,
+                },
+                Marker {
+                    kind: MarkerKind::ListItem { ordered: false },
+                    range: 2..4,
+                },
+            ],
+        );
+        assert_eq!(line.substitution(), "• ");
+    }
+
+    #[test]
+    fn test_line_substitution_task_list() {
+        let line = make_line(
+            0..15,
+            vec![
+                Marker {
+                    kind: MarkerKind::ListItem { ordered: false },
+                    range: 0..2,
+                },
+                Marker {
+                    kind: MarkerKind::Checkbox { checked: false },
+                    range: 2..6,
+                },
+            ],
+        );
+        assert_eq!(line.substitution(), "• ☐ ");
+    }
+
+    #[test]
+    fn test_line_continuation() {
+        let text = "> - Item text here";
+        let line = make_line(
+            0..18,
+            vec![
+                Marker {
+                    kind: MarkerKind::BlockQuote,
+                    range: 0..2,
+                },
+                Marker {
+                    kind: MarkerKind::ListItem { ordered: false },
+                    range: 2..4,
+                },
+            ],
+        );
+        assert_eq!(line.continuation(text), "> - ");
+    }
+
+    #[test]
+    fn test_line_continuation_with_indent() {
+        let text = "  Second paragraph";
+        let line = make_line(
+            0..18,
+            vec![Marker {
+                kind: MarkerKind::Indent,
+                range: 0..2,
+            }],
+        );
+        // Indent marker extracts actual whitespace from text
+        assert_eq!(line.continuation(text), "  ");
+    }
+
+    #[test]
+    fn test_line_has_border() {
+        let line_with_quote = make_line(
+            0..10,
+            vec![Marker {
+                kind: MarkerKind::BlockQuote,
+                range: 0..2,
+            }],
+        );
+        assert!(line_with_quote.has_border());
+
+        let line_with_list = make_line(
+            0..10,
+            vec![Marker {
+                kind: MarkerKind::ListItem { ordered: false },
+                range: 0..2,
+            }],
+        );
+        assert!(!line_with_list.has_border());
+    }
+
+    #[test]
+    fn test_line_checkbox() {
+        let line_unchecked = make_line(
+            0..15,
+            vec![
+                Marker {
+                    kind: MarkerKind::ListItem { ordered: false },
+                    range: 0..2,
+                },
+                Marker {
+                    kind: MarkerKind::Checkbox { checked: false },
+                    range: 2..6,
+                },
+            ],
+        );
+        assert_eq!(line_unchecked.checkbox(), Some(false));
+
+        let line_checked = make_line(
+            0..15,
+            vec![
+                Marker {
+                    kind: MarkerKind::ListItem { ordered: false },
+                    range: 0..2,
+                },
+                Marker {
+                    kind: MarkerKind::Checkbox { checked: true },
+                    range: 2..6,
+                },
+            ],
+        );
+        assert_eq!(line_checked.checkbox(), Some(true));
+
+        let line_no_checkbox = make_line(
+            0..10,
+            vec![Marker {
+                kind: MarkerKind::ListItem { ordered: false },
+                range: 0..2,
+            }],
+        );
+        assert_eq!(line_no_checkbox.checkbox(), None);
+    }
+
+    #[test]
+    fn test_line_leading_whitespace() {
+        let text = "  - Item\n";
+        let line = make_line(
+            0..8,
+            vec![Marker {
+                kind: MarkerKind::ListItem { ordered: false },
+                range: 2..4,
+            }],
+        );
+        assert_eq!(line.leading_whitespace(text), "  ");
+    }
+
+    #[test]
+    fn test_line_leading_whitespace_none() {
+        let text = "- Item\n";
+        let line = make_line(
+            0..6,
+            vec![Marker {
+                kind: MarkerKind::ListItem { ordered: false },
+                range: 0..2,
+            }],
+        );
+        assert_eq!(line.leading_whitespace(text), "");
     }
 }
