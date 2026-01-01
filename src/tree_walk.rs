@@ -186,6 +186,29 @@ impl MarkerKind {
     }
 }
 
+/// Find the nearest container to the left of cursor position.
+/// Returns the marker width needed to nest into that container.
+pub fn find_container_indent(nodes: &[Node], cursor_pos: usize) -> Option<usize> {
+    // Find the index of the first node that starts at or after cursor
+    let cursor_idx = nodes
+        .iter()
+        .position(|n| n.start_byte() >= cursor_pos)
+        .unwrap_or(nodes.len());
+
+    // Walk left from cursor looking for a marker node
+    for node in nodes[..cursor_idx].iter().rev() {
+        let kind = node.kind();
+        if kind.starts_with("list_marker_") {
+            return Some(node.end_byte() - node.start_byte());
+        }
+        if kind == "block_quote_marker" {
+            return Some(node.end_byte() - node.start_byte());
+        }
+    }
+
+    None
+}
+
 /// Collect all nodes in document order (preorder traversal).
 pub fn collect_nodes<'a>(root: &Node<'a>) -> Vec<Node<'a>> {
     let mut cursor = root.walk();

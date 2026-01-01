@@ -19,7 +19,7 @@ use crate::line_view::{
     CheckboxCallback, ClickCallback, DragCallback, LineView, LineViewTheme, LinkHoverCallback,
 };
 use crate::lines::{extract_inline_styles, extract_lines};
-use crate::tree_walk::Line;
+use crate::tree_walk::{Line, collect_nodes, find_container_indent};
 
 type CodeBlockRange = (usize, Option<usize>);
 
@@ -198,33 +198,13 @@ impl Editor {
     }
 
     /// Computes the indentation to insert for smart tab.
-    /// Returns Some(spaces) if the current line can be nested under the previous sibling,
-    /// or None if there's no valid previous sibling to nest under.
+    /// Walks left through the node vec to find the nearest container to nest into.
     fn compute_smart_tab_indent(&self, cursor_pos: usize) -> Option<String> {
-        let lines = extract_lines(&self.buffer);
-        let cursor_line_idx = self.buffer.byte_to_line(cursor_pos);
+        let tree = self.buffer.tree()?;
+        let root = tree.block_tree().root_node();
+        let nodes = collect_nodes(&root);
 
-        // Need at least a previous line to nest under
-        if cursor_line_idx == 0 {
-            return None;
-        }
-
-        let prev_line = lines.get(cursor_line_idx - 1)?;
-        let current_line = lines.get(cursor_line_idx)?;
-
-        // Previous line must have a list marker to nest under
-        let prev_marker_width = prev_line.marker_width();
-        if prev_marker_width == 0 {
-            return None;
-        }
-
-        // Current line must also be a list item (can't indent non-list content)
-        if current_line.marker_width() == 0 {
-            return None;
-        }
-
-        // Return the spaces needed to nest
-        Some(" ".repeat(prev_marker_width))
+        find_container_indent(&nodes, cursor_pos).map(|width| " ".repeat(width))
     }
 
     /// Performs smart tab: indents the current line to nest under the previous sibling.
