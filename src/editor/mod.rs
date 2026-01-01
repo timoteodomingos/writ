@@ -197,6 +197,50 @@ impl Editor {
         }
     }
 
+    /// Computes the indentation to insert for smart tab.
+    /// Returns Some(spaces) if the current line can be nested under the previous sibling,
+    /// or None if there's no valid previous sibling to nest under.
+    fn compute_smart_tab_indent(&self, cursor_pos: usize) -> Option<String> {
+        let lines = extract_lines(&self.buffer);
+        let cursor_line_idx = self.buffer.byte_to_line(cursor_pos);
+
+        // Need at least a previous line to nest under
+        if cursor_line_idx == 0 {
+            return None;
+        }
+
+        let prev_line = lines.get(cursor_line_idx - 1)?;
+        let current_line = lines.get(cursor_line_idx)?;
+
+        // Previous line must have a list marker to nest under
+        let prev_marker_width = prev_line.marker_width();
+        if prev_marker_width == 0 {
+            return None;
+        }
+
+        // Current line must also be a list item (can't indent non-list content)
+        if current_line.marker_width() == 0 {
+            return None;
+        }
+
+        // Return the spaces needed to nest
+        Some(" ".repeat(prev_marker_width))
+    }
+
+    /// Performs smart tab: indents the current line to nest under the previous sibling.
+    /// Does nothing if there's no valid previous sibling to nest under.
+    fn smart_tab(&mut self) {
+        if let Some(indent) = self.compute_smart_tab_indent(self.cursor().offset) {
+            // Insert at line start to indent the whole line
+            let cursor_offset = self.cursor().offset;
+            let line_start = self.cursor().move_to_line_start(&self.buffer).offset;
+            self.buffer.insert(line_start, &indent, cursor_offset);
+            // Move cursor by the indent amount
+            let new_offset = cursor_offset + indent.len();
+            self.selection = Selection::new(new_offset, new_offset);
+        }
+    }
+
     fn toggle_checkbox(&mut self, line_number: usize, cx: &mut Context<Self>) {
         let lines = extract_lines(&self.buffer);
         let Some(line) = lines.get(line_number) else {
@@ -400,7 +444,7 @@ impl Editor {
                 cx.notify();
             }
             "tab" => {
-                self.insert_text("    ");
+                self.smart_tab();
                 cx.notify();
             }
             "a" if keystroke.modifiers.control || keystroke.modifiers.platform => {
@@ -453,6 +497,15 @@ impl Editor {
             }
             _ => {
                 if let Some(key_char) = &keystroke.key_char {
+                    // Prevent space at the beginning of lines (use tab for indentation)
+                    if key_char == " " {
+                        let cursor = self.cursor();
+                        let line_start = cursor.move_to_line_start(&self.buffer).offset;
+                        if cursor.offset == line_start {
+                            // At line start - ignore space
+                            return;
+                        }
+                    }
                     self.insert_text(key_char);
                     cx.notify();
                 }
@@ -579,6 +632,9 @@ impl Editor {
                 let text = self.compute_smart_enter_text(self.cursor().offset);
                 self.insert_text(&text);
             }
+            EditorAction::Tab => {
+                self.smart_tab();
+            }
             EditorAction::Backspace => {
                 self.delete_backward();
             }
@@ -619,7 +675,7 @@ impl Render for Editor {
         };
 
         // Get the base path for resolving relative image paths
-        let base_path = self.config.base_path.clone();
+        let _base_path = self.config.base_path.clone();
 
         let buffer_text = self.buffer.text();
 

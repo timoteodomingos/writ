@@ -47,6 +47,17 @@ impl Line {
         Some(start..end)
     }
 
+    /// Returns the width of the marker (including trailing space) relative to line start.
+    /// This is the number of spaces needed to nest under this line.
+    /// E.g., "- " = 2, "1. " = 3, "10. " = 4
+    pub fn marker_width(&self) -> usize {
+        if let Some(range) = self.marker_range() {
+            range.end - self.range.start
+        } else {
+            0
+        }
+    }
+
     /// Returns the visual substitution text for all markers.
     /// E.g., "• " for unordered list, "☐ " for unchecked task.
     /// Computes leading whitespace from line start to the first non-whitespace
@@ -938,5 +949,146 @@ mod tests {
         // Both line 1 and line 2 should have the same substitution
         // (indentation is now included in substitution via Indent markers)
         assert_eq!(lines[1].substitution(&text), lines[2].substitution(&text));
+    }
+
+    #[test]
+    fn test_marker_width_unordered() {
+        let buf: Buffer = "- item\n".parse().unwrap();
+        let lines = extract_lines(&buf);
+        // "- " is 2 chars
+        assert_eq!(lines[0].marker_width(), 2);
+    }
+
+    #[test]
+    fn test_marker_width_ordered_single_digit() {
+        let buf: Buffer = "1. item\n".parse().unwrap();
+        let lines = extract_lines(&buf);
+        // "1. " is 3 chars
+        assert_eq!(lines[0].marker_width(), 3);
+    }
+
+    #[test]
+    fn test_marker_width_ordered_double_digit() {
+        // Need 10 items to get a double-digit marker (Buffer normalizes "10. " to "1. ")
+        let buf: Buffer = "1. a\n2. b\n3. c\n4. d\n5. e\n6. f\n7. g\n8. h\n9. i\n10. j\n"
+            .parse()
+            .unwrap();
+        let lines = extract_lines(&buf);
+        // Line 9 (0-indexed) is "10. j" - marker is "10. " = 4 chars
+        assert_eq!(lines[9].marker_width(), 4);
+    }
+
+    #[test]
+    fn test_marker_width_no_marker() {
+        let buf: Buffer = "just text\n".parse().unwrap();
+        let lines = extract_lines(&buf);
+        assert_eq!(lines[0].marker_width(), 0);
+    }
+
+    #[test]
+    fn test_nesting_threshold_unordered() {
+        // "- " is 2 chars, so 2 spaces should nest
+        let buf: Buffer = "- top\n  - nested\n".parse().unwrap();
+        let lines = extract_lines(&buf);
+
+        // Line 1 should have an Indent marker (it's nested)
+        assert!(
+            lines[1]
+                .markers
+                .iter()
+                .any(|m| matches!(m.kind, MarkerKind::Indent))
+        );
+    }
+
+    #[test]
+    fn test_nesting_threshold_unordered_insufficient() {
+        // "- " is 2 chars, so 1 space should NOT nest (becomes sibling)
+        let buf: Buffer = "- top\n - not nested\n".parse().unwrap();
+        let text = buf.text();
+        let tree = buf.tree().unwrap();
+        let root = tree.block_tree().root_node();
+
+        print_tree(&root, &text, 0);
+
+        let lines = extract_lines(&buf);
+        println!("Line 0: {:?}", lines[0].markers);
+        println!("Line 1: {:?}", lines[1].markers);
+
+        // Line 1 should NOT have an Indent marker (it's a sibling, not nested)
+        assert!(
+            !lines[1]
+                .markers
+                .iter()
+                .any(|m| matches!(m.kind, MarkerKind::Indent))
+        );
+    }
+
+    #[test]
+    fn test_nesting_threshold_ordered_single_digit() {
+        // "1. " is 3 chars, so 3 spaces should nest
+        let buf: Buffer = "1. top\n   - nested\n".parse().unwrap();
+        let text = buf.text();
+        let tree = buf.tree().unwrap();
+        let root = tree.block_tree().root_node();
+
+        print_tree(&root, &text, 0);
+
+        let lines = extract_lines(&buf);
+        println!("Line 0: {:?}", lines[0].markers);
+        println!("Line 1: {:?}", lines[1].markers);
+
+        // Line 1 should have an Indent marker (it's nested)
+        assert!(
+            lines[1]
+                .markers
+                .iter()
+                .any(|m| matches!(m.kind, MarkerKind::Indent))
+        );
+    }
+
+    #[test]
+    fn test_nesting_threshold_ordered_double_digit() {
+        // "10. " is 4 chars, so 4 spaces should nest
+        let buf: Buffer = "10. top\n    - nested\n".parse().unwrap();
+        let text = buf.text();
+        let tree = buf.tree().unwrap();
+        let root = tree.block_tree().root_node();
+
+        print_tree(&root, &text, 0);
+
+        let lines = extract_lines(&buf);
+        println!("Line 0: {:?}", lines[0].markers);
+        println!("Line 1: {:?}", lines[1].markers);
+
+        // Line 1 should have an Indent marker (it's nested)
+        assert!(
+            lines[1]
+                .markers
+                .iter()
+                .any(|m| matches!(m.kind, MarkerKind::Indent))
+        );
+    }
+
+    #[test]
+    fn test_nesting_threshold_ordered_triple_digit() {
+        // "100. " is 5 chars, so 5 spaces should nest
+        let buf: Buffer = "100. top\n     - nested\n".parse().unwrap();
+        let text = buf.text();
+        let tree = buf.tree().unwrap();
+        let root = tree.block_tree().root_node();
+
+        print_tree(&root, &text, 0);
+
+        let lines = extract_lines(&buf);
+        println!("Line 0: {:?}", lines[0].markers);
+        println!("Line 1: {:?}", lines[1].markers);
+
+        // Line 1 should have an Indent marker (it's nested)
+        assert!(
+            lines[1]
+                .markers
+                .iter()
+                .any(|m| matches!(m.kind, MarkerKind::Indent))
+        );
     }
 }
