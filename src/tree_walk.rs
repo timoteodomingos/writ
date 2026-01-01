@@ -327,6 +327,65 @@ mod tests {
     }
 
     #[test]
+    fn test_fenced_code_block_with_indentation() {
+        // Real code with indentation - should not produce Indent markers
+        let code = r#"```rust
+fn main() {
+    println!("hello");
+}
+```
+"#;
+        let buf: Buffer = code.parse().unwrap();
+        let text = buf.text();
+        let tree = buf.tree().unwrap();
+        let root = tree.block_tree().root_node();
+
+        println!("Fenced code block with indentation:");
+        println!("Text: {:?}", text);
+        print_tree(&root, &text, 0);
+
+        // Line 3: "    println!..." - indented line should NOT produce Indent marker
+        // Find byte offsets for line 3
+        let lines: Vec<&str> = code.lines().collect();
+        println!("Lines: {:?}", lines);
+
+        let mut offset = 0;
+        for (i, line) in lines.iter().enumerate() {
+            let line_start = offset;
+            let line_end = offset + line.len();
+            println!(
+                "Line {}: bytes {}-{} {:?}",
+                i + 1,
+                line_start,
+                line_end,
+                line
+            );
+
+            let probe_pos = if line_end > line_start {
+                line_end - 1
+            } else {
+                line_start
+            };
+            let markers = markers_at(&root, &text, line_start, probe_pos);
+            println!("  markers: {:?}", markers);
+
+            match i {
+                0 => assert_eq!(
+                    markers,
+                    vec![Marker::CodeBlockFence {
+                        language: Some("rust".to_string())
+                    }]
+                ),
+                1..=3 => assert_eq!(markers, vec![Marker::CodeBlockContent]),
+                4 => assert_eq!(markers, vec![Marker::CodeBlockFence { language: None }]),
+                _ => {}
+            }
+
+            offset = line_end + 1; // +1 for newline
+        }
+    }
+
+    #[test]
     fn test_indented_code_block() {
         let buf: Buffer = "    let x = 1;\n    let y = 2;\n".parse().unwrap();
         let text = buf.text();
