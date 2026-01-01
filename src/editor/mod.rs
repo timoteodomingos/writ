@@ -135,6 +135,13 @@ impl Editor {
         }
     }
 
+    /// Find the line containing a byte position.
+    /// Uses ropey's O(log n) byte_to_line, then O(1) array index.
+    fn find_line_at(&self, byte_pos: usize) -> Option<(usize, &Line)> {
+        let idx = self.buffer.byte_to_line(byte_pos);
+        self.lines.get(idx).map(|line| (idx, line))
+    }
+
     fn perform_pending_scroll(&mut self, margin: gpui::Pixels) {
         if !self.scroll_to_cursor_pending {
             return;
@@ -316,11 +323,8 @@ impl Editor {
     /// Markers are checked innermost first (e.g., checkbox before list item).
     /// Uses cached self.lines from last render.
     fn smart_backspace_range(&self, cursor_pos: usize) -> Option<std::ops::Range<usize>> {
-        // Find the line containing cursor (using cached lines)
-        let line = self
-            .lines
-            .iter()
-            .find(|l| cursor_pos >= l.range.start && cursor_pos <= l.range.end)?;
+        // Find the line containing cursor (using binary search on cached lines)
+        let (_, line) = self.find_line_at(cursor_pos)?;
 
         // Check each marker (innermost first) to see if cursor is at its end
         for marker in &line.markers {
@@ -368,24 +372,19 @@ impl Editor {
             return self.cursor();
         }
 
-        // Find the line containing cursor (using cached lines)
-        if let Some((line_idx, line)) = self
-            .lines
-            .iter()
-            .enumerate()
-            .find(|(_, l)| cursor_pos >= l.range.start && cursor_pos <= l.range.end)
+        // Find the line containing cursor (using binary search on cached lines)
+        if let Some((line_idx, line)) = self.find_line_at(cursor_pos)
+            && let Some(marker_range) = line.marker_range()
         {
-            if let Some(marker_range) = line.marker_range() {
-                // If cursor is at content start or inside markers, jump to previous line end
-                if cursor_pos <= marker_range.end {
-                    if line_idx > 0 {
-                        // Go to end of previous line (before the newline)
-                        let prev_line = &self.lines[line_idx - 1];
-                        return Cursor::new(prev_line.range.end);
-                    } else {
-                        // First line, stay at content start
-                        return Cursor::new(marker_range.end);
-                    }
+            // If cursor is at content start or inside markers, jump to previous line end
+            if cursor_pos <= marker_range.end {
+                if line_idx > 0 {
+                    // Go to end of previous line (before the newline)
+                    let prev_line = &self.lines[line_idx - 1];
+                    return Cursor::new(prev_line.range.end);
+                } else {
+                    // First line, stay at content start
+                    return Cursor::new(marker_range.end);
                 }
             }
         }
@@ -403,12 +402,8 @@ impl Editor {
             return self.cursor();
         }
 
-        // Find the line containing cursor (using cached lines)
-        if let Some(line) = self
-            .lines
-            .iter()
-            .find(|l| cursor_pos >= l.range.start && cursor_pos <= l.range.end)
-        {
+        // Find the line containing cursor (using binary search on cached lines)
+        if let Some((_, line)) = self.find_line_at(cursor_pos) {
             // Check if cursor is at line start and there are markers
             if let Some(marker_range) = line.marker_range() {
                 if cursor_pos == line.range.start {

@@ -246,7 +246,7 @@ impl<'a> LineView<'a> {
             && !prefix.is_empty()
         {
             // Check if this line has a checkbox and find its position in the prefix
-            if let Some(_) = self.line.checkbox() {
+            if self.line.checkbox().is_some() {
                 // Find the checkbox pattern in the prefix ([ ] or [x])
                 if let Some(checkbox_start) = prefix.find('[') {
                     let checkbox_end = prefix.find(']').map(|i| i + 2).unwrap_or(prefix.len()); // include "] "
