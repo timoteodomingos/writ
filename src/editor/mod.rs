@@ -18,8 +18,8 @@ use crate::cursor::{Cursor, Selection};
 use crate::line_view::{
     CheckboxCallback, ClickCallback, DragCallback, HoverCallback, LineView, LineViewTheme,
 };
-use crate::lines::{extract_inline_styles, extract_lines};
-use crate::tree_walk::{Line, collect_nodes, find_container_indent};
+use crate::lines::extract_inline_styles;
+use crate::tree_walk::{Line, find_container_indent_from_lines};
 
 type CodeBlockRange = (usize, Option<usize>);
 
@@ -50,8 +50,6 @@ pub struct Editor {
     hovering_link_region: bool,
     /// Whether Ctrl/Cmd is currently held.
     ctrl_held: bool,
-    /// Cached line info, updated when buffer changes.
-    lines: Vec<Line>,
 }
 
 impl Editor {
@@ -63,7 +61,6 @@ impl Editor {
     /// Create a new editor with the given content and configuration.
     pub fn with_config(content: &str, config: EditorConfig, cx: &mut Context<Self>) -> Self {
         let buffer: Buffer = content.parse().unwrap_or_default();
-        let lines = extract_lines(&buffer);
         let focus_handle = cx.focus_handle();
 
         let scroll_handle = ScrollHandle::new();
@@ -81,7 +78,6 @@ impl Editor {
             hovering_checkbox: false,
             hovering_link_region: false,
             ctrl_held: false,
-            lines,
         }
     }
 
@@ -146,7 +142,7 @@ impl Editor {
     /// Uses ropey's O(log n) byte_to_line, then O(1) array index.
     fn find_line_at(&self, byte_pos: usize) -> Option<(usize, &Line)> {
         let idx = self.buffer.byte_to_line(byte_pos);
-        self.lines.get(idx).map(|line| (idx, line))
+        self.buffer.lines().get(idx).map(|line| (idx, line))
     }
 
     fn perform_pending_scroll(&mut self, margin: gpui::Pixels) {
@@ -197,7 +193,7 @@ impl Editor {
     }
 
     fn compute_smart_enter_text(&self, cursor_pos: usize) -> String {
-        let lines = extract_lines(&self.buffer);
+        let lines = self.buffer.lines();
         let cursor_line_idx = self.buffer.byte_to_line(cursor_pos);
 
         // Find the line info for the current line
@@ -216,13 +212,10 @@ impl Editor {
     }
 
     /// Computes the indentation to insert for smart tab.
-    /// Walks left through the node vec to find the nearest container to nest into.
+    /// Uses cached lines to find the nearest container to nest into.
     fn compute_smart_tab_indent(&self, cursor_pos: usize) -> Option<String> {
-        let tree = self.buffer.tree()?;
-        let root = tree.block_tree().root_node();
-        let nodes = collect_nodes(&root);
-
-        find_container_indent(&nodes, cursor_pos).map(|width| " ".repeat(width))
+        find_container_indent_from_lines(self.buffer.lines(), cursor_pos)
+            .map(|width| " ".repeat(width))
     }
 
     /// Performs smart tab: indents the current line to nest under the previous sibling.
@@ -240,7 +233,7 @@ impl Editor {
     }
 
     fn toggle_checkbox(&mut self, line_number: usize, cx: &mut Context<Self>) {
-        let lines = extract_lines(&self.buffer);
+        let lines = self.buffer.lines();
         let Some(line) = lines.get(line_number) else {
             return;
         };
@@ -387,7 +380,7 @@ impl Editor {
             if cursor_pos <= marker_range.end {
                 if line_idx > 0 {
                     // Go to end of previous line (before the newline)
-                    let prev_line = &self.lines[line_idx - 1];
+                    let prev_line = &self.buffer.lines()[line_idx - 1];
                     return Cursor::new(prev_line.range.end);
                 } else {
                     // First line, stay at content start
@@ -849,11 +842,8 @@ impl Render for Editor {
             },
         );
 
-        // Extract lines fresh on each render (tree-sitter walking is fast)
-        // Store in self.lines so smart cursor movement can use it
-        self.lines = extract_lines(&self.buffer);
-        // Clone for use in this function to avoid borrow conflicts
-        let lines = self.lines.clone();
+        // Use cached lines from buffer (updated on buffer changes, not on every render)
+        let lines = self.buffer.lines().to_vec();
         let code_block_ranges = Self::compute_code_block_ranges(&lines);
         let cursor_line = self.buffer.byte_to_line(cursor_offset);
         let num_lines = lines.len();

@@ -5,8 +5,9 @@ use tree_sitter::{InputEdit, Point};
 use undo::Record;
 
 use crate::highlight::{HighlightSpan, Highlighter};
+use crate::lines::extract_lines_from_parts;
 use crate::parser::{MarkdownParser, MarkdownTree};
-use crate::tree_walk::MarkerKind;
+use crate::tree_walk::{Line, MarkerKind};
 
 #[derive(Clone, Debug, Default)]
 struct CodeHighlightCache {
@@ -62,6 +63,8 @@ pub struct BufferContent {
     tree: Option<MarkdownTree>,
     highlighter: Highlighter,
     code_highlight_cache: CodeHighlightCache,
+    /// Cached line info, updated when tree changes.
+    lines: Vec<Line>,
 }
 
 impl BufferContent {
@@ -72,7 +75,14 @@ impl BufferContent {
             highlighter: Highlighter::new(),
             tree: None,
             code_highlight_cache: CodeHighlightCache::default(),
+            lines: Vec::new(),
         }
+    }
+
+    /// Recompute cached lines from current tree.
+    fn update_lines_cache(&mut self) {
+        let text = self.text.to_string();
+        self.lines = extract_lines_from_parts(&text, self.tree.as_ref());
     }
 
     fn apply_edit(&mut self, offset: usize, to_delete: &str, to_insert: &str) {
@@ -123,6 +133,9 @@ impl BufferContent {
         // Normalize ordered list numbering
         self.normalize_ordered_lists();
 
+        // Update cached lines
+        self.update_lines_cache();
+
         // Invalidate code highlight cache
         self.code_highlight_cache.valid = false;
     }
@@ -170,6 +183,10 @@ impl BufferContent {
 
     pub fn tree(&self) -> Option<&MarkdownTree> {
         self.tree.as_ref()
+    }
+
+    pub fn lines(&self) -> &[Line] {
+        &self.lines
     }
 
     pub fn byte_to_line(&self, byte_offset: usize) -> usize {
@@ -452,6 +469,10 @@ impl Buffer {
         self.content.tree()
     }
 
+    pub fn lines(&self) -> &[Line] {
+        self.content.lines()
+    }
+
     pub fn byte_to_line(&self, byte_offset: usize) -> usize {
         self.content.byte_to_line(byte_offset)
     }
@@ -551,9 +572,11 @@ impl FromStr for Buffer {
             highlighter: Highlighter::new(),
             tree,
             code_highlight_cache: CodeHighlightCache::default(),
+            lines: Vec::new(),
         };
 
         content.normalize_ordered_lists();
+        content.update_lines_cache();
 
         let mut history = Record::new();
         history.set_saved();

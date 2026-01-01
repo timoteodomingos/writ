@@ -196,18 +196,34 @@ fn find_node_index(nodes: &[Node], target_byte: usize) -> usize {
 
 /// Find the nearest container to the left of cursor position.
 /// Returns the marker width needed to nest into that container.
-pub fn find_container_indent(nodes: &[Node], cursor_pos: usize) -> Option<usize> {
-    // Binary search to find the index of the first node at or after cursor
-    let cursor_idx = find_node_index(nodes, cursor_pos);
+/// Uses cached Lines for O(log n) lookup instead of traversing nodes.
+pub fn find_container_indent_from_lines(lines: &[Line], cursor_pos: usize) -> Option<usize> {
+    // Binary search to find the line containing cursor_pos
+    let line_idx = lines
+        .binary_search_by(|line| {
+            if cursor_pos < line.range.start {
+                std::cmp::Ordering::Greater
+            } else if cursor_pos >= line.range.end {
+                std::cmp::Ordering::Less
+            } else {
+                std::cmp::Ordering::Equal
+            }
+        })
+        .unwrap_or_else(|idx| idx.saturating_sub(1));
 
-    // Walk left from cursor looking for a marker node
-    for node in nodes[..cursor_idx].iter().rev() {
-        let kind = node.kind();
-        if kind.starts_with("list_marker_") {
-            return Some(node.end_byte() - node.start_byte());
-        }
-        if kind == "block_quote_marker" {
-            return Some(node.end_byte() - node.start_byte());
+    // Walk backwards from cursor line looking for a container marker
+    for line in lines[..=line_idx.min(lines.len().saturating_sub(1))]
+        .iter()
+        .rev()
+    {
+        // Check if this line has a list or blockquote marker
+        for marker in &line.markers {
+            match &marker.kind {
+                MarkerKind::ListItem { .. } | MarkerKind::BlockQuote => {
+                    return Some(marker.range.end - marker.range.start);
+                }
+                _ => {}
+            }
         }
     }
 
