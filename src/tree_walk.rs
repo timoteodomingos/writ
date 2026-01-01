@@ -186,14 +186,19 @@ impl MarkerKind {
     }
 }
 
+/// Find the index of the first node with start_byte >= target.
+/// Uses binary search since nodes are in document order (sorted by start_byte).
+fn find_node_index(nodes: &[Node], target_byte: usize) -> usize {
+    nodes
+        .binary_search_by_key(&target_byte, |n| n.start_byte())
+        .unwrap_or_else(|idx| idx)
+}
+
 /// Find the nearest container to the left of cursor position.
 /// Returns the marker width needed to nest into that container.
 pub fn find_container_indent(nodes: &[Node], cursor_pos: usize) -> Option<usize> {
-    // Find the index of the first node that starts at or after cursor
-    let cursor_idx = nodes
-        .iter()
-        .position(|n| n.start_byte() >= cursor_pos)
-        .unwrap_or(nodes.len());
+    // Binary search to find the index of the first node at or after cursor
+    let cursor_idx = find_node_index(nodes, cursor_pos);
 
     // Walk left from cursor looking for a marker node
     for node in nodes[..cursor_idx].iter().rev() {
@@ -240,28 +245,28 @@ pub fn collect_nodes<'a>(root: &Node<'a>) -> Vec<Node<'a>> {
 pub fn markers_at(nodes: &[Node], text: &str, line_start: usize, line_end: usize) -> Vec<Marker> {
     let mut markers = Vec::new();
 
-    // Check if line is inside an indented_code_block (skip all markers if so)
-    let in_indented_code_block = nodes.iter().any(|n| {
-        n.kind() == "indented_code_block"
-            && n.start_byte() <= line_start
-            && n.end_byte() > line_start
-    });
-    if in_indented_code_block {
-        return markers;
-    }
+    // Binary search to find first node past line_end - we iterate backwards from here
+    let end_idx = find_node_index(nodes, line_end + 1);
 
-    // Iterate right to left to get innermost markers first
-    for node in nodes.iter().rev() {
+    // Iterate in reverse to get innermost markers first
+    for node in nodes[..end_idx].iter().rev() {
         let start = node.start_byte();
+        // Stop once we're before the line
+        if start < line_start {
+            break;
+        }
         let end = node.end_byte();
         let kind = node.kind();
-        // Only consider nodes that start within this line
-        if start < line_start || start > line_end {
-            continue;
-        }
 
         match kind {
             "block_quote_marker" | "block_continuation" => {
+                // Skip block_continuation inside indented_code_block (it's code indent, not a marker)
+                if kind == "block_continuation"
+                    && let Some(parent) = node.parent()
+                    && parent.kind() == "indented_code_block"
+                {
+                    continue;
+                }
                 let content = &text[start..end];
                 if content.contains('>') {
                     markers.push(Marker {
@@ -642,6 +647,22 @@ mod tests {
 
         assert_eq!(kinds(&lines[0].markers), vec![] as Vec<&MarkerKind>);
         assert_eq!(kinds(&lines[1].markers), vec![] as Vec<&MarkerKind>);
+    }
+
+    #[test]
+    fn test_indented_code_block_in_blockquote() {
+        // Blockquote containing an indented code block - should still have blockquote marker
+        let buf: Buffer = ">     code\n".parse().unwrap();
+        let text = buf.text();
+        let tree = buf.tree().unwrap();
+        let root = tree.block_tree().root_node();
+        print_nodes_by_position(&root, &text);
+
+        let lines = extract_lines(&buf);
+        println!("Line 0: {:?}", lines[0].markers);
+
+        // Should have the blockquote marker even though content is indented code
+        assert_eq!(kinds(&lines[0].markers), vec![&MarkerKind::BlockQuote]);
     }
 
     #[test]
