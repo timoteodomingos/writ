@@ -341,88 +341,39 @@ fn get_heading_level(heading: &Node) -> Option<u8> {
 mod tests {
     use super::*;
     use crate::buffer::Buffer;
+    use crate::lines::extract_lines;
 
     fn kinds(markers: &[Marker]) -> Vec<&MarkerKind> {
         markers.iter().map(|m| &m.kind).collect()
     }
 
-    #[allow(dead_code)]
-    fn print_tree(node: &tree_sitter::Node, text: &str, indent: usize) {
-        let spacing = "  ".repeat(indent);
-        let preview: String = text[node.start_byte()..node.end_byte()]
-            .chars()
-            .take(20)
-            .flat_map(|c| if c == '\n' { vec!['\\', 'n'] } else { vec![c] })
-            .collect();
-        println!(
-            "{}{} [{}-{}] {:?} (named: {}, child_count: {})",
-            spacing,
-            node.kind(),
-            node.start_byte(),
-            node.end_byte(),
-            preview,
-            node.is_named(),
-            node.child_count()
-        );
-        for i in 0..node.child_count() {
-            if let Some(child) = node.child(i as u32) {
-                print_tree(&child, text, indent + 1);
-            }
-        }
-    }
-
     #[test]
     fn test_simple_list() {
         let buf: Buffer = "- Item\n".parse().unwrap();
-        let text = buf.text();
-        let tree = buf.tree().unwrap();
-        let root = tree.block_tree().root_node();
-
-        let markers = markers_at(&root, &text, 0, 5);
+        let lines = extract_lines(&buf);
         assert_eq!(
-            kinds(&markers),
+            kinds(&lines[0].markers),
             vec![&MarkerKind::ListItem { ordered: false }]
         );
     }
 
     #[test]
     fn test_multiline_blockquote() {
-        // Same blockquote spanning two lines
         let buf: Buffer = "> Line 1\n> Line 2\n".parse().unwrap();
-        let text = buf.text();
-        let tree = buf.tree().unwrap();
-        let root = tree.block_tree().root_node();
+        let lines = extract_lines(&buf);
 
-        println!("Multiline blockquote:");
-        println!("Text: {:?}", text);
-        print_tree(&root, &text, 0);
-
-        // Line 1: has the block_quote_marker
-        let markers = markers_at(&root, &text, 0, 7);
-        println!("Line 1 markers: {:?}", markers);
-        assert_eq!(kinds(&markers), vec![&MarkerKind::BlockQuote]);
-
-        // Line 2: continuation - should also just be BlockQuote
-        let markers = markers_at(&root, &text, 9, 16);
-        println!("Line 2 markers: {:?}", markers);
-        assert_eq!(kinds(&markers), vec![&MarkerKind::BlockQuote]);
+        assert_eq!(kinds(&lines[0].markers), vec![&MarkerKind::BlockQuote]);
+        assert_eq!(kinds(&lines[1].markers), vec![&MarkerKind::BlockQuote]);
     }
 
     #[test]
     fn test_nested_blockquote() {
         let buf: Buffer = "> Level 1\n> > Level 2\n".parse().unwrap();
-        let text = buf.text();
-        let tree = buf.tree().unwrap();
-        let root = tree.block_tree().root_node();
+        let lines = extract_lines(&buf);
 
-        println!("Nested blockquote:");
-        println!("Text: {:?}", text);
-        print_tree(&root, &text, 0);
-
-        // Line 2: probe at byte 20, line starts at byte 10
-        let markers = markers_at(&root, &text, 10, 20);
+        assert_eq!(kinds(&lines[0].markers), vec![&MarkerKind::BlockQuote]);
         assert_eq!(
-            kinds(&markers),
+            kinds(&lines[1].markers),
             vec![&MarkerKind::BlockQuote, &MarkerKind::BlockQuote]
         );
     }
@@ -430,13 +381,9 @@ mod tests {
     #[test]
     fn test_list_in_blockquote() {
         let buf: Buffer = "> - Item\n".parse().unwrap();
-        let text = buf.text();
-        let tree = buf.tree().unwrap();
-        let root = tree.block_tree().root_node();
-
-        let markers = markers_at(&root, &text, 0, 7);
+        let lines = extract_lines(&buf);
         assert_eq!(
-            kinds(&markers),
+            kinds(&lines[0].markers),
             vec![
                 &MarkerKind::ListItem { ordered: false },
                 &MarkerKind::BlockQuote
@@ -447,13 +394,9 @@ mod tests {
     #[test]
     fn test_ordered_list() {
         let buf: Buffer = "1. First\n".parse().unwrap();
-        let text = buf.text();
-        let tree = buf.tree().unwrap();
-        let root = tree.block_tree().root_node();
-
-        let markers = markers_at(&root, &text, 0, 7);
+        let lines = extract_lines(&buf);
         assert_eq!(
-            kinds(&markers),
+            kinds(&lines[0].markers),
             vec![&MarkerKind::ListItem { ordered: true }]
         );
     }
@@ -461,24 +404,17 @@ mod tests {
     #[test]
     fn test_task_list() {
         let buf: Buffer = "- [ ] Todo\n- [x] Done\n".parse().unwrap();
-        let text = buf.text();
-        let tree = buf.tree().unwrap();
-        let root = tree.block_tree().root_node();
+        let lines = extract_lines(&buf);
 
-        // Line 1: unchecked (stack order: innermost first)
-        let markers = markers_at(&root, &text, 0, 9);
         assert_eq!(
-            kinds(&markers),
+            kinds(&lines[0].markers),
             vec![
                 &MarkerKind::Checkbox { checked: false },
                 &MarkerKind::ListItem { ordered: false },
             ]
         );
-
-        // Line 2: checked
-        let markers = markers_at(&root, &text, 11, 20);
         assert_eq!(
-            kinds(&markers),
+            kinds(&lines[1].markers),
             vec![
                 &MarkerKind::Checkbox { checked: true },
                 &MarkerKind::ListItem { ordered: false },
@@ -489,187 +425,112 @@ mod tests {
     #[test]
     fn test_heading() {
         let buf: Buffer = "## Heading\n".parse().unwrap();
-        let text = buf.text();
-        let tree = buf.tree().unwrap();
-        let root = tree.block_tree().root_node();
-
-        let markers = markers_at(&root, &text, 0, 9);
-        assert_eq!(kinds(&markers), vec![&MarkerKind::Heading(2)]);
+        let lines = extract_lines(&buf);
+        assert_eq!(kinds(&lines[0].markers), vec![&MarkerKind::Heading(2)]);
     }
 
     #[test]
     fn test_fenced_code_block() {
         let buf: Buffer = "```rust\nlet x = 1;\n```\n".parse().unwrap();
-        let text = buf.text();
-        let tree = buf.tree().unwrap();
-        let root = tree.block_tree().root_node();
+        let lines = extract_lines(&buf);
 
-        println!("Fenced code block:");
-        println!("Text: {:?}", text);
-        print_tree(&root, &text, 0);
-
-        // Line 1 (opening fence)
-        let markers = markers_at(&root, &text, 0, 5);
         assert_eq!(
-            kinds(&markers),
+            kinds(&lines[0].markers),
             vec![&MarkerKind::CodeBlockFence {
                 language: Some("rust".to_string())
             }]
         );
-
-        // Line 2 (content) - CodeBlockContent marker
-        let markers = markers_at(&root, &text, 8, 12);
-        assert_eq!(kinds(&markers), vec![&MarkerKind::CodeBlockContent]);
-
-        // Line 3 (closing fence) - no language
-        let markers = markers_at(&root, &text, 19, 21);
         assert_eq!(
-            kinds(&markers),
+            kinds(&lines[1].markers),
+            vec![&MarkerKind::CodeBlockContent]
+        );
+        assert_eq!(
+            kinds(&lines[2].markers),
             vec![&MarkerKind::CodeBlockFence { language: None }]
         );
     }
 
     #[test]
     fn test_fenced_code_block_with_indentation() {
-        // Real code with indentation - should not produce Indent markers
-        let code = r#"```rust
-fn main() {
-    println!("hello");
-}
-```
-"#;
-        let buf: Buffer = code.parse().unwrap();
-        let text = buf.text();
-        let tree = buf.tree().unwrap();
-        let root = tree.block_tree().root_node();
+        let buf: Buffer = "```rust\nfn main() {\n    println!(\"hello\");\n}\n```\n"
+            .parse()
+            .unwrap();
+        let lines = extract_lines(&buf);
 
-        println!("Fenced code block with indentation:");
-        println!("Text: {:?}", text);
-        print_tree(&root, &text, 0);
-
-        // Line 3: "    println!..." - indented line should NOT produce Indent marker
-        // Find byte offsets for line 3
-        let lines: Vec<&str> = code.lines().collect();
-        println!("Lines: {:?}", lines);
-
-        let mut offset = 0;
-        for (i, line) in lines.iter().enumerate() {
-            let line_start = offset;
-            let line_end = offset + line.len();
-            println!(
-                "Line {}: bytes {}-{} {:?}",
-                i + 1,
-                line_start,
-                line_end,
-                line
-            );
-
-            let probe_pos = if line_end > line_start {
-                line_end - 1
-            } else {
-                line_start
-            };
-            let markers = markers_at(&root, &text, line_start, probe_pos);
-            println!("  markers: {:?}", markers);
-
-            match i {
-                0 => assert_eq!(
-                    kinds(&markers),
-                    vec![&MarkerKind::CodeBlockFence {
-                        language: Some("rust".to_string())
-                    }]
-                ),
-                1..=3 => assert_eq!(kinds(&markers), vec![&MarkerKind::CodeBlockContent]),
-                4 => assert_eq!(
-                    kinds(&markers),
-                    vec![&MarkerKind::CodeBlockFence { language: None }]
-                ),
-                _ => {}
-            }
-
-            offset = line_end + 1; // +1 for newline
-        }
+        assert_eq!(
+            kinds(&lines[0].markers),
+            vec![&MarkerKind::CodeBlockFence {
+                language: Some("rust".to_string())
+            }]
+        );
+        // Lines 1-3 are content
+        assert_eq!(
+            kinds(&lines[1].markers),
+            vec![&MarkerKind::CodeBlockContent]
+        );
+        assert_eq!(
+            kinds(&lines[2].markers),
+            vec![&MarkerKind::CodeBlockContent]
+        );
+        assert_eq!(
+            kinds(&lines[3].markers),
+            vec![&MarkerKind::CodeBlockContent]
+        );
+        // Line 4 is closing fence
+        assert_eq!(
+            kinds(&lines[4].markers),
+            vec![&MarkerKind::CodeBlockFence { language: None }]
+        );
     }
 
     #[test]
     fn test_indented_code_block() {
         let buf: Buffer = "    let x = 1;\n    let y = 2;\n".parse().unwrap();
-        let text = buf.text();
-        let tree = buf.tree().unwrap();
-        let root = tree.block_tree().root_node();
+        let lines = extract_lines(&buf);
 
-        // Indented code blocks get CodeBlockContent marker
-        let markers = markers_at(&root, &text, 0, 8);
-        assert_eq!(kinds(&markers), vec![&MarkerKind::CodeBlockContent]);
-
-        let markers = markers_at(&root, &text, 15, 22);
-        assert_eq!(kinds(&markers), vec![&MarkerKind::CodeBlockContent]);
+        assert_eq!(
+            kinds(&lines[0].markers),
+            vec![&MarkerKind::CodeBlockContent]
+        );
+        assert_eq!(
+            kinds(&lines[1].markers),
+            vec![&MarkerKind::CodeBlockContent]
+        );
     }
 
     #[test]
     fn test_thematic_break() {
         let buf: Buffer = "---\n".parse().unwrap();
-        let text = buf.text();
-        let tree = buf.tree().unwrap();
-        let root = tree.block_tree().root_node();
-
-        let markers = markers_at(&root, &text, 0, 1);
-        assert_eq!(kinds(&markers), vec![&MarkerKind::ThematicBreak]);
+        let lines = extract_lines(&buf);
+        assert_eq!(kinds(&lines[0].markers), vec![&MarkerKind::ThematicBreak]);
     }
 
     #[test]
     fn test_soft_wrapped_list_item() {
-        // Soft wrap within same paragraph - no blank line
         let buf: Buffer = "- First line\n  continuation\n".parse().unwrap();
-        let text = buf.text();
-        let tree = buf.tree().unwrap();
-        let root = tree.block_tree().root_node();
+        let lines = extract_lines(&buf);
 
-        println!("Soft wrapped list item:");
-        println!("Text: {:?}", text);
-        print_tree(&root, &text, 0);
-
-        // Line 1: has the marker (bytes 0-12)
-        let markers = markers_at(&root, &text, 0, 11);
         assert_eq!(
-            kinds(&markers),
+            kinds(&lines[0].markers),
             vec![&MarkerKind::ListItem { ordered: false }]
         );
-
-        // Line 2: continuation within same paragraph
-        // The "  " is just text the user typed, not a structural marker
-        // So there are no markers on this line
-        println!("\nProbing at line_start=13, probe_pos=26");
-        let markers = markers_at(&root, &text, 13, 26);
-        println!("markers: {:?}", markers);
-        assert_eq!(kinds(&markers), vec![] as Vec<&MarkerKind>);
+        // Line 2: continuation within same paragraph - no markers
+        assert_eq!(kinds(&lines[1].markers), vec![] as Vec<&MarkerKind>);
     }
 
     #[test]
     fn test_multi_paragraph_list_item() {
-        // Two paragraphs in same list item - blank line between them
         let buf: Buffer = "- First line\n\n  Second paragraph\n".parse().unwrap();
-        let text = buf.text();
-        let tree = buf.tree().unwrap();
-        let root = tree.block_tree().root_node();
+        let lines = extract_lines(&buf);
 
-        println!("Multi-paragraph list item:");
-        println!("Text: {:?}", text);
-        print_tree(&root, &text, 0);
-
-        // Line 1: has the marker
-        let markers = markers_at(&root, &text, 0, 11);
         assert_eq!(
-            kinds(&markers),
+            kinds(&lines[0].markers),
             vec![&MarkerKind::ListItem { ordered: false }]
         );
-
-        // Line 3: "  Second paragraph" - second paragraph in list item
-        // block_continuation [14-16] is a sibling of paragraph [16-33]
-        println!("\nProbing at line_start=14, probe_pos=31");
-        let markers = markers_at(&root, &text, 14, 31);
-        println!("markers: {:?}", markers);
-        assert_eq!(kinds(&markers), vec![&MarkerKind::Indent]);
+        // Line 2: empty line - no markers
+        assert_eq!(kinds(&lines[1].markers), vec![] as Vec<&MarkerKind>);
+        // Line 3: second paragraph with indent
+        assert_eq!(kinds(&lines[2].markers), vec![&MarkerKind::Indent]);
     }
 
     // ========================================================================
