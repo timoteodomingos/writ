@@ -49,8 +49,23 @@ impl Line {
 
     /// Returns the visual substitution text for all markers.
     /// E.g., "• " for unordered list, "☐ " for unchecked task.
-    pub fn substitution(&self) -> String {
-        self.markers.iter().map(|m| m.kind.substitution()).collect()
+    /// Computes leading whitespace from line start to the first non-whitespace
+    /// character, to respect user's manual indentation.
+    pub fn substitution(&self, text: &str) -> String {
+        let line_text = &text[self.range.clone()];
+
+        // Find leading whitespace in the line
+        let leading_ws_len = line_text.len() - line_text.trim_start().len();
+        let leading_ws = &line_text[..leading_ws_len];
+
+        // Build substitution: leading whitespace + non-Indent marker substitutions
+        let mut result = leading_ws.to_string();
+        for m in self.markers.iter().rev() {
+            if !matches!(m.kind, MarkerKind::Indent) {
+                result.push_str(m.kind.substitution());
+            }
+        }
+        result
     }
 
     /// Returns the continuation text to insert on Enter.
@@ -135,7 +150,7 @@ impl MarkerKind {
             MarkerKind::CodeBlockFence { .. } => "",
             MarkerKind::CodeBlockContent => "",
             MarkerKind::ThematicBreak => "",
-            MarkerKind::Indent => "",
+            MarkerKind::Indent => "  ",
         }
     }
 
@@ -708,25 +723,29 @@ mod tests {
                 },
             ],
         );
-        assert_eq!(line.substitution(), "• ");
+        let text = "> - Item text here";
+        assert_eq!(line.substitution(text), "• ");
     }
 
     #[test]
     fn test_line_substitution_task_list() {
+        let text = "- [ ] Task item";
+        // Markers are innermost to outermost: Checkbox is inside ListItem
         let line = make_line(
             0..15,
             vec![
                 Marker {
-                    kind: MarkerKind::ListItem { ordered: false },
-                    range: 0..2,
-                },
-                Marker {
                     kind: MarkerKind::Checkbox { checked: false },
                     range: 2..6,
                 },
+                Marker {
+                    kind: MarkerKind::ListItem { ordered: false },
+                    range: 0..2,
+                },
             ],
         );
-        assert_eq!(line.substitution(), "• ☐ ");
+        // Substitution reverses to outermost first: bullet then checkbox
+        assert_eq!(line.substitution(text), "• ☐ ");
     }
 
     #[test]
@@ -892,5 +911,32 @@ mod tests {
         );
         assert_eq!(&text[lines[1].markers[0].range.clone()], "  - ");
         assert_eq!(&text[lines[1].markers[1].range.clone()], "  ");
+    }
+
+    #[test]
+    fn test_two_nested_items_same_level() {
+        // Both nested items have 4-space indent, should render at same level
+        let buf: Buffer = "- test\n    - hey\n    - hey\n".parse().unwrap();
+        let text = buf.text();
+        let tree = buf.tree().unwrap();
+        let root = tree.block_tree().root_node();
+
+        print_tree(&root, &text, 0);
+        print_nodes_by_position(&root, &text);
+
+        let lines = extract_lines(&buf);
+        for (i, line) in lines.iter().enumerate() {
+            let line_text = &text[line.range.clone()];
+            let leading = line.leading_whitespace(&text);
+            let sub = line.substitution(&text);
+            println!(
+                "Line {}: {:?}\n  markers={:?}\n  leading_whitespace={:?} substitution={:?}",
+                i, line_text, line.markers, leading, sub
+            );
+        }
+
+        // Both line 1 and line 2 should have the same substitution
+        // (indentation is now included in substitution via Indent markers)
+        assert_eq!(lines[1].substitution(&text), lines[2].substitution(&text));
     }
 }

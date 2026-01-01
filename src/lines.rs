@@ -547,10 +547,11 @@ mod tests {
     #[test]
     fn test_substitution() {
         let buf: Buffer = "- Item\n".parse().unwrap();
+        let text = buf.text();
         let lines = extract_lines(&buf);
 
         // Unordered list should substitute with bullet
-        let sub = lines[0].substitution();
+        let sub = lines[0].substitution(&text);
         assert!(sub.contains('•') || sub.contains('-'));
     }
 

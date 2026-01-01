@@ -165,7 +165,7 @@ impl<'a> LineView<'a> {
         if self.line.checkbox().is_some() {
             return None;
         }
-        let substitution = self.line.substitution();
+        let substitution = self.line.substitution(self.text);
         if substitution.is_empty() {
             None
         } else {
@@ -271,19 +271,8 @@ impl<'a> LineView<'a> {
         let mut display_text = String::new();
         let mut runs: Vec<TextRun> = Vec::new();
 
-        // Add leading whitespace (indentation) before the substitution prefix
-        // Skip for checkbox lines - whitespace is handled as left margin on the checkbox
-        let whitespace = self.leading_whitespace();
-        if !whitespace.is_empty() && self.checkbox_state().is_none() {
-            display_text.push_str(&whitespace);
-            runs.push(self.text_run(
-                whitespace.len(),
-                self.theme.text_font.clone(),
-                self.theme.text_color,
-            ));
-        }
-
         // Add marker substitution prefix if applicable (bullet, etc.)
+        // Note: substitution includes indentation via Indent markers
         // Note: checkboxes are rendered separately as a larger element
         if let Some(prefix) = self.get_non_checkbox_substitution()
             && !prefix.is_empty()
