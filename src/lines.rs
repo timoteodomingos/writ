@@ -400,8 +400,8 @@ mod tests {
 
         assert_eq!(lines.len(), 2);
         assert_eq!(lines[0].heading_level(), Some(1));
-        // Marker range is just the "#", not including the space
-        assert_eq!(lines[0].marker_range(), Some(0..1));
+        // Marker range includes "# " (with trailing space)
+        assert_eq!(lines[0].marker_range(), Some(0..2));
     }
 
     #[test]

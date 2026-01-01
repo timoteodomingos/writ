@@ -311,40 +311,25 @@ pub fn markers_at(nodes: &[Node], text: &str, line_start: usize, line_end: usize
                     range: start..range_end,
                 });
             }
-            "atx_h1_marker" => {
+            "atx_h1_marker" | "atx_h2_marker" | "atx_h3_marker" | "atx_h4_marker"
+            | "atx_h5_marker" | "atx_h6_marker" => {
+                let level = match kind {
+                    "atx_h1_marker" => 1,
+                    "atx_h2_marker" => 2,
+                    "atx_h3_marker" => 3,
+                    "atx_h4_marker" => 4,
+                    "atx_h5_marker" => 5,
+                    _ => 6,
+                };
+                // Include trailing space after # if present
+                let range_end = if text.as_bytes().get(end) == Some(&b' ') {
+                    end + 1
+                } else {
+                    end
+                };
                 markers.push(Marker {
-                    kind: MarkerKind::Heading(1),
-                    range: start..end,
-                });
-            }
-            "atx_h2_marker" => {
-                markers.push(Marker {
-                    kind: MarkerKind::Heading(2),
-                    range: start..end,
-                });
-            }
-            "atx_h3_marker" => {
-                markers.push(Marker {
-                    kind: MarkerKind::Heading(3),
-                    range: start..end,
-                });
-            }
-            "atx_h4_marker" => {
-                markers.push(Marker {
-                    kind: MarkerKind::Heading(4),
-                    range: start..end,
-                });
-            }
-            "atx_h5_marker" => {
-                markers.push(Marker {
-                    kind: MarkerKind::Heading(5),
-                    range: start..end,
-                });
-            }
-            "atx_h6_marker" => {
-                markers.push(Marker {
-                    kind: MarkerKind::Heading(6),
-                    range: start..end,
+                    kind: MarkerKind::Heading(level),
+                    range: start..range_end,
                 });
             }
             "thematic_break" => {
