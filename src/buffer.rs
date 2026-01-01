@@ -5,8 +5,8 @@ use tree_sitter::{InputEdit, Point};
 use undo::Record;
 
 use crate::highlight::{HighlightSpan, Highlighter};
-use crate::lines::LineKind;
 use crate::parser::{MarkdownParser, MarkdownTree};
+use crate::tree_walk::MarkerKind;
 
 #[derive(Clone, Debug, Default)]
 struct CodeHighlightCache {
@@ -238,12 +238,16 @@ impl BufferContent {
 
         let mut i = 0;
         while i < lines.len() {
-            if let LineKind::CodeBlock {
-                language: Some(lang),
-                is_fence: true,
-            } = &lines[i].kind
-            {
-                let lang = lang.clone();
+            // Check if this is a fence line with a language
+            let fence_lang = lines[i].markers.iter().find_map(|m| {
+                if let MarkerKind::CodeBlockFence { language } = &m.kind {
+                    language.clone()
+                } else {
+                    None
+                }
+            });
+
+            if let Some(lang) = fence_lang {
                 let block_start = lines[i].range.start;
                 i += 1;
 
@@ -253,24 +257,22 @@ impl BufferContent {
                 let mut block_end = block_start;
 
                 while i < lines.len() {
-                    match &lines[i].kind {
-                        LineKind::CodeBlock { is_fence: true, .. } => {
-                            block_end = lines[i].range.end;
-                            i += 1;
-                            break;
+                    if lines[i].is_fence() {
+                        // Closing fence
+                        block_end = lines[i].range.end;
+                        i += 1;
+                        break;
+                    } else if lines[i].is_code_block_content() {
+                        // Code content line
+                        if content_start_offset.is_none() {
+                            content_start_offset = Some(lines[i].range.start);
                         }
-                        LineKind::CodeBlock {
-                            is_fence: false, ..
-                        } => {
-                            if content_start_offset.is_none() {
-                                content_start_offset = Some(lines[i].range.start);
-                            }
-                            code_content.push_str(&text[lines[i].range.clone()]);
-                            code_content.push('\n');
-                            block_end = lines[i].range.end;
-                            i += 1;
-                        }
-                        _ => break,
+                        code_content.push_str(&text[lines[i].range.clone()]);
+                        code_content.push('\n');
+                        block_end = lines[i].range.end;
+                        i += 1;
+                    } else {
+                        break;
                     }
                 }
 

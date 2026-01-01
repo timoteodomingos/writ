@@ -1,15 +1,15 @@
 use std::ops::Range;
-use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 use gpui::{
     App, CursorStyle, Font, FontStyle, FontWeight, Hsla, IntoElement, MouseButton, MouseDownEvent,
     MouseMoveEvent, Rgba, ScrollAnchor, SharedString, StyledText, TextRun, Window, canvas, div,
-    img, point, prelude::*, px, rems,
+    point, prelude::*, px, rems,
 };
 
 use crate::highlight::HighlightSpan;
-use crate::lines::{LineInfo, LineKind, StyledRegion};
+use crate::lines::StyledRegion;
+use crate::tree_walk::{Line, MarkerKind};
 
 pub type ClickCallback = Rc<dyn Fn(usize, bool, usize, &mut Window, &mut App)>;
 pub type DragCallback = Rc<dyn Fn(usize, &mut Window, &mut App)>;
@@ -30,19 +30,13 @@ pub struct LineViewTheme {
     pub code_font: Font,
 }
 
-enum ImageSource {
-    Url(String),
-    Path(PathBuf),
-}
-
 pub struct LineView<'a> {
-    line: &'a LineInfo,
+    line: &'a Line,
     text: &'a str,
     cursor_offset: usize,
     inline_styles: Vec<StyledRegion>,
     theme: LineViewTheme,
     selection_range: Option<Range<usize>>,
-    base_path: Option<PathBuf>,
     code_highlights: Vec<(HighlightSpan, Rgba)>,
     on_click: Option<ClickCallback>,
     on_drag: Option<DragCallback>,
@@ -54,13 +48,12 @@ pub struct LineView<'a> {
 
 impl<'a> LineView<'a> {
     pub fn new(
-        line: &'a LineInfo,
+        line: &'a Line,
         text: &'a str,
         cursor_offset: usize,
         inline_styles: Vec<StyledRegion>,
         theme: LineViewTheme,
         selection_range: Option<Range<usize>>,
-        base_path: Option<PathBuf>,
         code_highlights: Vec<(HighlightSpan, Rgba)>,
         show_block_markers: bool,
     ) -> Self {
@@ -71,7 +64,6 @@ impl<'a> LineView<'a> {
             inline_styles,
             theme,
             selection_range,
-            base_path,
             code_highlights,
             on_click: None,
             on_drag: None,
@@ -107,29 +99,6 @@ impl<'a> LineView<'a> {
         self
     }
 
-    fn resolve_image_source(&self, image_path: &str) -> ImageSource {
-        // Check if it's a URL
-        if image_path.starts_with("http://") || image_path.starts_with("https://") {
-            return ImageSource::Url(image_path.to_string());
-        }
-
-        let path = Path::new(image_path);
-
-        // If it's an absolute path, use it directly
-        if path.is_absolute() {
-            return ImageSource::Path(path.to_path_buf());
-        }
-
-        // It's a relative path - resolve against base_path
-        if let Some(ref base) = self.base_path {
-            let resolved = base.join(path);
-            return ImageSource::Path(resolved);
-        }
-
-        // No base path available, try as-is (might fail)
-        ImageSource::Path(path.to_path_buf())
-    }
-
     fn cursor_on_line(&self) -> bool {
         let range = &self.line.range;
         // Cursor is on this line if it's within the range, or at the end for empty lines
@@ -161,9 +130,14 @@ impl<'a> LineView<'a> {
         // Block markers are shown when cursor/selection is on line
         if self.should_show_raw_markers() {
             range.clone()
-        } else if let Some(ref marker_range) = self.line.marker_range {
+        } else if let Some(marker_range) = self.line.marker_range() {
             // For ordered lists, don't hide the marker (no substitution available)
-            if matches!(self.line.kind, LineKind::ListItem { ordered: true, .. }) {
+            if self
+                .line
+                .markers
+                .iter()
+                .any(|m| matches!(m.kind, MarkerKind::ListItem { ordered: true }))
+            {
                 range.clone()
             } else {
                 // Hide the block marker
@@ -174,39 +148,36 @@ impl<'a> LineView<'a> {
         }
     }
 
-    fn should_show_border(&self) -> bool {
-        !self.should_show_raw_markers() && self.line.has_border
-    }
-
     fn checkbox_state(&self) -> Option<bool> {
         // Only show checkbox when not showing raw markers
         if self.should_show_raw_markers() {
             return None;
         }
-        self.line.checkbox
+        self.line.checkbox()
     }
 
-    fn get_non_checkbox_substitution(&self) -> Option<&str> {
+    fn get_non_checkbox_substitution(&self) -> Option<String> {
         // Only substitute when not showing raw markers
         if self.should_show_raw_markers() {
             return None;
         }
         // If this is a checkbox line, don't return substitution (checkbox rendered separately)
-        if self.line.checkbox.is_some() {
+        if self.line.checkbox().is_some() {
             return None;
         }
-        if self.line.substitution.is_empty() {
+        let substitution = self.line.substitution();
+        if substitution.is_empty() {
             None
         } else {
-            Some(&self.line.substitution)
+            Some(substitution)
         }
     }
 
-    fn leading_whitespace(&self) -> &str {
+    fn leading_whitespace(&self) -> String {
         if self.should_show_raw_markers() {
-            ""
+            String::new()
         } else {
-            &self.line.leading_whitespace
+            self.line.leading_whitespace(self.text)
         }
     }
 
@@ -222,7 +193,8 @@ impl<'a> LineView<'a> {
     }
 
     fn line_font(&self) -> Font {
-        if self.line.kind.is_bold() {
+        // Headings are bold
+        if self.line.heading_level().is_some() {
             Font {
                 weight: FontWeight::BOLD,
                 ..self.theme.text_font.clone()
@@ -290,7 +262,7 @@ impl<'a> LineView<'a> {
 
     fn build_styled_content(&self) -> (String, Vec<TextRun>) {
         // Handle fence lines specially when cursor is not on them
-        if self.line.kind.is_fence() && !self.should_show_raw_markers() {
+        if self.line.is_fence() && !self.should_show_raw_markers() {
             return self.build_fence_content();
         }
 
@@ -303,7 +275,7 @@ impl<'a> LineView<'a> {
         // Skip for checkbox lines - whitespace is handled as left margin on the checkbox
         let whitespace = self.leading_whitespace();
         if !whitespace.is_empty() && self.checkbox_state().is_none() {
-            display_text.push_str(whitespace);
+            display_text.push_str(&whitespace);
             runs.push(self.text_run(
                 whitespace.len(),
                 self.theme.text_font.clone(),
@@ -316,7 +288,7 @@ impl<'a> LineView<'a> {
         if let Some(prefix) = self.get_non_checkbox_substitution()
             && !prefix.is_empty()
         {
-            display_text.push_str(prefix);
+            display_text.push_str(&prefix);
             runs.push(self.text_run(
                 prefix.len(),
                 self.theme.text_font.clone(),
@@ -450,14 +422,15 @@ impl<'a> LineView<'a> {
 
             // Build the font for this run
             // Use code font for: inline code spans, or any line inside a code block
-            let base_font = if is_code || self.line.kind.is_code_block() {
+            let is_code_block_line = self.line.is_code_block_content() || self.line.is_fence();
+            let base_font = if is_code || is_code_block_line {
                 self.theme.code_font.clone()
             } else {
                 self.theme.text_font.clone()
             };
 
             let font = Font {
-                weight: if is_bold || self.line.kind.is_bold() {
+                weight: if is_bold || self.line.heading_level().is_some() {
                     FontWeight::BOLD
                 } else {
                     base_font.weight
@@ -476,7 +449,7 @@ impl<'a> LineView<'a> {
             } else if let Some(highlight_color) = self.get_highlight_color_for_range(start, end) {
                 // Code block with syntax highlighting
                 highlight_color.into()
-            } else if is_code && !self.line.kind.is_code_block() {
+            } else if is_code && !is_code_block_line {
                 // Inline code gets a distinct color
                 self.theme.code_color.into()
             } else {
@@ -733,110 +706,6 @@ impl IntoElement for LineView<'_> {
         let line_number = self.line.line_number;
         let line_range = self.line.range.clone();
 
-        // Handle image-only lines specially
-        if let Some(ref image_url) = self.line.image_url {
-            let alt_text = self.line.image_alt.clone().unwrap_or_default();
-
-            // Resolve the image source (URL, absolute path, or relative path)
-            let image_source = self.resolve_image_source(image_url);
-
-            // Create the image element based on the resolved source
-            let create_image = |source: &ImageSource, alt: String| -> gpui::Img {
-                match source {
-                    ImageSource::Url(url) => img(url.clone())
-                        .max_w_full()
-                        .with_fallback(move || div().child(alt.clone()).into_any_element()),
-                    ImageSource::Path(path) => img(path.clone())
-                        .max_w_full()
-                        .with_fallback(move || div().child(alt.clone()).into_any_element()),
-                }
-            };
-
-            if self.cursor_on_line() {
-                // Cursor on line: show text AND image
-                let (display_text, mut runs) = self.build_styled_content();
-                let visual_cursor_pos = self.compute_visual_cursor_pos(&display_text);
-
-                let display_text = if display_text.is_empty() {
-                    // Add a run for the placeholder space
-                    runs.push(self.text_run(1, self.line_font(), self.theme.text_color));
-                    " ".to_string()
-                } else {
-                    display_text
-                };
-
-                let shared_text: SharedString = display_text.into();
-                let styled_text = StyledText::new(shared_text).with_runs(runs);
-                let text_layout = styled_text.layout().clone();
-
-                // Show text first (with cursor), then image below
-                // This ensures scrolling to this line shows the editable text
-                let mut line_div = line_base(line_number)
-                    .relative()
-                    .child(styled_text)
-                    .child(create_image(&image_source, alt_text.clone()));
-
-                // Add cursor overlay
-                if let Some(cursor_pos) = visual_cursor_pos {
-                    line_div = line_div.child(self.render_cursor(cursor_pos, text_layout.clone()));
-                }
-
-                // Add click handler for cursor positioning
-                if let Some(ref on_click) = self.on_click {
-                    let on_click = on_click.clone();
-                    let layout_for_click = text_layout;
-                    let content_range = self.content_range();
-
-                    line_div = line_div.on_mouse_down(
-                        MouseButton::Left,
-                        move |event: &MouseDownEvent, window, cx| {
-                            let visual_index =
-                                match layout_for_click.index_for_position(event.position) {
-                                    Ok(idx) => idx,
-                                    Err(idx) => idx,
-                                };
-                            let buffer_offset = content_range.start + visual_index;
-                            let buffer_offset = buffer_offset.min(line_range.end);
-                            on_click(
-                                buffer_offset,
-                                event.modifiers.shift,
-                                event.click_count,
-                                window,
-                                cx,
-                            );
-                        },
-                    );
-                }
-
-                return line_div;
-            } else {
-                // Cursor not on line: show only the image, hide text
-                // Clicking on the image positions cursor at end of line
-                let mut img_div = line_base(line_number)
-                    .overflow_hidden()
-                    .child(create_image(&image_source, alt_text));
-
-                if let Some(ref on_click) = self.on_click {
-                    let on_click = on_click.clone();
-                    let line_end = line_range.end;
-                    img_div = img_div.on_mouse_down(
-                        MouseButton::Left,
-                        move |event: &MouseDownEvent, window, cx| {
-                            on_click(
-                                line_end,
-                                event.modifiers.shift,
-                                event.click_count,
-                                window,
-                                cx,
-                            );
-                        },
-                    );
-                }
-
-                return img_div;
-            }
-        }
-
         // Build styled content
         let (display_text, mut runs) = self.build_styled_content();
         let visual_cursor_pos = self.compute_visual_cursor_pos(&display_text);
@@ -857,107 +726,99 @@ impl IntoElement for LineView<'_> {
         let styled_text = StyledText::new(shared_text).with_runs(runs);
         let text_layout = styled_text.layout().clone();
 
-        // Base div with line-specific styling
-        let mut line_div = match &self.line.kind {
-            LineKind::Heading(level) => {
-                let base = line_base(line_number)
-                    .relative()
-                    .font_weight(FontWeight::BOLD);
-                match level {
-                    1 => base.text_size(rems(2.0)),
-                    2 => base.text_size(rems(1.75)),
-                    3 => base.text_size(rems(1.5)),
-                    4 => base.text_size(rems(1.25)),
-                    5 => base.text_size(rems(1.1)),
-                    _ => base,
-                }
-            }
-            LineKind::BlockQuote => {
-                let base = line_base(line_number).relative();
-                // Only show left border when cursor is away (hiding the > markers)
-                if self.should_show_raw_markers() {
-                    base
-                } else {
-                    base.pl_3()
-                        .border_l_2()
-                        .border_color(self.theme.border_color)
-                }
-            }
-            LineKind::CodeBlock { .. } => line_base(line_number).relative().text_size(rems(0.9)),
-            LineKind::ThematicBreak => {
-                // When cursor is on line, show raw markers (---, ***, ___)
-                // When cursor is away, render invisible text with HR line behind it
-                // This gives us proper click positioning for free
-                if self.should_show_raw_markers() {
-                    line_base(line_number).relative()
-                } else {
-                    // Build invisible text runs (same text, transparent color)
-                    let line_text = &self.text[self.line.range.clone()];
-                    let invisible_run = TextRun {
-                        len: line_text.len(),
-                        font: self.theme.text_font.clone(),
-                        color: gpui::transparent_black(),
-                        background_color: None,
-                        underline: None,
-                        strikethrough: None,
+        // Base div with marker-driven styling
+        let mut line_div = line_base(line_number).relative();
+
+        for marker in &self.line.markers {
+            match &marker.kind {
+                MarkerKind::Heading(level) => {
+                    line_div = line_div.font_weight(FontWeight::BOLD);
+                    line_div = match level {
+                        1 => line_div.text_size(rems(2.0)),
+                        2 => line_div.text_size(rems(1.75)),
+                        3 => line_div.text_size(rems(1.5)),
+                        4 => line_div.text_size(rems(1.25)),
+                        5 => line_div.text_size(rems(1.1)),
+                        _ => line_div,
                     };
-                    let shared_text: SharedString = line_text.to_string().into();
-                    let styled_text = StyledText::new(shared_text).with_runs(vec![invisible_run]);
-                    let text_layout = styled_text.layout().clone();
-
-                    // Horizontal line overlay (doesn't affect text layout)
-                    let hr_line = div()
-                        .absolute()
-                        .top_1_2() // Center vertically
-                        .left_0()
-                        .right_0()
-                        .h(px(1.0))
-                        .bg(self.theme.border_color);
-
-                    let mut hr_div = line_base(line_number)
-                        .relative()
-                        .child(styled_text)
-                        .child(hr_line);
-
-                    // Add click handler using the text layout for positioning
-                    if let Some(ref on_click) = self.on_click {
-                        let on_click = on_click.clone();
-                        hr_div = hr_div.on_mouse_down(
-                            MouseButton::Left,
-                            move |event: &MouseDownEvent, window, cx| {
-                                let visual_index =
-                                    match text_layout.index_for_position(event.position) {
-                                        Ok(idx) => idx,
-                                        Err(idx) => idx,
-                                    };
-                                let buffer_offset = line_range.start + visual_index;
-                                let buffer_offset = buffer_offset.min(line_range.end);
-                                on_click(
-                                    buffer_offset,
-                                    event.modifiers.shift,
-                                    event.click_count,
-                                    window,
-                                    cx,
-                                );
-                            },
-                        );
+                }
+                MarkerKind::BlockQuote => {
+                    // Only show left border when cursor is away (hiding the > markers)
+                    if !self.should_show_raw_markers() {
+                        line_div = line_div
+                            .pl_3()
+                            .border_l_2()
+                            .border_color(self.theme.border_color);
                     }
+                }
+                MarkerKind::CodeBlockFence { .. } | MarkerKind::CodeBlockContent => {
+                    line_div = line_div.text_size(rems(0.9));
+                }
+                MarkerKind::ThematicBreak => {
+                    // When cursor is on line, show raw markers (---, ***, ___)
+                    // When cursor is away, render invisible text with HR line behind it
+                    if !self.should_show_raw_markers() {
+                        // Build invisible text runs (same text, transparent color)
+                        let line_text = &self.text[self.line.range.clone()];
+                        let invisible_run = TextRun {
+                            len: line_text.len(),
+                            font: self.theme.text_font.clone(),
+                            color: gpui::transparent_black(),
+                            background_color: None,
+                            underline: None,
+                            strikethrough: None,
+                        };
+                        let shared_text: SharedString = line_text.to_string().into();
+                        let styled_text =
+                            StyledText::new(shared_text).with_runs(vec![invisible_run]);
+                        let text_layout = styled_text.layout().clone();
 
-                    return hr_div;
+                        // Horizontal line overlay (doesn't affect text layout)
+                        let hr_line = div()
+                            .absolute()
+                            .top_1_2() // Center vertically
+                            .left_0()
+                            .right_0()
+                            .h(px(1.0))
+                            .bg(self.theme.border_color);
+
+                        let mut hr_div = line_base(line_number)
+                            .relative()
+                            .child(styled_text)
+                            .child(hr_line);
+
+                        // Add click handler using the text layout for positioning
+                        if let Some(ref on_click) = self.on_click {
+                            let on_click = on_click.clone();
+                            hr_div = hr_div.on_mouse_down(
+                                MouseButton::Left,
+                                move |event: &MouseDownEvent, window, cx| {
+                                    let visual_index =
+                                        match text_layout.index_for_position(event.position) {
+                                            Ok(idx) => idx,
+                                            Err(idx) => idx,
+                                        };
+                                    let buffer_offset = line_range.start + visual_index;
+                                    let buffer_offset = buffer_offset.min(line_range.end);
+                                    on_click(
+                                        buffer_offset,
+                                        event.modifiers.shift,
+                                        event.click_count,
+                                        window,
+                                        cx,
+                                    );
+                                },
+                            );
+                        }
+
+                        return hr_div;
+                    }
+                }
+                MarkerKind::ListItem { .. } | MarkerKind::Checkbox { .. } | MarkerKind::Indent => {
+                    // These are handled elsewhere (substitution, checkbox rendering, etc.)
                 }
             }
-            _ => {
-                let base = line_base(line_number).relative();
-                // Add blockquote border for list items inside blockquotes
-                if self.should_show_border() {
-                    base.pl_3()
-                        .border_l_2()
-                        .border_color(self.theme.border_color)
-                } else {
-                    base
-                }
-            }
-        };
+        }
 
         // For checkbox lines, render checkbox as a styled box element
         if let Some(checked) = self.checkbox_state() {

@@ -14,6 +14,7 @@ pub enum MarkerKind {
     Checkbox { checked: bool },
     Heading(u8),
     CodeBlockFence { language: Option<String> },
+    CodeBlockContent,
     ThematicBreak,
     Indent,
 }
@@ -87,6 +88,30 @@ impl Line {
         }
         String::new()
     }
+
+    /// Returns true if this line is code block content (not a fence line).
+    pub fn is_code_block_content(&self) -> bool {
+        self.markers
+            .iter()
+            .any(|m| matches!(m.kind, MarkerKind::CodeBlockContent))
+    }
+
+    /// Returns true if this line is a code block fence (opening or closing).
+    pub fn is_fence(&self) -> bool {
+        self.markers
+            .iter()
+            .any(|m| matches!(m.kind, MarkerKind::CodeBlockFence { .. }))
+    }
+
+    /// Returns the heading level if this line is a heading.
+    pub fn heading_level(&self) -> Option<u8> {
+        for m in &self.markers {
+            if let MarkerKind::Heading(level) = m.kind {
+                return Some(level);
+            }
+        }
+        None
+    }
 }
 
 impl MarkerKind {
@@ -100,6 +125,7 @@ impl MarkerKind {
             MarkerKind::Checkbox { checked: true } => "☑ ",
             MarkerKind::Heading(_) => "",
             MarkerKind::CodeBlockFence { .. } => "",
+            MarkerKind::CodeBlockContent => "",
             MarkerKind::ThematicBreak => "",
             MarkerKind::Indent => "",
         }
@@ -114,6 +140,7 @@ impl MarkerKind {
             MarkerKind::Checkbox { .. } => "- [ ] ",
             MarkerKind::Heading(_) => "",
             MarkerKind::CodeBlockFence { .. } => "",
+            MarkerKind::CodeBlockContent => "",
             MarkerKind::ThematicBreak => "",
             MarkerKind::Indent => "",
         }
@@ -239,6 +266,26 @@ pub fn markers_at(root: &Node, text: &str, line_start: usize, probe_pos: usize) 
             "thematic_break" => {
                 markers.push(Marker {
                     kind: MarkerKind::ThematicBreak,
+                    range: node.byte_range(),
+                });
+            }
+            "fenced_code_block" => {
+                // If we're inside a fenced_code_block but didn't hit a delimiter,
+                // this is a content line
+                let has_fence_marker = markers
+                    .iter()
+                    .any(|m| matches!(m.kind, MarkerKind::CodeBlockFence { .. }));
+                if !has_fence_marker {
+                    markers.push(Marker {
+                        kind: MarkerKind::CodeBlockContent,
+                        range: node.byte_range(),
+                    });
+                }
+            }
+            "indented_code_block" => {
+                // All lines in an indented code block are content
+                markers.push(Marker {
+                    kind: MarkerKind::CodeBlockContent,
                     range: node.byte_range(),
                 });
             }
@@ -468,9 +515,9 @@ mod tests {
             }]
         );
 
-        // Line 2 (content) - no markers
+        // Line 2 (content) - CodeBlockContent marker
         let markers = markers_at(&root, &text, 8, 12);
-        assert_eq!(kinds(&markers), vec![] as Vec<&MarkerKind>);
+        assert_eq!(kinds(&markers), vec![&MarkerKind::CodeBlockContent]);
 
         // Line 3 (closing fence) - no language
         let markers = markers_at(&root, &text, 19, 21);
@@ -530,7 +577,7 @@ fn main() {
                         language: Some("rust".to_string())
                     }]
                 ),
-                1..=3 => assert_eq!(kinds(&markers), vec![] as Vec<&MarkerKind>),
+                1..=3 => assert_eq!(kinds(&markers), vec![&MarkerKind::CodeBlockContent]),
                 4 => assert_eq!(
                     kinds(&markers),
                     vec![&MarkerKind::CodeBlockFence { language: None }]
@@ -549,12 +596,12 @@ fn main() {
         let tree = buf.tree().unwrap();
         let root = tree.block_tree().root_node();
 
-        // No markers for indented code blocks - they're just content
+        // Indented code blocks get CodeBlockContent marker
         let markers = markers_at(&root, &text, 0, 8);
-        assert_eq!(kinds(&markers), vec![] as Vec<&MarkerKind>);
+        assert_eq!(kinds(&markers), vec![&MarkerKind::CodeBlockContent]);
 
         let markers = markers_at(&root, &text, 15, 22);
-        assert_eq!(kinds(&markers), vec![] as Vec<&MarkerKind>);
+        assert_eq!(kinds(&markers), vec![&MarkerKind::CodeBlockContent]);
     }
 
     #[test]

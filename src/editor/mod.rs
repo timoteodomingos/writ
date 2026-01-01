@@ -18,7 +18,8 @@ use crate::cursor::{Cursor, Selection};
 use crate::line_view::{
     CheckboxCallback, ClickCallback, DragCallback, LineView, LineViewTheme, LinkHoverCallback,
 };
-use crate::lines::{LineInfo, LineKind, extract_inline_styles, extract_lines};
+use crate::lines::{extract_inline_styles, extract_lines};
+use crate::tree_walk::Line;
 
 type CodeBlockRange = (usize, Option<usize>);
 
@@ -186,11 +187,13 @@ impl Editor {
             return "\n".to_string();
         };
 
-        // Use pre-computed continuation from LineInfo
-        if line_info.continuation.is_empty() {
+        // Use continuation from Line
+        let buffer_text = self.buffer.text();
+        let continuation = line_info.continuation(&buffer_text);
+        if continuation.is_empty() {
             "\n".to_string()
         } else {
-            format!("\n{}", line_info.continuation)
+            format!("\n{}", continuation)
         }
     }
 
@@ -202,14 +205,9 @@ impl Editor {
 
         // Only toggle task list items
         let buffer_text = self.buffer.text();
-        let LineKind::ListItem {
-            checked: Some(is_checked),
-            ..
-        } = &line.kind
-        else {
+        let Some(is_checked) = line.checkbox() else {
             return;
         };
-        let is_checked = *is_checked;
 
         // Find the checkbox pattern in the line
         let line_text = &buffer_text[line.range.clone()];
@@ -306,19 +304,19 @@ impl Editor {
         self.move_cursor(new_cursor, extend);
     }
 
-    fn compute_code_block_ranges(lines: &[LineInfo]) -> Vec<CodeBlockRange> {
+    fn compute_code_block_ranges(lines: &[Line]) -> Vec<CodeBlockRange> {
         let mut ranges = Vec::new();
         let mut i = 0;
 
         while i < lines.len() {
-            if let LineKind::CodeBlock { is_fence: true, .. } = &lines[i].kind {
+            if lines[i].is_fence() {
                 let start = i;
                 i += 1;
                 let mut found_close = false;
 
                 // Find closing fence
                 while i < lines.len() {
-                    if let LineKind::CodeBlock { is_fence: true, .. } = &lines[i].kind {
+                    if lines[i].is_fence() {
                         ranges.push((start, Some(i)));
                         i += 1;
                         found_close = true;
@@ -729,7 +727,7 @@ impl Render for Editor {
             .enumerate()
             .filter_map(|(line_idx, line)| {
                 // For fence lines, check if cursor is in this code block
-                let is_fence = matches!(&line.kind, LineKind::CodeBlock { is_fence: true, .. });
+                let is_fence = line.is_fence();
                 let cursor_in_block = cursor_in_code_block_range(line_idx);
 
                 // Skip fence lines when cursor is outside the code block
@@ -764,7 +762,6 @@ impl Render for Editor {
                     inline_styles,
                     line_theme.clone(),
                     selection_range.clone(),
-                    base_path.clone(),
                     code_highlights,
                     show_block_markers,
                 )
