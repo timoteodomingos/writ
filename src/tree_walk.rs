@@ -40,8 +40,10 @@ impl Line {
         if self.markers.is_empty() {
             return None;
         }
-        let start = self.markers.first()?.range.start;
-        let end = self.markers.last()?.range.end;
+        // Markers are ordered innermost to outermost.
+        // Outermost (last) has earliest start, innermost (first) has latest end.
+        let start = self.markers.last()?.range.start;
+        let end = self.markers.first()?.range.end;
         Some(start..end)
     }
 
@@ -53,12 +55,18 @@ impl Line {
 
     /// Returns the continuation text to insert on Enter.
     /// E.g., "> " for blockquote, "- " for list.
-    /// For Indent markers, extracts the actual whitespace from the text.
+    /// For Indent and ListItem markers, extracts the actual text from the range
+    /// (which includes leading whitespace for nested lists).
+    /// Markers are stored innermost to outermost, but continuation should be
+    /// in text order (outermost to innermost), so we reverse.
     pub fn continuation(&self, text: &str) -> String {
         self.markers
             .iter()
+            .rev()
             .map(|m| match &m.kind {
-                MarkerKind::Indent => text[m.range.clone()].to_string(),
+                MarkerKind::Indent | MarkerKind::ListItem { .. } => {
+                    text[m.range.clone()].to_string()
+                }
                 _ => m.kind.continuation().to_string(),
             })
             .collect()
@@ -137,7 +145,7 @@ impl MarkerKind {
             MarkerKind::BlockQuote => "> ",
             MarkerKind::ListItem { ordered: false } => "- ",
             MarkerKind::ListItem { ordered: true } => "1. ",
-            MarkerKind::Checkbox { .. } => "- [ ] ",
+            MarkerKind::Checkbox { .. } => "[ ] ",
             MarkerKind::Heading(_) => "",
             MarkerKind::CodeBlockFence { .. } => "",
             MarkerKind::CodeBlockContent => "",
@@ -702,16 +710,17 @@ fn main() {
 
     #[test]
     fn test_line_marker_range_multiple() {
+        // Markers are innermost to outermost (ListItem inside BlockQuote)
         let line = make_line(
             0..15,
             vec![
                 Marker {
-                    kind: MarkerKind::BlockQuote,
-                    range: 0..2,
-                },
-                Marker {
                     kind: MarkerKind::ListItem { ordered: false },
                     range: 2..4,
+                },
+                Marker {
+                    kind: MarkerKind::BlockQuote,
+                    range: 0..2,
                 },
             ],
         );
@@ -720,16 +729,17 @@ fn main() {
 
     #[test]
     fn test_line_substitution() {
+        // Markers are innermost to outermost (ListItem inside BlockQuote)
         let line = make_line(
             0..15,
             vec![
                 Marker {
-                    kind: MarkerKind::BlockQuote,
-                    range: 0..2,
-                },
-                Marker {
                     kind: MarkerKind::ListItem { ordered: false },
                     range: 2..4,
+                },
+                Marker {
+                    kind: MarkerKind::BlockQuote,
+                    range: 0..2,
                 },
             ],
         );
@@ -757,16 +767,17 @@ fn main() {
     #[test]
     fn test_line_continuation() {
         let text = "> - Item text here";
+        // Markers are innermost to outermost (ListItem inside BlockQuote)
         let line = make_line(
             0..18,
             vec![
                 Marker {
-                    kind: MarkerKind::BlockQuote,
-                    range: 0..2,
-                },
-                Marker {
                     kind: MarkerKind::ListItem { ordered: false },
                     range: 2..4,
+                },
+                Marker {
+                    kind: MarkerKind::BlockQuote,
+                    range: 0..2,
                 },
             ],
         );
@@ -785,6 +796,21 @@ fn main() {
         );
         // Indent marker extracts actual whitespace from text
         assert_eq!(line.continuation(text), "  ");
+    }
+
+    #[test]
+    fn test_line_continuation_nested_list() {
+        // Nested list: "    - Nested" where marker includes leading whitespace
+        let text = "    - Nested";
+        let line = make_line(
+            0..12,
+            vec![Marker {
+                kind: MarkerKind::ListItem { ordered: false },
+                range: 0..6, // "    - " includes indent
+            }],
+        );
+        // ListItem marker extracts actual text including indent
+        assert_eq!(line.continuation(text), "    - ");
     }
 
     #[test]
@@ -874,5 +900,26 @@ fn main() {
             }],
         );
         assert_eq!(line.leading_whitespace(text), "");
+    }
+
+    #[test]
+    fn test_nested_list() {
+        let buf: Buffer = "- First\n    - Nested\n".parse().unwrap();
+        let text = buf.text();
+        let tree = buf.tree().unwrap();
+        let root = tree.block_tree().root_node();
+
+        // Line 2: "    - Nested" - nested list item (bytes 8-20)
+        // Tree structure:
+        //   block_continuation [8-10] "  " (belongs to parent paragraph, not this line)
+        //   list_marker_minus [10-14] "  - " (2 spaces indent + "- ")
+        // The nested list marker includes the indent - no separate Indent marker needed
+        let markers = markers_at(&root, &text, 8, 19);
+        assert_eq!(
+            kinds(&markers),
+            vec![&MarkerKind::ListItem { ordered: false }]
+        );
+        // Marker range is "  - " which includes the indent
+        assert_eq!(&text[markers[0].range.clone()], "  - ");
     }
 }
