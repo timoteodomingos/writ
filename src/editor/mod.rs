@@ -369,20 +369,23 @@ impl Editor {
         }
 
         // Find the line containing cursor (using cached lines)
-        if let Some(line) = self
+        if let Some((line_idx, line)) = self
             .lines
             .iter()
-            .find(|l| cursor_pos >= l.range.start && cursor_pos <= l.range.end)
+            .enumerate()
+            .find(|(_, l)| cursor_pos >= l.range.start && cursor_pos <= l.range.end)
         {
-            // Check if cursor is at the start of content (end of marker region)
             if let Some(marker_range) = line.marker_range() {
-                if cursor_pos == marker_range.end {
-                    // Jump to start of line (before all markers)
-                    return Cursor::new(line.range.start);
-                }
-                // If cursor is inside marker region, jump to line start
-                if cursor_pos > marker_range.start && cursor_pos < marker_range.end {
-                    return Cursor::new(line.range.start);
+                // If cursor is at content start or inside markers, jump to previous line end
+                if cursor_pos <= marker_range.end {
+                    if line_idx > 0 {
+                        // Go to end of previous line (before the newline)
+                        let prev_line = &self.lines[line_idx - 1];
+                        return Cursor::new(prev_line.range.end);
+                    } else {
+                        // First line, stay at content start
+                        return Cursor::new(marker_range.end);
+                    }
                 }
             }
         }
