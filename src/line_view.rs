@@ -25,9 +25,9 @@ pub struct LineViewTheme {
     pub link_color: Rgba,
     pub selection_color: Rgba,
     pub border_color: Rgba,
+    pub code_color: Rgba,
     pub fence_color: Rgba,
     pub fence_lang_color: Rgba,
-    pub code_color: Rgba,
     pub text_font: Font,
     pub code_font: Font,
 }
@@ -122,8 +122,9 @@ impl<'a> LineView<'a> {
         }
     }
 
-    fn cursor_inside_region(&self, region: &StyledRegion) -> bool {
-        self.cursor_offset >= region.full_range.start && self.cursor_offset <= region.full_range.end
+    /// Returns true if this line is inside a code block (has syntax highlighting).
+    fn is_code_block_line(&self) -> bool {
+        !self.code_highlights.is_empty() || self.line.is_fence()
     }
 
     /// Returns the image URL if this line contains only a standalone image
@@ -164,6 +165,7 @@ impl<'a> LineView<'a> {
 
         // Always hide block markers (they're replaced by substitution)
         // Exception: ordered lists have no substitution, so show the marker
+        // Exception: fence lines - show from fence start (hide only preceding markers like blockquote)
         if let Some(marker_range) = self.line.marker_range() {
             if self
                 .line
@@ -172,6 +174,14 @@ impl<'a> LineView<'a> {
                 .any(|m| matches!(m.kind, MarkerKind::ListItem { ordered: true }))
             {
                 range.clone()
+            } else if let Some(fence_marker) = self
+                .line
+                .markers
+                .iter()
+                .find(|m| matches!(m.kind, MarkerKind::CodeBlockFence { .. }))
+            {
+                // For fence lines, show from fence start (keeps ```lang visible)
+                fence_marker.range.start..range.end
             } else {
                 // Hide the block marker
                 marker_range.end..range.end
@@ -224,58 +234,7 @@ impl<'a> LineView<'a> {
         None
     }
 
-    fn build_fence_content(&self) -> (String, Vec<TextRun>) {
-        let line_text = &self.text[self.line.range.clone()];
-        let trimmed = line_text.trim_start();
-        let leading_spaces = line_text.len() - trimmed.len();
-
-        let mut display_text = String::new();
-        let mut runs: Vec<TextRun> = Vec::new();
-
-        // Add leading whitespace
-        if leading_spaces > 0 {
-            let whitespace = &line_text[..leading_spaces];
-            display_text.push_str(whitespace);
-            runs.push(self.text_run(
-                whitespace.len(),
-                self.theme.code_font.clone(),
-                self.theme.fence_color,
-            ));
-        }
-
-        // Find the backticks
-        let backticks: String = trimmed.chars().take_while(|&c| c == '`').collect();
-        let language = trimmed[backticks.len()..].trim();
-
-        // Add backticks in fence color (comment)
-        if !backticks.is_empty() {
-            display_text.push_str(&backticks);
-            runs.push(self.text_run(
-                backticks.len(),
-                self.theme.code_font.clone(),
-                self.theme.fence_color,
-            ));
-        }
-
-        // Add language in green
-        if !language.is_empty() {
-            display_text.push_str(language);
-            runs.push(self.text_run(
-                language.len(),
-                self.theme.code_font.clone(),
-                self.theme.fence_lang_color,
-            ));
-        }
-
-        (display_text, runs)
-    }
-
     fn build_styled_content(&self) -> (String, Vec<TextRun>) {
-        // Handle fence lines specially when cursor is not on them
-        if self.line.is_fence() && !self.cursor_on_line() && !self.selection_on_line() {
-            return self.build_fence_content();
-        }
-
         let content_range = self.content_range();
 
         let mut display_text = String::new();
@@ -344,6 +303,35 @@ impl<'a> LineView<'a> {
         }
 
         if content_range.start >= content_range.end {
+            return (display_text, runs);
+        }
+
+        // Handle fence lines specially - color backticks and language
+        if self.line.is_fence() {
+            let fence_text = &self.text[content_range.clone()];
+            let backticks: String = fence_text.chars().take_while(|&c| c == '`').collect();
+            let language = fence_text[backticks.len()..].trim_end();
+
+            // Add backticks in fence color (comment)
+            if !backticks.is_empty() {
+                display_text.push_str(&backticks);
+                runs.push(self.text_run(
+                    backticks.len(),
+                    self.theme.code_font.clone(),
+                    self.theme.fence_color,
+                ));
+            }
+
+            // Add language in green
+            if !language.is_empty() {
+                display_text.push_str(language);
+                runs.push(self.text_run(
+                    language.len(),
+                    self.theme.code_font.clone(),
+                    self.theme.fence_lang_color,
+                ));
+            }
+
             return (display_text, runs);
         }
 
@@ -469,8 +457,7 @@ impl<'a> LineView<'a> {
 
             // Build the font for this run
             // Use code font for: inline code spans, or any line inside a code block
-            let is_code_block_line = self.line.is_code_block_content() || self.line.is_fence();
-            let base_font = if is_code || is_code_block_line {
+            let base_font = if is_code || self.is_code_block_line() {
                 self.theme.code_font.clone()
             } else {
                 self.theme.text_font.clone()
@@ -496,7 +483,7 @@ impl<'a> LineView<'a> {
             } else if let Some(highlight_color) = self.get_highlight_color_for_range(start, end) {
                 // Code block with syntax highlighting
                 highlight_color.into()
-            } else if is_code && !is_code_block_line {
+            } else if is_code && !self.is_code_block_line() {
                 // Inline code gets a distinct color
                 self.theme.code_color.into()
             } else {

@@ -251,7 +251,7 @@ impl BufferContent {
         self.code_highlight_cache.highlights.clear();
 
         let text = self.text.to_string();
-        let lines = crate::lines::extract_lines_from_parts(&text, self.tree.as_ref());
+        let lines = &self.lines;
 
         let mut i = 0;
         while i < lines.len() {
@@ -279,8 +279,8 @@ impl BufferContent {
                         block_end = lines[i].range.end;
                         i += 1;
                         break;
-                    } else if lines[i].is_code_block_content() {
-                        // Code content line
+                    } else {
+                        // Code content line (any non-fence line between opening and closing fence)
                         if content_start_offset.is_none() {
                             content_start_offset = Some(lines[i].range.start);
                         }
@@ -288,8 +288,6 @@ impl BufferContent {
                         code_content.push('\n');
                         block_end = lines[i].range.end;
                         i += 1;
-                    } else {
-                        break;
                     }
                 }
 

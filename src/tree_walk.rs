@@ -63,6 +63,11 @@ impl Line {
     /// Computes leading whitespace from line start to the first non-whitespace
     /// character, to respect user's manual indentation.
     pub fn substitution(&self, text: &str) -> String {
+        // No markers = no substitution (e.g., code block content lines)
+        if self.markers.is_empty() {
+            return String::new();
+        }
+
         let line_text = &text[self.range.clone()];
 
         // Find leading whitespace in the line

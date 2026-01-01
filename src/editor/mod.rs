@@ -454,6 +454,21 @@ impl Editor {
         ranges
     }
 
+    /// Returns true if the cursor is currently inside a code block.
+    fn cursor_in_code_block(&self) -> bool {
+        let lines = self.buffer.lines();
+        let cursor_line = self.buffer.byte_to_line(self.cursor().offset);
+        let ranges = Self::compute_code_block_ranges(lines);
+
+        for (start, end) in ranges {
+            let block_end = end.unwrap_or(lines.len().saturating_sub(1));
+            if cursor_line >= start && cursor_line <= block_end {
+                return true;
+            }
+        }
+        false
+    }
+
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         // Block user input during demo mode
         if self.input_blocked {
@@ -517,8 +532,15 @@ impl Editor {
                 cx.notify();
             }
             "tab" => {
-                self.smart_tab();
+                // Inside code blocks, insert spaces for indentation
+                // Outside code blocks, use smart tab for nesting
+                if self.cursor_in_code_block() {
+                    self.insert_text("    ");
+                } else {
+                    self.smart_tab();
+                }
                 cx.notify();
+                return; // Prevent key_char from also being processed
             }
             "a" if keystroke.modifiers.control || keystroke.modifiers.platform => {
                 self.selection = Selection::select_all(&self.buffer);
@@ -572,11 +594,12 @@ impl Editor {
             _ => {
                 if let Some(key_char) = &keystroke.key_char {
                     // Prevent space at the beginning of lines (use tab for indentation)
-                    if key_char == " " {
+                    // Exception: allow spaces inside code blocks for indentation
+                    if key_char == " " && !self.cursor_in_code_block() {
                         let cursor = self.cursor();
                         let line_start = cursor.move_to_line_start(&self.buffer).offset;
                         if cursor.offset == line_start {
-                            // At line start - ignore space
+                            // At line start outside code block - ignore space
                             return;
                         }
                     }
@@ -748,9 +771,9 @@ impl Render for Editor {
             link_color: theme.cyan,
             selection_color: theme.selection,
             border_color: theme.comment,
+            code_color: theme.pink,
             fence_color: theme.comment,
             fence_lang_color: theme.green,
-            code_color: theme.pink,
             text_font: font(&self.config.text_font),
             code_font: font(&self.config.code_font),
         };
@@ -841,51 +864,15 @@ impl Render for Editor {
 
         // Use cached lines from buffer (updated on buffer changes, not on every render)
         let lines = self.buffer.lines().to_vec();
-        let code_block_ranges = Self::compute_code_block_ranges(&lines);
         let cursor_line = self.buffer.byte_to_line(cursor_offset);
-        let num_lines = lines.len();
-
-        // Helper: check if cursor is inside a code block (by line index)
-        let cursor_in_code_block_range = |line_idx: usize| -> bool {
-            for (start, end) in &code_block_ranges {
-                let block_end = end.unwrap_or(num_lines.saturating_sub(1));
-                // Check if this fence line belongs to a block that contains the cursor
-                if line_idx >= *start
-                    && line_idx <= block_end
-                    && cursor_line >= *start
-                    && cursor_line <= block_end
-                {
-                    return true;
-                }
-            }
-            false
-        };
 
         // Build line views with click and drag handling
-        // Skip fence lines when cursor is outside the code block (they're hidden)
-        // Track child index for cursor line (accounting for filtered lines and top spacer)
-        let mut cursor_child_index: Option<usize> = None;
-        let mut child_index = 1; // Start at 1 to account for top_spacer
+        // Track child index for cursor line (accounting for top spacer)
+        let cursor_child_index = Some(cursor_line + 1); // +1 for top_spacer
 
         let line_views: Vec<_> = lines
             .iter()
-            .enumerate()
-            .filter_map(|(line_idx, line)| {
-                // For fence lines, check if cursor is in this code block
-                let is_fence = line.is_fence();
-                let cursor_in_block = cursor_in_code_block_range(line_idx);
-
-                // Skip fence lines when cursor is outside the code block
-                if is_fence && !cursor_in_block {
-                    return None;
-                }
-
-                // Track the child index for the cursor line
-                if line_idx == cursor_line {
-                    cursor_child_index = Some(child_index);
-                }
-                child_index += 1;
-
+            .map(|line| {
                 // Extract inline styles for this line
                 let inline_styles = extract_inline_styles(&self.buffer, line);
 
@@ -897,7 +884,7 @@ impl Render for Editor {
                     .map(|span| (span.clone(), theme.color_for_highlight(span.highlight_id)))
                     .collect();
 
-                let line_view = LineView::new(
+                LineView::new(
                     line,
                     &buffer_text,
                     cursor_offset,
@@ -910,9 +897,7 @@ impl Render for Editor {
                 .on_click(on_click.clone())
                 .on_drag(on_drag.clone())
                 .on_checkbox(on_checkbox.clone())
-                .on_hover(on_hover.clone());
-
-                Some(line_view)
+                .on_hover(on_hover.clone())
             })
             .collect();
 
