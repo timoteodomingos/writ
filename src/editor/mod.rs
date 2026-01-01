@@ -45,6 +45,8 @@ pub struct Editor {
     streaming_mode: bool,
     config: EditorConfig,
     hovering_link: bool,
+    /// Cached line info, updated when buffer changes.
+    lines: Vec<Line>,
 }
 
 impl Editor {
@@ -56,6 +58,7 @@ impl Editor {
     /// Create a new editor with the given content and configuration.
     pub fn with_config(content: &str, config: EditorConfig, cx: &mut Context<Self>) -> Self {
         let buffer: Buffer = content.parse().unwrap_or_default();
+        let lines = extract_lines(&buffer);
         let focus_handle = cx.focus_handle();
 
         let scroll_handle = ScrollHandle::new();
@@ -71,6 +74,7 @@ impl Editor {
             streaming_mode: false,
             config,
             hovering_link: false,
+            lines,
         }
     }
 
@@ -310,11 +314,11 @@ impl Editor {
 
     /// Returns the range to delete if cursor is at the end of a block marker.
     /// Markers are checked innermost first (e.g., checkbox before list item).
+    /// Uses cached self.lines from last render.
     fn smart_backspace_range(&self, cursor_pos: usize) -> Option<std::ops::Range<usize>> {
-        let lines = extract_lines(&self.buffer);
-
-        // Find the line containing cursor
-        let line = lines
+        // Find the line containing cursor (using cached lines)
+        let line = self
+            .lines
             .iter()
             .find(|l| cursor_pos >= l.range.start && cursor_pos <= l.range.end)?;
 
@@ -348,12 +352,75 @@ impl Editor {
 
     fn move_in_direction(&mut self, direction: Direction, extend: bool) {
         let new_cursor = match direction {
-            Direction::Left => self.cursor().move_left(&self.buffer),
-            Direction::Right => self.cursor().move_right(&self.buffer),
+            Direction::Left => self.smart_move_left(),
+            Direction::Right => self.smart_move_right(),
             Direction::Up => self.cursor().move_up(&self.buffer),
             Direction::Down => self.cursor().move_down(&self.buffer),
         };
         self.move_cursor(new_cursor, extend);
+    }
+
+    /// Move left, skipping over marker regions.
+    /// Uses cached self.lines from last render.
+    fn smart_move_left(&self) -> Cursor {
+        let cursor_pos = self.cursor().offset;
+        if cursor_pos == 0 {
+            return self.cursor();
+        }
+
+        // Find the line containing cursor (using cached lines)
+        if let Some(line) = self
+            .lines
+            .iter()
+            .find(|l| cursor_pos >= l.range.start && cursor_pos <= l.range.end)
+        {
+            // Check if cursor is at the start of content (end of marker region)
+            if let Some(marker_range) = line.marker_range() {
+                if cursor_pos == marker_range.end {
+                    // Jump to start of line (before all markers)
+                    return Cursor::new(line.range.start);
+                }
+                // If cursor is inside marker region, jump to line start
+                if cursor_pos > marker_range.start && cursor_pos < marker_range.end {
+                    return Cursor::new(line.range.start);
+                }
+            }
+        }
+
+        // Normal movement
+        self.cursor().move_left(&self.buffer)
+    }
+
+    /// Move right, skipping over marker regions.
+    /// Uses cached self.lines from last render.
+    fn smart_move_right(&self) -> Cursor {
+        let cursor_pos = self.cursor().offset;
+        let len = self.buffer.len_bytes();
+        if cursor_pos >= len {
+            return self.cursor();
+        }
+
+        // Find the line containing cursor (using cached lines)
+        if let Some(line) = self
+            .lines
+            .iter()
+            .find(|l| cursor_pos >= l.range.start && cursor_pos <= l.range.end)
+        {
+            // Check if cursor is at line start and there are markers
+            if let Some(marker_range) = line.marker_range() {
+                if cursor_pos == line.range.start {
+                    // Jump to end of marker region (start of content)
+                    return Cursor::new(marker_range.end);
+                }
+                // If cursor is inside marker region, jump to content start
+                if cursor_pos > marker_range.start && cursor_pos < marker_range.end {
+                    return Cursor::new(marker_range.end);
+                }
+            }
+        }
+
+        // Normal movement
+        self.cursor().move_right(&self.buffer)
     }
 
     fn compute_code_block_ranges(lines: &[Line]) -> Vec<CodeBlockRange> {
@@ -759,7 +826,10 @@ impl Render for Editor {
         });
 
         // Extract lines fresh on each render (tree-sitter walking is fast)
-        let lines = extract_lines(&self.buffer);
+        // Store in self.lines so smart cursor movement can use it
+        self.lines = extract_lines(&self.buffer);
+        // Clone for use in this function to avoid borrow conflicts
+        let lines = self.lines.clone();
         let code_block_ranges = Self::compute_code_block_ranges(&lines);
         let cursor_line = self.buffer.byte_to_line(cursor_offset);
         let num_lines = lines.len();
