@@ -10,8 +10,10 @@ use std::rc::Rc;
 
 use gpui::{
     App, Context, CursorStyle, FocusHandle, Focusable, IntoElement, KeyDownEvent,
-    ModifiersChangedEvent, ScrollHandle, Window, div, font, prelude::*,
+    ModifiersChangedEvent, ReadGlobal, ScrollHandle, Window, div, font, prelude::*,
 };
+
+use crate::title_bar::FileInfo;
 
 use crate::buffer::Buffer;
 use crate::cursor::{Cursor, Selection};
@@ -530,7 +532,9 @@ impl Editor {
                     cx.notify();
                 }
             }
-            "s" if keystroke.modifiers.control || keystroke.modifiers.platform => {}
+            "s" if keystroke.modifiers.control || keystroke.modifiers.platform => {
+                self.save(cx);
+            }
 
             _ => {
                 if let Some(key_char) = &keystroke.key_char {
@@ -639,6 +643,21 @@ impl Editor {
         self.buffer.mark_clean();
     }
 
+    /// Save the buffer to the file specified in FileInfo.
+    pub fn save(&mut self, cx: &mut Context<Self>) {
+        let file_info = FileInfo::global(cx);
+        let path = file_info.path.clone();
+        let content = self.buffer.text();
+
+        if let Err(e) = std::fs::write(&path, &content) {
+            eprintln!("Failed to save file: {}", e);
+            return;
+        }
+
+        self.buffer.mark_clean();
+        cx.notify();
+    }
+
     /// Returns true if there are actions to undo.
     pub fn can_undo(&self) -> bool {
         self.buffer.can_undo()
@@ -702,6 +721,15 @@ impl Focusable for Editor {
 
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Sync dirty state with FileInfo global for title bar
+        let file_info = FileInfo::global(cx);
+        if file_info.dirty != self.buffer.is_dirty() {
+            cx.set_global(FileInfo {
+                path: file_info.path.clone(),
+                dirty: self.buffer.is_dirty(),
+            });
+        }
+
         let theme = self.config.theme.clone();
         let line_theme = LineTheme {
             text_color: theme.foreground,

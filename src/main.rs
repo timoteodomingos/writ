@@ -173,10 +173,17 @@ fn main() {
                     run_demo(editor.clone(), cx);
                 }
 
-                cx.new(|_| Root {
-                    focus_handle,
-                    editor,
-                    theme,
+                cx.new(|cx| {
+                    cx.observe_global::<FileInfo>(|_, cx| {
+                        cx.notify();
+                    })
+                    .detach();
+
+                    Root {
+                        focus_handle,
+                        editor,
+                        theme,
+                    }
                 })
             })
             .expect("Failed to open window");
