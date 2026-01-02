@@ -146,9 +146,6 @@ fn main() {
             };
 
             cx.open_window(window_options, |window, cx| {
-                let focus_handle = cx.focus_handle();
-                focus_handle.focus(window);
-
                 // Create editor config from CLI config
                 let cli_config = cx.global::<Config>();
                 let theme = EditorTheme::dracula();
@@ -163,6 +160,9 @@ fn main() {
 
                 // Create editor with file content and config
                 let editor = cx.new(|cx| Editor::with_config(&content, editor_config, cx));
+
+                // Focus the editor so it receives keyboard input
+                editor.focus_handle(cx).focus(window);
 
                 // Start demo if in demo mode
                 if demo_mode {
@@ -180,7 +180,7 @@ fn main() {
                     .detach();
 
                     Root {
-                        focus_handle,
+                        focus_handle: cx.focus_handle(),
                         editor,
                         theme,
                     }
