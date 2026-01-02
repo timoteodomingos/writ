@@ -1,4 +1,4 @@
-use gpui::{Rgba, rgb, rgba};
+use gpui::{Rgba, rgb};
 
 use crate::highlight::HIGHLIGHT_NAMES;
 
@@ -43,7 +43,7 @@ impl EditorTheme {
         Self {
             background: rgb(0x282A36),
             foreground: rgb(0xF8F8F2),
-            selection: rgba(0x44475A99),
+            selection: rgb(0x44475A),
             comment: rgb(0x6272A4),
             red: rgb(0xFF5555),
             orange: rgb(0xFFB86C),
