@@ -68,6 +68,11 @@ impl LineMarkers {
             return String::new();
         }
 
+        // If the only marker is Indent, return empty - padding is handled by rendering
+        if self.markers.len() == 1 && matches!(self.markers[0].kind, MarkerKind::Indent) {
+            return String::new();
+        }
+
         let line_text = &text[self.range.clone()];
 
         // Find leading whitespace in the line

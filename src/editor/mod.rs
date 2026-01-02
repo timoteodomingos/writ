@@ -227,13 +227,43 @@ impl EditorState {
             let new_offset = cursor_offset + 2;
             self.selection = Selection::new(new_offset, new_offset);
         } else if line_idx > 0 {
-            // No markers on current line - get continuation from previous line
-            let prev_line = &lines[line_idx - 1];
-            let continuation = prev_line.continuation(&buffer_text);
-            if !continuation.is_empty() {
-                self.buffer.insert(line_start, &continuation, cursor_offset);
-                let new_offset = cursor_offset + continuation.len();
-                self.selection = Selection::new(new_offset, new_offset);
+            // No markers on current line - find the nearest container to nest under
+            // Walk backwards to find a line with markers (skip blank lines)
+            let mut container_line = None;
+            for i in (0..line_idx).rev() {
+                let line = &lines[i];
+                if !line.markers.is_empty() {
+                    container_line = Some(line);
+                    break;
+                }
+                // If we hit a non-empty line without markers, stop looking
+                let line_text = &buffer_text[line.range.clone()];
+                if !line_text.trim().is_empty() {
+                    break;
+                }
+            }
+
+            if let Some(container) = container_line {
+                // Check if previous line is blank (meaning we're starting a nested block)
+                let prev_line = &lines[line_idx - 1];
+                let prev_line_text = &buffer_text[prev_line.range.clone()];
+                let is_after_blank = prev_line_text.trim().is_empty();
+
+                if is_after_blank {
+                    // After blank line - just indent with spaces to nest as block
+                    let indent = " ".repeat(container.marker_width());
+                    self.buffer.insert(line_start, &indent, cursor_offset);
+                    let new_offset = cursor_offset + indent.len();
+                    self.selection = Selection::new(new_offset, new_offset);
+                } else {
+                    // Not after blank - use full continuation (adds list marker)
+                    let continuation = container.continuation(&buffer_text);
+                    if !continuation.is_empty() {
+                        self.buffer.insert(line_start, &continuation, cursor_offset);
+                        let new_offset = cursor_offset + continuation.len();
+                        self.selection = Selection::new(new_offset, new_offset);
+                    }
+                }
             }
         }
     }
@@ -386,12 +416,17 @@ impl EditorState {
         self.insert_text(&text);
     }
 
-    fn smart_backspace_range(&self, cursor_pos: usize) -> Option<std::ops::Range<usize>> {
+    /// Returns the range to delete and whether it's an Indent marker.
+    fn smart_backspace_range_with_type(
+        &self,
+        cursor_pos: usize,
+    ) -> Option<(std::ops::Range<usize>, bool)> {
         let (_, line) = self.find_line_at(cursor_pos)?;
 
         for marker in &line.markers {
             if cursor_pos == marker.range.end {
-                return Some(marker.range.clone());
+                let is_indent = matches!(marker.kind, MarkerKind::Indent);
+                return Some((marker.range.clone(), is_indent));
             }
         }
 
@@ -409,15 +444,18 @@ impl EditorState {
         } else if self.cursor().offset > 0 {
             let cursor_pos = self.cursor().offset;
 
-            if let Some(delete_range) = self.smart_backspace_range(cursor_pos) {
+            if let Some((delete_range, is_indent_marker)) =
+                self.smart_backspace_range_with_type(cursor_pos)
+            {
                 // Deleting a marker - check if we should also delete the newline
-                // to join to the previous line
+                // to join to the previous line (but NOT for Indent markers)
                 let new_pos = delete_range.start;
                 self.buffer.delete(delete_range, cursor_pos);
 
                 // If we're now at the start of a line (after a newline), delete
-                // the newline too to join to the previous line
-                if new_pos > 0 {
+                // the newline too to join to the previous line.
+                // But don't do this for Indent markers - those are just whitespace.
+                if new_pos > 0 && !is_indent_marker {
                     let text = self.buffer.text();
                     let char_before = text[..new_pos].chars().last();
                     if char_before == Some('\n') {
@@ -442,8 +480,22 @@ impl EditorState {
                     if let Some(current_line) = lines.get(line_idx) {
                         let line_text = &text[current_line.range.clone()];
                         if line_text.trim().is_empty() {
-                            // Empty line - delete all the way back to previous content
-                            // Scan backwards to find the last non-newline character
+                            // Current line is empty. Check if we should collapse multiple
+                            // newlines or just delete one.
+
+                            // Check if there are more lines after this one with content
+                            let has_content_after = lines
+                                .get(line_idx + 1)
+                                .is_some_and(|next| !text[next.range.clone()].trim().is_empty());
+
+                            if has_content_after {
+                                // There's content after - just delete one newline
+                                self.buffer.delete(cursor_pos - 1..cursor_pos, cursor_pos);
+                                self.selection = Selection::new(cursor_pos - 1, cursor_pos - 1);
+                                return;
+                            }
+
+                            // No content after - delete all the way back to previous content
                             let mut delete_start = cursor_pos;
                             let bytes = text.as_bytes();
                             while delete_start > 0 && bytes[delete_start - 1] == b'\n' {
@@ -1125,6 +1177,25 @@ impl Render for Editor {
         }
 
         let theme = self.config.theme.clone();
+        let code_font = font(&self.config.code_font);
+
+        // Measure the width of a monospace character for precise indent padding.
+        // We shape a single space character and get its width.
+        let text_style = window.text_style();
+        let font_size = text_style.font_size.to_pixels(window.rem_size());
+        let measure_run = gpui::TextRun {
+            len: 1,
+            font: code_font.clone(),
+            color: gpui::transparent_black(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        let shaped = window
+            .text_system()
+            .shape_line(" ".into(), font_size, &[measure_run], None);
+        let monospace_char_width = shaped.width;
+
         let line_theme = LineTheme {
             text_color: theme.foreground,
             cursor_color: theme.purple,
@@ -1135,7 +1206,8 @@ impl Render for Editor {
             fence_color: theme.comment,
             fence_lang_color: theme.green,
             text_font: font(&self.config.text_font),
-            code_font: font(&self.config.code_font),
+            code_font,
+            monospace_char_width,
         };
         let cursor_offset = self.state.selection.head;
         let selection_range = if self.state.selection.is_collapsed() {
@@ -1655,6 +1727,25 @@ text|"#,
   - sibling|"#,
             );
         }
+
+        #[test]
+        fn tab_after_blank_line_indents_as_block() {
+            // After blank line, tab should indent as nested block, not add marker
+            let mut state = editor_with_cursor(
+                r#"
+- item
+
+|"#,
+            );
+            state.smart_tab();
+            assert_editor_eq(
+                &state,
+                r#"
+- item
+
+  |"#,
+            );
+        }
     }
 
     mod smart_shift_tab_tests {
@@ -1914,6 +2005,47 @@ plain text|"#,
                 &state,
                 r#"
 - item one|"#,
+            );
+        }
+
+        #[test]
+        fn backspace_on_nested_paragraph_deletes_one_newline() {
+            // When on indented paragraph after blank line, backspace should only
+            // delete one newline, not collapse all the way to the list item
+            let mut state = editor_with_cursor(
+                r#"
+- item
+
+  |paragraph"#,
+            );
+            state.delete_backward();
+            assert_editor_eq(
+                &state,
+                r#"
+- item
+
+|paragraph"#,
+            );
+        }
+
+        #[test]
+        fn backspace_on_blank_line_before_nested_paragraph() {
+            // Backspace on blank line between list and paragraph should
+            // only delete one newline
+            let mut state = editor_with_cursor(
+                r#"
+- item
+
+|
+  paragraph"#,
+            );
+            state.delete_backward();
+            assert_editor_eq(
+                &state,
+                r#"
+- item
+|
+  paragraph"#,
             );
         }
     }

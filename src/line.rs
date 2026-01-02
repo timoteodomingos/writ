@@ -95,6 +95,9 @@ pub struct LineTheme {
     pub fence_lang_color: Rgba,
     pub text_font: Font,
     pub code_font: Font,
+    /// Width of a single monospace character in the code font.
+    /// Used for precise indentation of nested blocks.
+    pub monospace_char_width: gpui::Pixels,
 }
 
 pub struct Line<'a> {
@@ -858,6 +861,11 @@ impl IntoElement for Line<'_> {
             }
         }
 
+        // If the only marker is Indent (nested block like paragraph under list item),
+        // add left padding so wrapped lines align properly.
+        let needs_indent_padding =
+            self.line.markers.len() == 1 && matches!(self.line.markers[0].kind, MarkerKind::Indent);
+
         let mut text_container = div().relative().child(styled_text);
 
         if let Some(cursor_pos) = visual_cursor_pos {
@@ -865,7 +873,13 @@ impl IntoElement for Line<'_> {
                 text_container.child(self.render_cursor(cursor_pos, text_layout.clone()));
         }
 
-        line_div = line_div.child(text_container);
+        if needs_indent_padding {
+            // Indent is 2 monospace spaces, so multiply width by 2
+            let indent_width = self.theme.monospace_char_width * 2.0;
+            line_div = line_div.pl(indent_width).child(text_container);
+        } else {
+            line_div = line_div.child(text_container);
+        }
 
         if let Some(ref on_click) = self.on_click {
             let on_click = on_click.clone();
