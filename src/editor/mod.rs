@@ -207,7 +207,22 @@ impl EditorState {
         let current_has_markers = !current_line.markers.is_empty();
 
         if current_has_markers {
-            // Line already has markers - increase nesting by adding 2 spaces at start
+            // Line already has markers - check if we can nest deeper
+            // Can only nest one level deeper than previous line
+            if line_idx > 0 {
+                let prev_line = &lines[line_idx - 1];
+                let prev_marker_width = prev_line.marker_width();
+                let current_marker_width = current_line.marker_width();
+
+                // Can only indent if current indent is less than prev + one nesting level
+                // One nesting level is typically 2 spaces
+                if current_marker_width >= prev_marker_width + 2 {
+                    // Already at max nesting, do nothing
+                    return;
+                }
+            }
+
+            // Increase nesting by adding 2 spaces at start
             self.buffer.insert(line_start, "  ", cursor_offset);
             let new_offset = cursor_offset + 2;
             self.selection = Selection::new(new_offset, new_offset);
@@ -328,21 +343,21 @@ impl EditorState {
             .unwrap_or(0);
         let content_after_marker = line_text[marker_end..].trim();
 
-        // If line is empty after markers and we're not the first line,
-        // don't remove structure (would create invalid state)
-        if content_after_marker.is_empty() && line_idx > 0 {
-            return;
-        }
-
-        // Check if line starts with indentation (2 spaces)
+        // Check if line starts with indentation (2 spaces) - this means it's nested
         if line_text.starts_with("  ") {
-            // Remove 2 spaces of indentation
+            // Unnesting is always valid - remove 2 spaces of indentation
             let delete_start = current_line.range.start;
             let delete_end = delete_start + 2;
             self.buffer.delete(delete_start..delete_end, cursor_offset);
             let new_offset = cursor_offset.saturating_sub(2);
             self.selection = Selection::new(new_offset, new_offset);
         } else {
+            // Line is at root level - removing the marker would leave an empty line
+            // after the previous container, which is invalid
+            if content_after_marker.is_empty() && line_idx > 0 {
+                return;
+            }
+
             // Remove the innermost (first) marker
             // Markers are stored innermost to outermost
             let innermost = &current_line.markers[0];
@@ -1597,6 +1612,49 @@ text|"#,
   - |"#,
             );
         }
+
+        #[test]
+        fn tab_on_already_nested_item_does_nothing() {
+            // Can only nest one level deeper than previous line
+            let mut state = editor_with_cursor(
+                r#"
+- item
+  - nested|"#,
+            );
+            state.smart_tab();
+            // Should not change - already at max nesting
+            assert_editor_eq(
+                &state,
+                r#"
+- item
+  - nested|"#,
+            );
+        }
+
+        #[test]
+        fn tab_on_sibling_can_nest() {
+            // Sibling at same level can nest once
+            let mut state = editor_with_cursor(
+                r#"
+- item
+- sibling|"#,
+            );
+            state.smart_tab();
+            assert_editor_eq(
+                &state,
+                r#"
+- item
+  - sibling|"#,
+            );
+            // But not twice
+            state.smart_tab();
+            assert_editor_eq(
+                &state,
+                r#"
+- item
+  - sibling|"#,
+            );
+        }
     }
 
     mod smart_shift_tab_tests {
@@ -1665,6 +1723,23 @@ item|"#,
                 r#"
 - item
 - |"#,
+            );
+            state.smart_shift_tab();
+            assert_editor_eq(
+                &state,
+                r#"
+- item
+- |"#,
+            );
+        }
+
+        #[test]
+        fn shift_tab_on_empty_nested_list_item_unnests() {
+            // Unnesting is valid - becomes sibling, not empty line
+            let mut state = editor_with_cursor(
+                r#"
+- item
+  - |"#,
             );
             state.smart_shift_tab();
             assert_editor_eq(
