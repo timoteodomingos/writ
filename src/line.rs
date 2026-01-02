@@ -281,6 +281,75 @@ impl<'a> Line<'a> {
         None
     }
 
+    /// Apply selection background color to text runs that overlap with the selection range.
+    /// This modifies runs in-place, splitting them if needed to correctly highlight
+    /// only the selected portion.
+    fn apply_selection_to_runs(
+        &self,
+        runs: Vec<TextRun>,
+        selection_range: Range<usize>,
+    ) -> Vec<TextRun> {
+        let selection_color: Hsla = self.theme.selection_color.into();
+        let mut result = Vec::new();
+        let mut pos = 0;
+
+        for run in runs {
+            let run_start = pos;
+            let run_end = pos + run.len;
+
+            // Check if this run overlaps with the selection
+            if run_end <= selection_range.start || run_start >= selection_range.end {
+                // No overlap, keep run as-is
+                result.push(run);
+            } else {
+                // There's overlap - we may need to split the run
+                let sel_start_in_run = selection_range.start.saturating_sub(run_start);
+                let sel_end_in_run = (selection_range.end - run_start).min(run.len);
+
+                // Part before selection (if any)
+                if sel_start_in_run > 0 {
+                    result.push(TextRun {
+                        len: sel_start_in_run,
+                        font: run.font.clone(),
+                        color: run.color,
+                        background_color: run.background_color,
+                        underline: run.underline.clone(),
+                        strikethrough: run.strikethrough.clone(),
+                    });
+                }
+
+                // Selected part
+                let selected_len = sel_end_in_run - sel_start_in_run;
+                if selected_len > 0 {
+                    result.push(TextRun {
+                        len: selected_len,
+                        font: run.font.clone(),
+                        color: run.color,
+                        background_color: Some(selection_color),
+                        underline: run.underline.clone(),
+                        strikethrough: run.strikethrough.clone(),
+                    });
+                }
+
+                // Part after selection (if any)
+                if sel_end_in_run < run.len {
+                    result.push(TextRun {
+                        len: run.len - sel_end_in_run,
+                        font: run.font.clone(),
+                        color: run.color,
+                        background_color: run.background_color,
+                        underline: run.underline,
+                        strikethrough: run.strikethrough,
+                    });
+                }
+            }
+
+            pos = run_end;
+        }
+
+        result
+    }
+
     fn build_styled_content(&self) -> (String, Vec<TextRun>) {
         let content_range = self.content_range();
 
@@ -620,78 +689,6 @@ impl<'a> Line<'a> {
         }
     }
 
-    fn render_selection(
-        &self,
-        visual_range: Range<usize>,
-        text_layout: gpui::TextLayout,
-    ) -> impl IntoElement {
-        let selection_color = self.theme.selection_color;
-
-        canvas(
-            move |bounds, _window, _cx| {
-                let start_pos = text_layout.position_for_index(visual_range.start);
-                let end_pos = text_layout.position_for_index(visual_range.end);
-                (start_pos, end_pos, bounds)
-            },
-            move |_bounds, data, window: &mut Window, _cx| {
-                let (start_opt, end_opt, _bounds) = data;
-                if let (Some(start), Some(end)) = (start_opt, end_opt) {
-                    let text_style = window.text_style();
-                    let font_size = text_style.font_size.to_pixels(window.rem_size());
-                    let line_height = text_style
-                        .line_height
-                        .to_pixels(font_size.into(), window.rem_size());
-
-                    if start.y == end.y {
-                        let rect = gpui::Bounds {
-                            origin: point(start.x, start.y),
-                            size: gpui::Size {
-                                width: end.x - start.x,
-                                height: line_height,
-                            },
-                        };
-                        window.paint_quad(gpui::fill(rect, selection_color));
-                    } else {
-                        let full_width = px(10000.0);
-
-                        let first_rect = gpui::Bounds {
-                            origin: point(start.x, start.y),
-                            size: gpui::Size {
-                                width: full_width,
-                                height: line_height,
-                            },
-                        };
-                        window.paint_quad(gpui::fill(first_rect, selection_color));
-
-                        let mut y = start.y + line_height;
-                        while y < end.y {
-                            let mid_rect = gpui::Bounds {
-                                origin: point(px(0.0), y),
-                                size: gpui::Size {
-                                    width: full_width,
-                                    height: line_height,
-                                },
-                            };
-                            window.paint_quad(gpui::fill(mid_rect, selection_color));
-                            y += line_height;
-                        }
-
-                        let last_rect = gpui::Bounds {
-                            origin: point(px(0.0), end.y),
-                            size: gpui::Size {
-                                width: end.x,
-                                height: line_height,
-                            },
-                        };
-                        window.paint_quad(gpui::fill(last_rect, selection_color));
-                    }
-                }
-            },
-        )
-        .absolute()
-        .size_full()
-    }
-
     fn render_cursor(&self, cursor_pos: usize, text_layout: gpui::TextLayout) -> impl IntoElement {
         let cursor_color = self.theme.cursor_color;
 
@@ -766,6 +763,13 @@ impl IntoElement for Line<'_> {
         };
 
         let visual_selection = self.compute_visual_selection_range(&display_text);
+
+        // Apply selection background color to runs
+        let runs = if let Some(ref sel_range) = visual_selection {
+            self.apply_selection_to_runs(runs, sel_range.clone())
+        } else {
+            runs
+        };
 
         let shared_text: SharedString = display_text.into();
         let styled_text = StyledText::new(shared_text).with_runs(runs);
@@ -855,11 +859,6 @@ impl IntoElement for Line<'_> {
         }
 
         let mut text_container = div().relative().child(styled_text);
-
-        if let Some(sel_range) = visual_selection {
-            text_container =
-                text_container.child(self.render_selection(sel_range, text_layout.clone()));
-        }
 
         if let Some(cursor_pos) = visual_cursor_pos {
             text_container =

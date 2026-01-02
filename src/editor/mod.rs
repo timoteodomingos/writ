@@ -735,11 +735,7 @@ impl Render for Editor {
             text_color: theme.foreground,
             cursor_color: theme.purple,
             link_color: theme.cyan,
-            selection_color: {
-                let mut c = theme.selection;
-                c.a = 0.4;
-                c
-            },
+            selection_color: theme.selection,
             border_color: theme.comment,
             code_color: theme.pink,
             fence_color: theme.comment,
