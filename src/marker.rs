@@ -1154,4 +1154,167 @@ mod tests {
                 .any(|m| matches!(m.kind, MarkerKind::Indent))
         );
     }
+
+    // ========================================================================
+    // Tests for marker detection with/without trailing whitespace
+    // ========================================================================
+
+    #[test]
+    fn test_blockquote_with_space() {
+        let buf: Buffer = "> text\n".parse().unwrap();
+        let lines = extract_lines(&buf);
+        assert_eq!(kinds(&lines[0].markers), vec![&MarkerKind::BlockQuote]);
+    }
+
+    #[test]
+    fn test_blockquote_without_space() {
+        // Does ">text" (no space after >) get recognized as blockquote?
+        let buf: Buffer = ">text\n".parse().unwrap();
+        let text = buf.text();
+        let tree = buf.tree().unwrap();
+        let root = tree.block_tree().root_node();
+        print_tree(&root, &text, 0);
+
+        let lines = extract_lines(&buf);
+        println!("Markers for '>text': {:?}", lines[0].markers);
+        // Result: YES, blockquote is recognized without space
+        assert_eq!(kinds(&lines[0].markers), vec![&MarkerKind::BlockQuote]);
+    }
+
+    #[test]
+    fn test_unordered_list_minus_with_space() {
+        let buf: Buffer = "- text\n".parse().unwrap();
+        let lines = extract_lines(&buf);
+        assert_eq!(
+            kinds(&lines[0].markers),
+            vec![&MarkerKind::ListItem { ordered: false }]
+        );
+    }
+
+    #[test]
+    fn test_unordered_list_minus_without_space() {
+        // Does "-text" (no space after -) get recognized as list?
+        let buf: Buffer = "-text\n".parse().unwrap();
+        let text = buf.text();
+        let tree = buf.tree().unwrap();
+        let root = tree.block_tree().root_node();
+        print_tree(&root, &text, 0);
+
+        let lines = extract_lines(&buf);
+        println!("Markers for '-text': {:?}", lines[0].markers);
+        // Result: NO, list is NOT recognized without space
+        assert_eq!(kinds(&lines[0].markers), vec![] as Vec<&MarkerKind>);
+    }
+
+    #[test]
+    fn test_unordered_list_star_with_space() {
+        let buf: Buffer = "* text\n".parse().unwrap();
+        let lines = extract_lines(&buf);
+        assert_eq!(
+            kinds(&lines[0].markers),
+            vec![&MarkerKind::ListItem { ordered: false }]
+        );
+    }
+
+    #[test]
+    fn test_unordered_list_star_without_space() {
+        // Does "*text" (no space after *) get recognized as list?
+        let buf: Buffer = "*text\n".parse().unwrap();
+        let text = buf.text();
+        let tree = buf.tree().unwrap();
+        let root = tree.block_tree().root_node();
+        print_tree(&root, &text, 0);
+
+        let lines = extract_lines(&buf);
+        println!("Markers for '*text': {:?}", lines[0].markers);
+        // Result: NO, list is NOT recognized without space (parsed as emphasis)
+        assert_eq!(kinds(&lines[0].markers), vec![] as Vec<&MarkerKind>);
+    }
+
+    #[test]
+    fn test_unordered_list_plus_with_space() {
+        let buf: Buffer = "+ text\n".parse().unwrap();
+        let lines = extract_lines(&buf);
+        assert_eq!(
+            kinds(&lines[0].markers),
+            vec![&MarkerKind::ListItem { ordered: false }]
+        );
+    }
+
+    #[test]
+    fn test_unordered_list_plus_without_space() {
+        // Does "+text" (no space after +) get recognized as list?
+        let buf: Buffer = "+text\n".parse().unwrap();
+        let text = buf.text();
+        let tree = buf.tree().unwrap();
+        let root = tree.block_tree().root_node();
+        print_tree(&root, &text, 0);
+
+        let lines = extract_lines(&buf);
+        println!("Markers for '+text': {:?}", lines[0].markers);
+        // Result: NO, list is NOT recognized without space
+        assert_eq!(kinds(&lines[0].markers), vec![] as Vec<&MarkerKind>);
+    }
+
+    #[test]
+    fn test_ordered_list_with_space() {
+        let buf: Buffer = "1. text\n".parse().unwrap();
+        let lines = extract_lines(&buf);
+        assert_eq!(
+            kinds(&lines[0].markers),
+            vec![&MarkerKind::ListItem { ordered: true }]
+        );
+    }
+
+    #[test]
+    fn test_ordered_list_without_space() {
+        // Does "1.text" (no space after .) get recognized as list?
+        let buf: Buffer = "1.text\n".parse().unwrap();
+        let text = buf.text();
+        let tree = buf.tree().unwrap();
+        let root = tree.block_tree().root_node();
+        print_tree(&root, &text, 0);
+
+        let lines = extract_lines(&buf);
+        println!("Markers for '1.text': {:?}", lines[0].markers);
+        // Result: NO, list is NOT recognized without space
+        assert_eq!(kinds(&lines[0].markers), vec![] as Vec<&MarkerKind>);
+    }
+
+    #[test]
+    fn test_heading_with_space() {
+        let buf: Buffer = "# text\n".parse().unwrap();
+        let lines = extract_lines(&buf);
+        assert_eq!(kinds(&lines[0].markers), vec![&MarkerKind::Heading(1)]);
+    }
+
+    #[test]
+    fn test_heading_without_space() {
+        // Does "#text" (no space after #) get recognized as heading?
+        let buf: Buffer = "#text\n".parse().unwrap();
+        let text = buf.text();
+        let tree = buf.tree().unwrap();
+        let root = tree.block_tree().root_node();
+        print_tree(&root, &text, 0);
+
+        let lines = extract_lines(&buf);
+        println!("Markers for '#text': {:?}", lines[0].markers);
+        // Result: NO, heading is NOT recognized without space
+        assert_eq!(kinds(&lines[0].markers), vec![] as Vec<&MarkerKind>);
+    }
+
+    #[test]
+    fn test_heading_h2_without_space() {
+        // Does "##text" (no space after ##) get recognized as heading?
+        let buf: Buffer = "##text\n".parse().unwrap();
+        let text = buf.text();
+        let tree = buf.tree().unwrap();
+        let root = tree.block_tree().root_node();
+        print_tree(&root, &text, 0);
+
+        let lines = extract_lines(&buf);
+        println!("Markers for '##text': {:?}", lines[0].markers);
+        // Result: NO, heading is NOT recognized without space
+        assert_eq!(kinds(&lines[0].markers), vec![] as Vec<&MarkerKind>);
+    }
 }

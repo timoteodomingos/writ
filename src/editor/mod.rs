@@ -19,7 +19,7 @@ use crate::buffer::Buffer;
 use crate::cursor::{Cursor, Selection};
 use crate::line::{CheckboxCallback, ClickCallback, DragCallback, HoverCallback, Line, LineTheme};
 use crate::lines::extract_inline_styles;
-use crate::marker::{LineMarkers, find_container_indent_from_lines};
+use crate::marker::{LineMarkers, MarkerKind};
 
 type CodeBlockRange = (usize, Option<usize>);
 
@@ -34,9 +34,432 @@ type CodeBlockRange = (usize, Option<usize>);
 /// ```ignore
 /// let editor = cx.new(|cx| Editor::new("# Hello, world!", cx));
 /// ```
+/// Core editing state that can be used without GPUI context.
+/// This contains the buffer and selection, and all editing logic.
+pub struct EditorState {
+    pub buffer: Buffer,
+    pub selection: Selection,
+}
+
+impl EditorState {
+    pub fn new(content: &str) -> Self {
+        let buffer: Buffer = content.parse().unwrap_or_default();
+        Self {
+            buffer,
+            selection: Selection::new(0, 0),
+        }
+    }
+
+    pub fn cursor(&self) -> Cursor {
+        self.selection.cursor()
+    }
+
+    pub fn text(&self) -> String {
+        self.buffer.text()
+    }
+
+    /// Set cursor position by byte offset.
+    pub fn set_cursor(&mut self, offset: usize) {
+        let offset = offset.min(self.buffer.len_bytes());
+        self.selection = Selection::new(offset, offset);
+    }
+
+    /// Insert text at the current cursor position.
+    pub fn insert_text(&mut self, text: &str) {
+        let cursor_before = self.cursor().offset;
+        let insert_pos = if !self.selection.is_collapsed() {
+            let range = self.selection.range();
+            self.buffer.delete(range.clone(), cursor_before);
+            range.start
+        } else {
+            cursor_before
+        };
+        self.buffer.insert(insert_pos, text, insert_pos);
+        let new_pos = insert_pos + text.len();
+        self.selection = Selection::new(new_pos, new_pos);
+    }
+
+    fn find_line_at(&self, byte_pos: usize) -> Option<(usize, &LineMarkers)> {
+        let idx = self.buffer.byte_to_line(byte_pos);
+        self.buffer.lines().get(idx).map(|line| (idx, line))
+    }
+
+    /// Check if cursor is at end of a "pending marker" (e.g., `*|` or `1.|`)
+    /// that would become a list marker if we added a space.
+    /// Returns true if we should auto-complete the marker.
+    fn is_pending_marker(&self, cursor_pos: usize) -> bool {
+        let line_idx = self.buffer.byte_to_line(cursor_pos);
+        let lines = self.buffer.lines();
+        let Some(current_line) = lines.get(line_idx) else {
+            return false;
+        };
+
+        // Only applies if line has no markers yet
+        if !current_line.markers.is_empty() {
+            return false;
+        }
+
+        // Get the line content up to cursor
+        let line_start = current_line.range.start;
+        if cursor_pos < line_start {
+            return false;
+        }
+
+        let text = self.buffer.text();
+        let line_to_cursor = &text[line_start..cursor_pos];
+
+        // Check for pending unordered marker: *, -, +
+        if line_to_cursor == "*" || line_to_cursor == "-" || line_to_cursor == "+" {
+            return true;
+        }
+
+        // Check for pending ordered marker: digits followed by .
+        if line_to_cursor.ends_with('.') {
+            let before_dot = &line_to_cursor[..line_to_cursor.len() - 1];
+            if !before_dot.is_empty() && before_dot.chars().all(|c| c.is_ascii_digit()) {
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Complete a pending marker by inserting a space.
+    fn complete_pending_marker(&mut self) {
+        self.insert_text(" ");
+    }
+
+    /// Auto-insert space after `>` if it just became a blockquote marker.
+    /// This prevents the user from typing `>text` when they meant `> text`.
+    /// Returns true if a space was inserted.
+    pub fn maybe_complete_blockquote_marker(&mut self) -> bool {
+        let cursor_pos = self.cursor().offset;
+        if cursor_pos == 0 {
+            return false;
+        }
+
+        // The character right before cursor should be `>`
+        let text = self.buffer.text();
+        let prev_char = text.as_bytes().get(cursor_pos - 1);
+        if prev_char != Some(&b'>') {
+            return false;
+        }
+
+        // Check if the marker already has a trailing space
+        let next_char = text.as_bytes().get(cursor_pos);
+        if next_char == Some(&b' ') {
+            return false;
+        }
+
+        let lines = self.buffer.lines();
+        let line_idx = self.buffer.byte_to_line(cursor_pos);
+        let Some(line) = lines.get(line_idx) else {
+            return false;
+        };
+
+        // Check if this line has a blockquote marker
+        let has_blockquote = line
+            .markers
+            .iter()
+            .any(|m| matches!(m.kind, MarkerKind::BlockQuote));
+
+        if !has_blockquote {
+            return false;
+        }
+
+        // Insert a space after the `>`
+        self.insert_text(" ");
+        true
+    }
+
+    fn compute_smart_enter_text(&self, cursor_pos: usize) -> String {
+        let lines = self.buffer.lines();
+        let cursor_line_idx = self.buffer.byte_to_line(cursor_pos);
+
+        let Some(line_info) = lines.get(cursor_line_idx) else {
+            return "\n".to_string();
+        };
+
+        let buffer_text = self.buffer.text();
+        let continuation = line_info.continuation(&buffer_text);
+        if continuation.is_empty() {
+            "\n".to_string()
+        } else {
+            format!("\n{}", continuation)
+        }
+    }
+
+    /// Smart tab: adds structure based on context.
+    /// - On empty line after container: adds continuation (e.g., "- ")
+    /// - On line with markers: increases nesting by adding indentation
+    /// - On plain text adjacent to container: adds the container's marker
+    pub fn smart_tab(&mut self) {
+        let cursor_offset = self.cursor().offset;
+        let line_idx = self.buffer.byte_to_line(cursor_offset);
+        let lines = self.buffer.lines();
+        let buffer_text = self.buffer.text();
+
+        let Some(current_line) = lines.get(line_idx) else {
+            return;
+        };
+
+        let line_start = current_line.range.start;
+        let current_has_markers = !current_line.markers.is_empty();
+
+        if current_has_markers {
+            // Line already has markers - increase nesting by adding 2 spaces at start
+            self.buffer.insert(line_start, "  ", cursor_offset);
+            let new_offset = cursor_offset + 2;
+            self.selection = Selection::new(new_offset, new_offset);
+        } else if line_idx > 0 {
+            // No markers on current line - get continuation from previous line
+            let prev_line = &lines[line_idx - 1];
+            let continuation = prev_line.continuation(&buffer_text);
+            if !continuation.is_empty() {
+                self.buffer.insert(line_start, &continuation, cursor_offset);
+                let new_offset = cursor_offset + continuation.len();
+                self.selection = Selection::new(new_offset, new_offset);
+            }
+        }
+    }
+
+    /// Smart enter: creates sibling or exits container.
+    /// - On line with content: creates sibling with same structure
+    /// - On empty container line: exits the innermost container
+    pub fn smart_enter(&mut self) {
+        // Auto-complete pending markers like `*|` → `* |`
+        // After completing, use shift_enter logic (create sibling) since user
+        // just created the marker and wants to continue the list
+        if self.is_pending_marker(self.cursor().offset) {
+            self.complete_pending_marker();
+            let text = self.compute_smart_enter_text(self.cursor().offset);
+            self.insert_text(&text);
+            return;
+        }
+
+        let cursor_offset = self.cursor().offset;
+        let line_idx = self.buffer.byte_to_line(cursor_offset);
+        let lines = self.buffer.lines();
+
+        let Some(current_line) = lines.get(line_idx) else {
+            self.insert_text("\n");
+            return;
+        };
+
+        // Check if line is empty after markers
+        let buffer_text = self.buffer.text();
+        let line_text = &buffer_text[current_line.range.clone()];
+        let marker_end = current_line
+            .marker_range()
+            .map(|r| r.end - current_line.range.start)
+            .unwrap_or(0);
+        let content_after_marker = line_text[marker_end..].trim();
+
+        if content_after_marker.is_empty() && !current_line.markers.is_empty() {
+            // Empty container line - exit the innermost container
+            // Delete the innermost marker and insert newline with remaining structure
+            let innermost = &current_line.markers[0];
+            let delete_range = innermost.range.clone();
+
+            // Calculate what continuation remains after removing innermost
+            // Need to compute this BEFORE deleting, using the original buffer text
+            let remaining_continuation: String = current_line
+                .markers
+                .iter()
+                .skip(1) // Skip innermost
+                .rev() // Markers are innermost to outermost, so reverse for text order
+                .map(|m| match &m.kind {
+                    crate::marker::MarkerKind::Indent
+                    | crate::marker::MarkerKind::ListItem { .. } => {
+                        buffer_text[m.range.clone()].to_string()
+                    }
+                    _ => m.kind.continuation().to_string(),
+                })
+                .collect();
+
+            // Delete the innermost marker
+            let delete_len = delete_range.len();
+            self.buffer.delete(delete_range, cursor_offset);
+
+            // Cursor moves back by the deleted length
+            let new_cursor = cursor_offset - delete_len;
+            self.selection = Selection::new(new_cursor, new_cursor);
+
+            // Insert newline with remaining continuation
+            if remaining_continuation.is_empty() {
+                self.buffer.insert(new_cursor, "\n", new_cursor);
+                self.selection = Selection::new(new_cursor + 1, new_cursor + 1);
+            } else {
+                let insert_text = format!("\n{}", remaining_continuation);
+                self.buffer.insert(new_cursor, &insert_text, new_cursor);
+                let new_offset = new_cursor + insert_text.len();
+                self.selection = Selection::new(new_offset, new_offset);
+            }
+        } else {
+            // Line has content - create sibling
+            let text = self.compute_smart_enter_text(cursor_offset);
+            self.insert_text(&text);
+        }
+    }
+
+    /// Smart shift-tab: removes structure.
+    /// - On nested line: removes one level of indentation
+    /// - On line with markers: removes the innermost marker
+    /// - Does nothing if result would be invalid (empty line after container)
+    pub fn smart_shift_tab(&mut self) {
+        let cursor_offset = self.cursor().offset;
+        let line_idx = self.buffer.byte_to_line(cursor_offset);
+        let lines = self.buffer.lines();
+
+        let Some(current_line) = lines.get(line_idx) else {
+            return;
+        };
+
+        // No markers = nothing to remove
+        if current_line.markers.is_empty() {
+            return;
+        }
+
+        // Check if line has content after the markers
+        let line_text = &self.buffer.text()[current_line.range.clone()];
+        let marker_end = current_line
+            .marker_range()
+            .map(|r| r.end - current_line.range.start)
+            .unwrap_or(0);
+        let content_after_marker = line_text[marker_end..].trim();
+
+        // If line is empty after markers and we're not the first line,
+        // don't remove structure (would create invalid state)
+        if content_after_marker.is_empty() && line_idx > 0 {
+            return;
+        }
+
+        // Check if line starts with indentation (2 spaces)
+        if line_text.starts_with("  ") {
+            // Remove 2 spaces of indentation
+            let delete_start = current_line.range.start;
+            let delete_end = delete_start + 2;
+            self.buffer.delete(delete_start..delete_end, cursor_offset);
+            let new_offset = cursor_offset.saturating_sub(2);
+            self.selection = Selection::new(new_offset, new_offset);
+        } else {
+            // Remove the innermost (first) marker
+            // Markers are stored innermost to outermost
+            let innermost = &current_line.markers[0];
+            let delete_range = innermost.range.clone();
+            let delete_len = delete_range.len();
+            self.buffer.delete(delete_range, cursor_offset);
+            let new_offset = cursor_offset.saturating_sub(delete_len);
+            self.selection = Selection::new(new_offset, new_offset);
+        }
+    }
+
+    /// Plain enter: just inserts a newline.
+    pub fn enter(&mut self) {
+        self.insert_text("\n");
+    }
+
+    /// Shift+Enter: always creates a sibling (maintains current continuation).
+    /// Unlike smart_enter which exits on empty container lines.
+    pub fn shift_enter(&mut self) {
+        // Auto-complete pending markers like `*|` → `* |`
+        if self.is_pending_marker(self.cursor().offset) {
+            self.complete_pending_marker();
+        }
+
+        let text = self.compute_smart_enter_text(self.cursor().offset);
+        self.insert_text(&text);
+    }
+
+    fn smart_backspace_range(&self, cursor_pos: usize) -> Option<std::ops::Range<usize>> {
+        let (_, line) = self.find_line_at(cursor_pos)?;
+
+        for marker in &line.markers {
+            if cursor_pos == marker.range.end {
+                return Some(marker.range.clone());
+            }
+        }
+
+        None
+    }
+
+    /// Delete backward (backspace).
+    /// - When on an empty container line (just marker, no content), deletes the
+    ///   marker AND the preceding newline to join back to the previous line.
+    /// - When on an empty line (just whitespace/newlines), joins to the previous
+    ///   line's content.
+    pub fn delete_backward(&mut self) {
+        if !self.selection.is_collapsed() {
+            self.delete_selection();
+        } else if self.cursor().offset > 0 {
+            let cursor_pos = self.cursor().offset;
+
+            if let Some(delete_range) = self.smart_backspace_range(cursor_pos) {
+                // Deleting a marker - check if we should also delete the newline
+                // to join to the previous line
+                let new_pos = delete_range.start;
+                self.buffer.delete(delete_range, cursor_pos);
+
+                // If we're now at the start of a line (after a newline), delete
+                // the newline too to join to the previous line
+                if new_pos > 0 {
+                    let text = self.buffer.text();
+                    let char_before = text[..new_pos].chars().last();
+                    if char_before == Some('\n') {
+                        // Delete the newline
+                        self.buffer.delete(new_pos - 1..new_pos, new_pos);
+                        self.selection = Selection::new(new_pos - 1, new_pos - 1);
+                    } else {
+                        self.selection = Selection::new(new_pos, new_pos);
+                    }
+                } else {
+                    self.selection = Selection::new(new_pos, new_pos);
+                }
+            } else {
+                // Check if we're on an empty line - if so, join to previous content
+                let text = self.buffer.text();
+                let char_before = text[..cursor_pos].chars().last();
+
+                if char_before == Some('\n') {
+                    // We're at the start of a line. Check if this line is empty.
+                    let line_idx = self.buffer.byte_to_line(cursor_pos);
+                    let lines = self.buffer.lines();
+                    if let Some(current_line) = lines.get(line_idx) {
+                        let line_text = &text[current_line.range.clone()];
+                        if line_text.trim().is_empty() {
+                            // Empty line - delete all the way back to previous content
+                            // Scan backwards to find the last non-newline character
+                            let mut delete_start = cursor_pos;
+                            let bytes = text.as_bytes();
+                            while delete_start > 0 && bytes[delete_start - 1] == b'\n' {
+                                delete_start -= 1;
+                            }
+                            self.buffer.delete(delete_start..cursor_pos, cursor_pos);
+                            self.selection = Selection::new(delete_start, delete_start);
+                            return;
+                        }
+                    }
+                }
+
+                // Normal backspace - delete one character
+                let new_cursor = self.cursor().move_left(&self.buffer);
+                self.buffer
+                    .delete(new_cursor.offset..cursor_pos, cursor_pos);
+                self.selection = Selection::new(new_cursor.offset, new_cursor.offset);
+            }
+        }
+    }
+
+    fn delete_selection(&mut self) {
+        let range = self.selection.range();
+        let cursor_before = self.cursor().offset;
+        self.buffer.delete(range.clone(), cursor_before);
+        self.selection = Selection::new(range.start, range.start);
+    }
+}
+
 pub struct Editor {
-    buffer: Buffer,
-    selection: Selection,
+    state: EditorState,
     focus_handle: FocusHandle,
     scroll_handle: ScrollHandle,
     cursor_child_index: Option<usize>,
@@ -60,14 +483,11 @@ impl Editor {
 
     /// Create a new editor with the given content and configuration.
     pub fn with_config(content: &str, config: EditorConfig, cx: &mut Context<Self>) -> Self {
-        let buffer: Buffer = content.parse().unwrap_or_default();
         let focus_handle = cx.focus_handle();
-
         let scroll_handle = ScrollHandle::new();
 
         Self {
-            buffer,
-            selection: Selection::new(0, 0),
+            state: EditorState::new(content),
             focus_handle,
             scroll_handle,
             cursor_child_index: None,
@@ -83,23 +503,23 @@ impl Editor {
 
     /// Returns the buffer contents as a string.
     pub fn text(&self) -> String {
-        self.buffer.text()
+        self.state.buffer.text()
     }
 
     /// Returns the length of the buffer in bytes.
     pub fn len(&self) -> usize {
-        self.buffer.len_bytes()
+        self.state.buffer.len_bytes()
     }
 
     /// Returns true if the buffer is empty.
     pub fn is_empty(&self) -> bool {
-        self.buffer.len_bytes() == 0
+        self.state.buffer.len_bytes() == 0
     }
 
     /// Replace the entire buffer contents, resetting cursor to the start.
     pub fn set_text(&mut self, content: &str, cx: &mut Context<Self>) {
-        self.buffer = content.parse().unwrap_or_default();
-        self.selection = Selection::new(0, 0);
+        self.state.buffer = content.parse().unwrap_or_default();
+        self.state.selection = Selection::new(0, 0);
         cx.notify();
     }
 
@@ -113,10 +533,10 @@ impl Editor {
     ///
     /// Useful for streaming content from an AI or other source.
     pub fn append(&mut self, text: &str, cx: &mut Context<Self>) {
-        let end = self.buffer.len_bytes();
-        self.buffer.insert(end, text, end);
-        let new_end = self.buffer.len_bytes();
-        self.selection = Selection::new(new_end, new_end);
+        let end = self.state.buffer.len_bytes();
+        self.state.buffer.insert(end, text, end);
+        let new_end = self.state.buffer.len_bytes();
+        self.state.selection = Selection::new(new_end, new_end);
         cx.notify();
     }
 
@@ -127,20 +547,20 @@ impl Editor {
     }
 
     fn cursor(&self) -> Cursor {
-        self.selection.cursor()
+        self.state.selection.cursor()
     }
 
     fn move_cursor(&mut self, new_cursor: Cursor, extend: bool) {
         if extend {
-            self.selection = self.selection.extend_to(new_cursor.offset);
+            self.state.selection = self.state.selection.extend_to(new_cursor.offset);
         } else {
-            self.selection = Selection::new(new_cursor.offset, new_cursor.offset);
+            self.state.selection = Selection::new(new_cursor.offset, new_cursor.offset);
         }
     }
 
     fn find_line_at(&self, byte_pos: usize) -> Option<(usize, &LineMarkers)> {
-        let idx = self.buffer.byte_to_line(byte_pos);
-        self.buffer.lines().get(idx).map(|line| (idx, line))
+        let idx = self.state.buffer.byte_to_line(byte_pos);
+        self.state.buffer.lines().get(idx).map(|line| (idx, line))
     }
 
     fn perform_pending_scroll(&mut self, margin: gpui::Pixels) {
@@ -185,45 +605,21 @@ impl Editor {
         self.scroll_to_cursor_pending = true;
     }
 
-    fn compute_smart_enter_text(&self, cursor_pos: usize) -> String {
-        let lines = self.buffer.lines();
-        let cursor_line_idx = self.buffer.byte_to_line(cursor_pos);
-
-        let Some(line_info) = lines.get(cursor_line_idx) else {
-            return "\n".to_string();
-        };
-
-        let buffer_text = self.buffer.text();
-        let continuation = line_info.continuation(&buffer_text);
-        if continuation.is_empty() {
-            "\n".to_string()
-        } else {
-            format!("\n{}", continuation)
-        }
-    }
-
-    fn compute_smart_tab_indent(&self, cursor_pos: usize) -> Option<String> {
-        find_container_indent_from_lines(self.buffer.lines(), cursor_pos)
-            .map(|width| " ".repeat(width))
-    }
-
     fn smart_tab(&mut self) {
-        if let Some(indent) = self.compute_smart_tab_indent(self.cursor().offset) {
-            let cursor_offset = self.cursor().offset;
-            let line_start = self.cursor().move_to_line_start(&self.buffer).offset;
-            self.buffer.insert(line_start, &indent, cursor_offset);
-            let new_offset = cursor_offset + indent.len();
-            self.selection = Selection::new(new_offset, new_offset);
-        }
+        self.state.smart_tab();
+    }
+
+    fn smart_shift_tab(&mut self) {
+        self.state.smart_shift_tab();
     }
 
     fn toggle_checkbox(&mut self, line_number: usize, cx: &mut Context<Self>) {
-        let lines = self.buffer.lines();
+        let lines = self.state.buffer.lines();
         let Some(line) = lines.get(line_number) else {
             return;
         };
 
-        let buffer_text = self.buffer.text();
+        let buffer_text = self.state.buffer.text();
         let Some(is_checked) = line.checkbox() else {
             return;
         };
@@ -249,85 +645,60 @@ impl Editor {
         let new_content = if is_checked { " " } else { "x" };
         let cursor_before = self.cursor().offset;
 
-        self.buffer.replace(
+        self.state.buffer.replace(
             checkbox_content_start..checkbox_content_end,
             new_content,
             cursor_before,
         );
 
-        self.selection = Selection::new(cursor_before, cursor_before);
+        self.state.selection = Selection::new(cursor_before, cursor_before);
 
         cx.notify();
     }
 
     fn insert_text(&mut self, text: &str) {
         let cursor_before = self.cursor().offset;
-        let insert_pos = if !self.selection.is_collapsed() {
-            let range = self.selection.range();
-            self.buffer.delete(range.clone(), cursor_before);
+        let insert_pos = if !self.state.selection.is_collapsed() {
+            let range = self.state.selection.range();
+            self.state.buffer.delete(range.clone(), cursor_before);
             range.start
         } else {
             cursor_before
         };
-        self.buffer.insert(insert_pos, text, insert_pos);
+        self.state.buffer.insert(insert_pos, text, insert_pos);
         let new_pos = insert_pos + text.len();
-        self.selection = Selection::new(new_pos, new_pos);
+        self.state.selection = Selection::new(new_pos, new_pos);
     }
 
     fn delete_backward(&mut self) {
-        if !self.selection.is_collapsed() {
-            self.delete_selection();
-        } else if self.cursor().offset > 0 {
-            let cursor_pos = self.cursor().offset;
-
-            if let Some(delete_range) = self.smart_backspace_range(cursor_pos) {
-                self.buffer.delete(delete_range.clone(), cursor_pos);
-                self.selection = Selection::new(delete_range.start, delete_range.start);
-            } else {
-                let new_cursor = self.cursor().move_left(&self.buffer);
-                self.buffer
-                    .delete(new_cursor.offset..cursor_pos, cursor_pos);
-                self.selection = Selection::new(new_cursor.offset, new_cursor.offset);
-            }
-        }
-    }
-
-    fn smart_backspace_range(&self, cursor_pos: usize) -> Option<std::ops::Range<usize>> {
-        let (_, line) = self.find_line_at(cursor_pos)?;
-
-        for marker in &line.markers {
-            if cursor_pos == marker.range.end {
-                return Some(marker.range.clone());
-            }
-        }
-
-        None
+        self.state.delete_backward();
     }
 
     fn delete_forward(&mut self) {
-        if !self.selection.is_collapsed() {
+        if !self.state.selection.is_collapsed() {
             self.delete_selection();
-        } else if self.cursor().offset < self.buffer.len_bytes() {
+        } else if self.cursor().offset < self.state.buffer.len_bytes() {
             let cursor_before = self.cursor().offset;
-            let next = self.cursor().move_right(&self.buffer);
-            self.buffer
+            let next = self.cursor().move_right(&self.state.buffer);
+            self.state
+                .buffer
                 .delete(cursor_before..next.offset, cursor_before);
         }
     }
 
     fn delete_selection(&mut self) {
-        let range = self.selection.range();
+        let range = self.state.selection.range();
         let cursor_before = self.cursor().offset;
-        self.buffer.delete(range.clone(), cursor_before);
-        self.selection = Selection::new(range.start, range.start);
+        self.state.buffer.delete(range.clone(), cursor_before);
+        self.state.selection = Selection::new(range.start, range.start);
     }
 
     fn move_in_direction(&mut self, direction: Direction, extend: bool) {
         let new_cursor = match direction {
             Direction::Left => self.smart_move_left(),
             Direction::Right => self.smart_move_right(),
-            Direction::Up => self.cursor().move_up(&self.buffer),
-            Direction::Down => self.cursor().move_down(&self.buffer),
+            Direction::Up => self.cursor().move_up(&self.state.buffer),
+            Direction::Down => self.cursor().move_down(&self.state.buffer),
         };
         self.move_cursor(new_cursor, extend);
     }
@@ -343,19 +714,19 @@ impl Editor {
             && cursor_pos <= marker_range.end
         {
             if line_idx > 0 {
-                let prev_line = &self.buffer.lines()[line_idx - 1];
+                let prev_line = &self.state.buffer.lines()[line_idx - 1];
                 return Cursor::new(prev_line.range.end);
             } else {
                 return Cursor::new(marker_range.end);
             }
         }
 
-        self.cursor().move_left(&self.buffer)
+        self.cursor().move_left(&self.state.buffer)
     }
 
     fn smart_move_right(&self) -> Cursor {
         let cursor_pos = self.cursor().offset;
-        let len = self.buffer.len_bytes();
+        let len = self.state.buffer.len_bytes();
         if cursor_pos >= len {
             return self.cursor();
         }
@@ -371,7 +742,7 @@ impl Editor {
             }
         }
 
-        self.cursor().move_right(&self.buffer)
+        self.cursor().move_right(&self.state.buffer)
     }
 
     fn compute_code_block_ranges(lines: &[LineMarkers]) -> Vec<CodeBlockRange> {
@@ -406,8 +777,8 @@ impl Editor {
     }
 
     fn cursor_in_code_block(&self) -> bool {
-        let lines = self.buffer.lines();
-        let cursor_line = self.buffer.byte_to_line(self.cursor().offset);
+        let lines = self.state.buffer.lines();
+        let cursor_line = self.state.buffer.byte_to_line(self.cursor().offset);
         let ranges = Self::compute_code_block_ranges(lines);
 
         for (start, end) in ranges {
@@ -456,52 +827,55 @@ impl Editor {
                 let new_cursor = if keystroke.modifiers.control || keystroke.modifiers.platform {
                     self.cursor().move_to_start()
                 } else {
-                    self.cursor().move_to_line_start(&self.buffer)
+                    self.cursor().move_to_line_start(&self.state.buffer)
                 };
                 self.move_cursor(new_cursor, extend);
                 cx.notify();
             }
             "end" => {
                 let new_cursor = if keystroke.modifiers.control || keystroke.modifiers.platform {
-                    self.cursor().move_to_end(&self.buffer)
+                    self.cursor().move_to_end(&self.state.buffer)
                 } else {
-                    self.cursor().move_to_line_end(&self.buffer)
+                    self.cursor().move_to_line_end(&self.state.buffer)
                 };
                 self.move_cursor(new_cursor, extend);
                 cx.notify();
             }
             "enter" => {
                 if keystroke.modifiers.shift {
-                    let text = self.compute_smart_enter_text(self.cursor().offset);
-                    self.insert_text(&text);
+                    // Shift+Enter: always create sibling (maintain continuation)
+                    self.state.shift_enter();
                 } else {
-                    self.insert_text("\n");
+                    // Enter: create sibling or exit container if empty
+                    self.state.smart_enter();
                 }
                 cx.notify();
             }
             "tab" => {
                 if self.cursor_in_code_block() {
                     self.insert_text("    ");
+                } else if keystroke.modifiers.shift {
+                    self.smart_shift_tab();
                 } else {
                     self.smart_tab();
                 }
                 cx.notify();
             }
             "a" if keystroke.modifiers.control || keystroke.modifiers.platform => {
-                self.selection = Selection::select_all(&self.buffer);
+                self.state.selection = Selection::select_all(&self.state.buffer);
                 cx.notify();
             }
             "c" if keystroke.modifiers.control || keystroke.modifiers.platform => {
-                if !self.selection.is_collapsed() {
-                    let range = self.selection.range();
-                    let text = &self.buffer.text()[range];
+                if !self.state.selection.is_collapsed() {
+                    let range = self.state.selection.range();
+                    let text = &self.state.buffer.text()[range];
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.to_string()));
                 }
             }
             "x" if keystroke.modifiers.control || keystroke.modifiers.platform => {
-                if !self.selection.is_collapsed() {
-                    let range = self.selection.range();
-                    let text = self.buffer.text()[range].to_string();
+                if !self.state.selection.is_collapsed() {
+                    let range = self.state.selection.range();
+                    let text = self.state.buffer.text()[range].to_string();
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
                     self.delete_selection();
                     cx.notify();
@@ -517,18 +891,18 @@ impl Editor {
             }
             "z" if keystroke.modifiers.control || keystroke.modifiers.platform => {
                 if keystroke.modifiers.shift {
-                    if let Some(cursor_pos) = self.buffer.redo() {
-                        self.selection = Selection::new(cursor_pos, cursor_pos);
+                    if let Some(cursor_pos) = self.state.buffer.redo() {
+                        self.state.selection = Selection::new(cursor_pos, cursor_pos);
                         cx.notify();
                     }
-                } else if let Some(cursor_pos) = self.buffer.undo() {
-                    self.selection = Selection::new(cursor_pos, cursor_pos);
+                } else if let Some(cursor_pos) = self.state.buffer.undo() {
+                    self.state.selection = Selection::new(cursor_pos, cursor_pos);
                     cx.notify();
                 }
             }
             "y" if keystroke.modifiers.control => {
-                if let Some(cursor_pos) = self.buffer.redo() {
-                    self.selection = Selection::new(cursor_pos, cursor_pos);
+                if let Some(cursor_pos) = self.state.buffer.redo() {
+                    self.state.selection = Selection::new(cursor_pos, cursor_pos);
                     cx.notify();
                 }
             }
@@ -540,12 +914,18 @@ impl Editor {
                 if let Some(key_char) = &keystroke.key_char {
                     if key_char == " " && !self.cursor_in_code_block() {
                         let cursor = self.cursor();
-                        let line_start = cursor.move_to_line_start(&self.buffer).offset;
+                        let line_start = cursor.move_to_line_start(&self.state.buffer).offset;
                         if cursor.offset == line_start {
                             return;
                         }
                     }
                     self.insert_text(key_char);
+
+                    // Auto-insert space after blockquote marker if needed
+                    if key_char == ">" {
+                        self.state.maybe_complete_blockquote_marker();
+                    }
+
                     cx.notify();
                 }
             }
@@ -582,8 +962,8 @@ impl Editor {
     pub fn begin_streaming(&mut self, cx: &mut Context<Self>) {
         self.streaming_mode = true;
         self.input_blocked = true;
-        let end = self.buffer.len_bytes();
-        self.selection = Selection::new(end, end);
+        let end = self.state.buffer.len_bytes();
+        self.state.selection = Selection::new(end, end);
         cx.notify();
     }
 
@@ -601,85 +981,85 @@ impl Editor {
 
     /// Returns the current cursor position as a byte offset.
     pub fn cursor_position(&self) -> usize {
-        self.selection.head
+        self.state.selection.head
     }
 
     /// Returns the current selection range, or None if the cursor is collapsed.
     pub fn selection_range(&self) -> Option<std::ops::Range<usize>> {
-        if self.selection.is_collapsed() {
+        if self.state.selection.is_collapsed() {
             None
         } else {
-            Some(self.selection.range())
+            Some(self.state.selection.range())
         }
     }
 
     /// Set the cursor position to the given byte offset.
     pub fn set_cursor(&mut self, offset: usize, cx: &mut Context<Self>) {
-        let offset = offset.min(self.buffer.len_bytes());
-        self.selection = Selection::new(offset, offset);
+        let offset = offset.min(self.state.buffer.len_bytes());
+        self.state.selection = Selection::new(offset, offset);
         cx.notify();
     }
 
     /// Move the cursor to the end of the buffer.
     pub fn move_to_end(&mut self, cx: &mut Context<Self>) {
-        let end = self.buffer.len_bytes();
-        self.selection = Selection::new(end, end);
+        let end = self.state.buffer.len_bytes();
+        self.state.selection = Selection::new(end, end);
         cx.notify();
     }
 
     /// Move the cursor to the start of the buffer.
     pub fn move_to_start(&mut self, cx: &mut Context<Self>) {
-        self.selection = Selection::new(0, 0);
+        self.state.selection = Selection::new(0, 0);
         cx.notify();
     }
 
     /// Returns true if the buffer has unsaved changes.
     pub fn is_dirty(&self) -> bool {
-        self.buffer.is_dirty()
+        self.state.buffer.is_dirty()
     }
 
     /// Mark the buffer as clean (no unsaved changes).
     pub fn mark_clean(&mut self) {
-        self.buffer.mark_clean();
+        self.state.buffer.mark_clean();
     }
 
     /// Save the buffer to the file specified in FileInfo.
     pub fn save(&mut self, cx: &mut Context<Self>) {
         let file_info = FileInfo::global(cx);
         let path = file_info.path.clone();
-        let content = self.buffer.text();
+        let content = self.state.buffer.text();
 
         if let Err(e) = std::fs::write(&path, &content) {
             eprintln!("Failed to save file: {}", e);
             return;
         }
 
-        self.buffer.mark_clean();
+        self.state.buffer.mark_clean();
         cx.notify();
     }
 
     /// Returns true if there are actions to undo.
     pub fn can_undo(&self) -> bool {
-        self.buffer.can_undo()
+        self.state.buffer.can_undo()
     }
 
     /// Returns true if there are actions to redo.
     pub fn can_redo(&self) -> bool {
-        self.buffer.can_redo()
+        self.state.buffer.can_redo()
     }
 
     /// Undo the last action.
     pub fn undo(&mut self, cx: &mut Context<Self>) {
-        if let Some(cursor_pos) = self.buffer.undo() {
-            self.selection = Selection::new(cursor_pos, cursor_pos);
+        if let Some(cursor_pos) = self.state.buffer.undo() {
+            self.state.selection = Selection::new(cursor_pos, cursor_pos);
             cx.notify();
         }
     }
 
     /// Redo the last undone action.
     pub fn redo(&mut self, cx: &mut Context<Self>) {
-        if let Some(cursor_pos) = self.buffer.redo() {
-            self.selection = Selection::new(cursor_pos, cursor_pos);
+        if let Some(cursor_pos) = self.state.buffer.redo() {
+            self.state.selection = Selection::new(cursor_pos, cursor_pos);
             cx.notify();
         }
     }
@@ -693,11 +1073,10 @@ impl Editor {
                 self.insert_text(&c.to_string());
             }
             EditorAction::Enter => {
-                self.insert_text("\n");
+                self.state.smart_enter();
             }
             EditorAction::ShiftEnter => {
-                let text = self.compute_smart_enter_text(self.cursor().offset);
-                self.insert_text(&text);
+                self.state.shift_enter();
             }
             EditorAction::Tab => {
                 self.smart_tab();
@@ -723,10 +1102,10 @@ impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         // Sync dirty state with FileInfo global for title bar
         let file_info = FileInfo::global(cx);
-        if file_info.dirty != self.buffer.is_dirty() {
+        if file_info.dirty != self.state.buffer.is_dirty() {
             cx.set_global(FileInfo {
                 path: file_info.path.clone(),
-                dirty: self.buffer.is_dirty(),
+                dirty: self.state.buffer.is_dirty(),
             });
         }
 
@@ -743,14 +1122,14 @@ impl Render for Editor {
             text_font: font(&self.config.text_font),
             code_font: font(&self.config.code_font),
         };
-        let cursor_offset = self.selection.head;
-        let selection_range = if self.selection.is_collapsed() {
+        let cursor_offset = self.state.selection.head;
+        let selection_range = if self.state.selection.is_collapsed() {
             None
         } else {
-            Some(self.selection.range())
+            Some(self.state.selection.range())
         };
 
-        let buffer_text = self.buffer.text();
+        let buffer_text = self.state.buffer.text();
 
         let entity = cx.entity().clone();
         let on_click: ClickCallback =
@@ -760,19 +1139,20 @@ impl Render for Editor {
                         return;
                     }
                     if shift_held {
-                        editor.selection = editor.selection.extend_to(buffer_offset);
+                        editor.state.selection = editor.state.selection.extend_to(buffer_offset);
                     } else {
                         match click_count {
                             2 => {
-                                editor.selection =
-                                    Selection::select_word_at(buffer_offset, &editor.buffer);
+                                editor.state.selection =
+                                    Selection::select_word_at(buffer_offset, &editor.state.buffer);
                             }
                             3 => {
-                                editor.selection =
-                                    Selection::select_line_at(buffer_offset, &editor.buffer);
+                                editor.state.selection =
+                                    Selection::select_line_at(buffer_offset, &editor.state.buffer);
                             }
                             _ => {
-                                editor.selection = Selection::new(buffer_offset, buffer_offset);
+                                editor.state.selection =
+                                    Selection::new(buffer_offset, buffer_offset);
                             }
                         }
                     }
@@ -786,7 +1166,7 @@ impl Render for Editor {
                 if editor.input_blocked {
                     return;
                 }
-                editor.selection = editor.selection.extend_to(buffer_offset);
+                editor.state.selection = editor.state.selection.extend_to(buffer_offset);
                 cx.notify();
             });
         });
@@ -816,16 +1196,17 @@ impl Render for Editor {
             },
         );
 
-        let lines = self.buffer.lines().to_vec();
-        let cursor_line = self.buffer.byte_to_line(cursor_offset);
+        let lines = self.state.buffer.lines().to_vec();
+        let cursor_line = self.state.buffer.byte_to_line(cursor_offset);
         let cursor_child_index = Some(cursor_line + 1);
 
         let line_views: Vec<_> = lines
             .iter()
             .map(|line| {
-                let inline_styles = extract_inline_styles(&self.buffer, line);
+                let inline_styles = extract_inline_styles(&self.state.buffer, line);
 
                 let code_highlights: Vec<_> = self
+                    .state
                     .buffer
                     .code_highlights_for_range(line.range.clone())
                     .iter()
@@ -884,5 +1265,581 @@ impl Render for Editor {
             .child(top_spacer)
             .children(line_views)
             .child(bottom_spacer)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Trim leading newline from raw string literals for readability.
+    /// Allows writing:
+    /// ```
+    /// r#"
+    /// - item one
+    /// - item two
+    /// "#
+    /// ```
+    fn trim_raw(s: &str) -> &str {
+        s.strip_prefix('\n').unwrap_or(s)
+    }
+
+    /// Helper to create an EditorState with cursor at a specific position.
+    /// The cursor position is indicated by | in the input string.
+    fn editor_with_cursor(input: &str) -> EditorState {
+        let input = trim_raw(input);
+        let cursor_pos = input
+            .find('|')
+            .expect("Input must contain | for cursor position");
+        let content = input.replace('|', "");
+        let mut state = EditorState::new(&content);
+        state.set_cursor(cursor_pos);
+        state
+    }
+
+    /// Helper to check editor state matches expected content with cursor.
+    fn assert_editor_eq(state: &EditorState, expected: &str) {
+        let expected = trim_raw(expected);
+        let text = state.text();
+        let cursor = state.cursor().offset;
+        let mut actual = String::new();
+        actual.push_str(&text[..cursor]);
+        actual.push('|');
+        actual.push_str(&text[cursor..]);
+        assert_eq!(actual, expected);
+    }
+
+    mod smart_enter_tests {
+        use super::*;
+
+        #[test]
+        fn enter_on_list_item_creates_sibling() {
+            let mut state = editor_with_cursor(
+                r#"
+- item one|"#,
+            );
+            state.smart_enter();
+            assert_editor_eq(
+                &state,
+                r#"
+- item one
+- |"#,
+            );
+        }
+
+        #[test]
+        fn enter_in_middle_of_list_item_splits() {
+            let mut state = editor_with_cursor(
+                r#"
+- item o|ne"#,
+            );
+            state.smart_enter();
+            assert_editor_eq(
+                &state,
+                r#"
+- item o
+- |ne"#,
+            );
+        }
+
+        #[test]
+        fn enter_on_blockquote_creates_sibling() {
+            let mut state = editor_with_cursor(
+                r#"
+> quote one|"#,
+            );
+            state.smart_enter();
+            assert_editor_eq(
+                &state,
+                r#"
+> quote one
+> |"#,
+            );
+        }
+
+        #[test]
+        fn enter_on_nested_list_in_blockquote() {
+            let mut state = editor_with_cursor(
+                r#"
+> - item|"#,
+            );
+            state.smart_enter();
+            assert_editor_eq(
+                &state,
+                r#"
+> - item
+> - |"#,
+            );
+        }
+
+        #[test]
+        fn enter_on_plain_text_just_inserts_newline() {
+            let mut state = editor_with_cursor(
+                r#"
+hello world|"#,
+            );
+            state.smart_enter();
+            assert_editor_eq(
+                &state,
+                r#"
+hello world
+|"#,
+            );
+        }
+
+        #[test]
+        fn shift_enter_on_empty_list_item_creates_sibling() {
+            // Shift+Enter always maintains continuation, unlike Enter which exits
+            let mut state = editor_with_cursor(
+                r#"
+- item one
+- |"#,
+            );
+            state.shift_enter();
+            assert_editor_eq(&state, "- item one\n- \n- |");
+        }
+
+        #[test]
+        fn shift_enter_on_list_item_with_content_creates_sibling() {
+            let mut state = editor_with_cursor(
+                r#"
+- item one|"#,
+            );
+            state.shift_enter();
+            assert_editor_eq(
+                &state,
+                r#"
+- item one
+- |"#,
+            );
+        }
+
+        #[test]
+        fn enter_on_pending_marker_completes_it() {
+            // `*|` should become `* \n* |`
+            let mut state = editor_with_cursor(
+                r#"
+*|"#,
+            );
+            state.smart_enter();
+            assert_editor_eq(&state, "* \n* |");
+        }
+
+        #[test]
+        fn enter_on_pending_ordered_marker_completes_it() {
+            // `1.|` should become `1. \n1. |`
+            let mut state = editor_with_cursor(
+                r#"
+1.|"#,
+            );
+            state.smart_enter();
+            assert_editor_eq(&state, "1. \n1. |");
+        }
+
+        #[test]
+        fn enter_on_empty_list_item_exits_list() {
+            let mut state = editor_with_cursor(
+                r#"
+- item
+- |"#,
+            );
+            state.smart_enter();
+            assert_editor_eq(
+                &state,
+                r#"
+- item
+
+|"#,
+            );
+        }
+
+        #[test]
+        fn enter_on_empty_nested_list_exits_to_parent() {
+            let mut state = editor_with_cursor(
+                r#"
+> - item
+> - |"#,
+            );
+            state.smart_enter();
+            // Should exit the list but stay in blockquote
+            // The middle line has "> " as continuation for the blockquote
+            assert_editor_eq(&state, "> - item\n> \n> |");
+        }
+
+        #[test]
+        fn enter_on_empty_blockquote_exits_blockquote() {
+            let mut state = editor_with_cursor(
+                r#"
+> quote
+> |"#,
+            );
+            state.smart_enter();
+            assert_editor_eq(
+                &state,
+                r#"
+> quote
+
+|"#,
+            );
+        }
+    }
+
+    mod smart_tab_tests {
+        use super::*;
+
+        #[test]
+        fn tab_on_empty_line_after_list_item_adds_marker() {
+            let mut state = editor_with_cursor(
+                r#"
+- item
+|"#,
+            );
+            state.smart_tab();
+            assert_editor_eq(
+                &state,
+                r#"
+- item
+- |"#,
+            );
+        }
+
+        #[test]
+        fn tab_twice_on_empty_line_after_list_item_nests() {
+            let mut state = editor_with_cursor(
+                r#"
+- item
+|"#,
+            );
+            state.smart_tab();
+            state.smart_tab();
+            assert_editor_eq(
+                &state,
+                r#"
+- item
+  - |"#,
+            );
+        }
+
+        #[test]
+        fn tab_on_list_item_increases_nesting() {
+            let mut state = editor_with_cursor(
+                r#"
+- item|"#,
+            );
+            state.smart_tab();
+            assert_editor_eq(
+                &state,
+                r#"
+  - item|"#,
+            );
+        }
+
+        #[test]
+        fn tab_on_empty_line_after_blockquote_adds_marker() {
+            let mut state = editor_with_cursor(
+                r#"
+> quote
+|"#,
+            );
+            state.smart_tab();
+            assert_editor_eq(
+                &state,
+                r#"
+> quote
+> |"#,
+            );
+        }
+
+        #[test]
+        fn tab_on_empty_line_after_nested_list_in_blockquote() {
+            let mut state = editor_with_cursor(
+                r#"
+> - item
+|"#,
+            );
+            state.smart_tab();
+            assert_editor_eq(
+                &state,
+                r#"
+> - item
+> - |"#,
+            );
+        }
+
+        #[test]
+        fn tab_on_plain_text_adjacent_to_list_adds_marker() {
+            let mut state = editor_with_cursor(
+                r#"
+- item
+text|"#,
+            );
+            state.smart_tab();
+            assert_editor_eq(
+                &state,
+                r#"
+- item
+- text|"#,
+            );
+        }
+
+        #[test]
+        fn tab_on_empty_list_item_nests_it() {
+            let mut state = editor_with_cursor(
+                r#"
+- item one
+- |"#,
+            );
+            state.smart_tab();
+            assert_editor_eq(
+                &state,
+                r#"
+- item one
+  - |"#,
+            );
+        }
+    }
+
+    mod smart_shift_tab_tests {
+        use super::*;
+
+        #[test]
+        fn shift_tab_on_nested_list_item_unnests() {
+            let mut state = editor_with_cursor(
+                r#"
+  - nested item|"#,
+            );
+            state.smart_shift_tab();
+            assert_editor_eq(
+                &state,
+                r#"
+- nested item|"#,
+            );
+        }
+
+        #[test]
+        fn shift_tab_on_list_item_removes_marker() {
+            let mut state = editor_with_cursor(
+                r#"
+- item|"#,
+            );
+            state.smart_shift_tab();
+            assert_editor_eq(
+                &state,
+                r#"
+item|"#,
+            );
+        }
+
+        #[test]
+        fn shift_tab_on_nested_list_in_blockquote_removes_list() {
+            let mut state = editor_with_cursor(
+                r#"
+> - item|"#,
+            );
+            state.smart_shift_tab();
+            assert_editor_eq(
+                &state,
+                r#"
+> item|"#,
+            );
+        }
+
+        #[test]
+        fn shift_tab_on_blockquote_removes_marker() {
+            let mut state = editor_with_cursor(
+                r#"
+> item|"#,
+            );
+            state.smart_shift_tab();
+            assert_editor_eq(
+                &state,
+                r#"
+item|"#,
+            );
+        }
+
+        #[test]
+        fn shift_tab_on_empty_list_item_does_nothing() {
+            // Would create invalid state (empty line after list item)
+            let mut state = editor_with_cursor(
+                r#"
+- item
+- |"#,
+            );
+            state.smart_shift_tab();
+            assert_editor_eq(
+                &state,
+                r#"
+- item
+- |"#,
+            );
+        }
+
+        #[test]
+        fn shift_tab_on_plain_text_does_nothing() {
+            let mut state = editor_with_cursor(
+                r#"
+plain text|"#,
+            );
+            state.smart_shift_tab();
+            assert_editor_eq(
+                &state,
+                r#"
+plain text|"#,
+            );
+        }
+    }
+
+    mod blockquote_auto_space_tests {
+        use super::*;
+
+        #[test]
+        fn typing_blockquote_marker_auto_inserts_space() {
+            let mut state = editor_with_cursor(
+                r#"
+|"#,
+            );
+            // Simulate typing ">"
+            state.insert_text(">");
+            state.maybe_complete_blockquote_marker();
+            assert_editor_eq(
+                &state, r#"
+> |"#,
+            );
+        }
+
+        #[test]
+        fn blockquote_marker_with_existing_space_no_double_space() {
+            let mut state = editor_with_cursor(
+                r#"
+> |"#,
+            );
+            // Already has space, should not add another
+            let inserted = state.maybe_complete_blockquote_marker();
+            assert!(!inserted);
+            assert_editor_eq(
+                &state, r#"
+> |"#,
+            );
+        }
+
+        #[test]
+        fn nested_blockquote_auto_inserts_space() {
+            let mut state = editor_with_cursor(
+                r#"
+> |"#,
+            );
+            // Simulate typing another ">"
+            state.insert_text(">");
+            state.maybe_complete_blockquote_marker();
+            assert_editor_eq(
+                &state,
+                r#"
+> > |"#,
+            );
+        }
+
+        #[test]
+        fn greater_than_in_text_no_auto_space() {
+            // If > is typed in the middle of text, don't auto-space
+            let mut state = editor_with_cursor(
+                r#"
+5 |"#,
+            );
+            state.insert_text(">");
+            let inserted = state.maybe_complete_blockquote_marker();
+            assert!(!inserted);
+            assert_editor_eq(
+                &state, r#"
+5 >|"#,
+            );
+        }
+    }
+
+    mod backspace_tests {
+        use super::*;
+
+        #[test]
+        fn backspace_on_empty_list_item_joins_to_previous() {
+            let mut state = editor_with_cursor(
+                r#"
+- item one
+- |"#,
+            );
+            // Single backspace should join to previous line's content
+            state.delete_backward();
+            assert_editor_eq(
+                &state,
+                r#"
+- item one|"#,
+            );
+        }
+
+        #[test]
+        fn backspace_after_enter_on_list_item_joins_to_content() {
+            // Scenario: "- item one|" -> Enter -> "- item one\n- |" -> Backspace
+            // Should go back to "- item one|", not "- item one\n|"
+            let mut state = editor_with_cursor(
+                r#"
+- item one|"#,
+            );
+            state.smart_enter();
+            assert_editor_eq(
+                &state,
+                r#"
+- item one
+- |"#,
+            );
+            state.delete_backward();
+            assert_editor_eq(
+                &state,
+                r#"
+- item one|"#,
+            );
+        }
+
+        #[test]
+        fn backspace_after_exit_container_joins_to_content() {
+            // Scenario: "- item one\n- |" -> Enter (exit) -> "- item one\n\n|" -> Backspace
+            // One backspace should join directly to content
+            let mut state = editor_with_cursor(
+                r#"
+- item one
+- |"#,
+            );
+            state.smart_enter();
+            assert_editor_eq(
+                &state,
+                r#"
+- item one
+
+|"#,
+            );
+            // One backspace joins directly to content
+            state.delete_backward();
+            assert_editor_eq(
+                &state,
+                r#"
+- item one|"#,
+            );
+        }
+
+        #[test]
+        fn backspace_from_blank_line_after_list() {
+            // Direct test: cursor on blank line after list item
+            // One backspace should join directly to content
+            let mut state = editor_with_cursor(
+                r#"
+- item one
+
+|"#,
+            );
+            state.delete_backward();
+            assert_editor_eq(
+                &state,
+                r#"
+- item one|"#,
+            );
+        }
     }
 }
