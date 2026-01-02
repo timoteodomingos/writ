@@ -261,12 +261,22 @@ impl Selection {
         let line = buffer.byte_to_line(offset);
         let line_start = buffer.line_to_byte(line);
 
-        // Find line end (including newline if present)
+        // Find line end (excluding newline)
         let line_count = buffer.line_count();
-        let line_end = if line + 1 < line_count {
+        let next_line_start = if line + 1 < line_count {
             buffer.line_to_byte(line + 1)
         } else {
             buffer.len_bytes()
+        };
+
+        // Exclude the newline character if present
+        let line_end = if next_line_start > line_start
+            && next_line_start <= buffer.len_bytes()
+            && line + 1 < line_count
+        {
+            next_line_start - 1
+        } else {
+            next_line_start
         };
 
         Self::new(line_start, line_end)
@@ -425,13 +435,13 @@ mod tests {
     fn test_selection_select_line_at() {
         let buf: Buffer = "line one\nline two\nline three".parse().unwrap();
 
-        // Click on first line
+        // Click on first line (excludes newline)
         let sel = Selection::select_line_at(3, &buf);
-        assert_eq!(sel.range(), 0..9); // "line one\n"
+        assert_eq!(sel.range(), 0..8); // "line one"
 
-        // Click on second line
+        // Click on second line (excludes newline)
         let sel = Selection::select_line_at(12, &buf);
-        assert_eq!(sel.range(), 9..18); // "line two\n"
+        assert_eq!(sel.range(), 9..17); // "line two"
 
         // Click on last line (no trailing newline)
         let sel = Selection::select_line_at(22, &buf);
