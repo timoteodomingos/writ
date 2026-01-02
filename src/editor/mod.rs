@@ -300,8 +300,37 @@ impl EditorState {
             .unwrap_or(0);
         let content_after_marker = line_text[marker_end..].trim();
 
-        if content_after_marker.is_empty() && !current_line.markers.is_empty() {
-            // Empty container line - exit the innermost container
+        // Check if this is a paragraph line (no markers, or only Indent marker)
+        let is_paragraph = current_line.markers.is_empty()
+            || (current_line.markers.len() == 1
+                && matches!(
+                    current_line.markers[0].kind,
+                    crate::marker::MarkerKind::Indent
+                ));
+
+        if is_paragraph {
+            if content_after_marker.is_empty() && !current_line.markers.is_empty() {
+                // Empty nested paragraph line (just indent) - exit by removing indent
+                // Just delete the indent, cursor stays on the now-empty line
+                let indent_marker = &current_line.markers[0];
+                let delete_range = indent_marker.range.clone();
+                let delete_len = delete_range.len();
+                self.buffer.delete(delete_range, cursor_offset);
+                let new_cursor = cursor_offset - delete_len;
+                self.selection = Selection::new(new_cursor, new_cursor);
+            } else {
+                // Paragraph with content - create paragraph break
+                // For nested paragraph, maintain the indent after the blank line
+                let indent = if current_line.markers.len() == 1 {
+                    buffer_text[current_line.markers[0].range.clone()].to_string()
+                } else {
+                    String::new()
+                };
+                let insert_text = format!("\n\n{}", indent);
+                self.insert_text(&insert_text);
+            }
+        } else if content_after_marker.is_empty() {
+            // Empty container line (list/blockquote) - exit the innermost container
             // Delete the innermost marker and insert newline with remaining structure
             let innermost = &current_line.markers[0];
             let delete_range = innermost.range.clone();
@@ -1460,7 +1489,8 @@ mod tests {
         }
 
         #[test]
-        fn enter_on_plain_text_just_inserts_newline() {
+        fn enter_on_plain_text_creates_paragraph_break() {
+            // Paragraphs get a blank line (paragraph break) on Enter
             let mut state = editor_with_cursor(
                 r#"
 hello world|"#,
@@ -1470,6 +1500,51 @@ hello world|"#,
                 &state,
                 r#"
 hello world
+
+|"#,
+            );
+        }
+
+        #[test]
+        fn enter_on_nested_paragraph_creates_paragraph_break_with_indent() {
+            // Nested paragraph under list item: Enter creates paragraph break but keeps indent
+            let mut state = editor_with_cursor(
+                r#"
+- item
+
+  paragraph|"#,
+            );
+            state.smart_enter();
+            assert_editor_eq(
+                &state,
+                r#"
+- item
+
+  paragraph
+
+  |"#,
+            );
+        }
+
+        #[test]
+        fn enter_on_empty_nested_paragraph_exits_indent() {
+            // Empty nested paragraph line: Enter removes indent and exits
+            let mut state = editor_with_cursor(
+                r#"
+- item
+
+  paragraph
+
+  |"#,
+            );
+            state.smart_enter();
+            assert_editor_eq(
+                &state,
+                r#"
+- item
+
+  paragraph
+
 |"#,
             );
         }

@@ -874,8 +874,9 @@ impl IntoElement for Line<'_> {
         }
 
         if needs_indent_padding {
-            // Indent is 2 monospace spaces, so multiply width by 2
-            let indent_width = self.theme.monospace_char_width * 2.0;
+            // Use the actual indent marker length (varies: "- " = 2, "1. " = 3, "10. " = 4, etc.)
+            let indent_chars = self.line.markers[0].range.len();
+            let indent_width = self.theme.monospace_char_width * indent_chars as f32;
             line_div = line_div.pl(indent_width).child(text_container);
         } else {
             line_div = line_div.child(text_container);
