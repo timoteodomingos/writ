@@ -11,6 +11,7 @@ pub const HIGHLIGHT_NAMES: &[&str] = &[
     "comment",
     "comment.doc",
     "constant",
+    "embedded",
     "function",
     "function.definition",
     "function.method",
@@ -68,6 +69,14 @@ impl Highlighter {
             languages.insert("rs".to_string(), Arc::clone(&config));
         }
 
+        // Register Bash
+        if let Some(config) = Self::create_bash_config() {
+            let config = Arc::new(config);
+            languages.insert("bash".to_string(), Arc::clone(&config));
+            languages.insert("sh".to_string(), Arc::clone(&config));
+            languages.insert("shell".to_string(), Arc::clone(&config));
+        }
+
         Self { inner, languages }
     }
 
@@ -93,6 +102,24 @@ impl Highlighter {
         };
 
         // Configure which highlight names we recognize
+        config.configure(HIGHLIGHT_NAMES);
+
+        Some(LanguageConfig { config })
+    }
+
+    fn create_bash_config() -> Option<LanguageConfig> {
+        let language = tree_sitter_bash::LANGUAGE.into();
+        let highlights_query = tree_sitter_bash::HIGHLIGHT_QUERY;
+
+        let mut config =
+            match HighlightConfiguration::new(language, "bash", highlights_query, "", "") {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("Failed to create Bash highlight config: {}", e);
+                    return None;
+                }
+            };
+
         config.configure(HIGHLIGHT_NAMES);
 
         Some(LanguageConfig { config })
@@ -171,6 +198,9 @@ mod tests {
         assert!(highlighter.supports_language("rust"));
         assert!(highlighter.supports_language("rs"));
         assert!(highlighter.supports_language("Rust")); // case insensitive
+        assert!(highlighter.supports_language("bash"));
+        assert!(highlighter.supports_language("sh"));
+        assert!(highlighter.supports_language("shell"));
         assert!(!highlighter.supports_language("python"));
     }
 
