@@ -42,8 +42,6 @@ pub struct LineContext<'a> {
     pub line_idx: usize,
     /// The current line's markers.
     pub line: &'a LineMarkers,
-    /// Byte range of content after markers (not trimmed).
-    pub content_range: std::ops::Range<usize>,
     /// Whether content after markers is empty (whitespace only).
     pub is_empty: bool,
     /// Whether this line has any container markers.
@@ -143,10 +141,9 @@ impl EditorState {
             .marker_range()
             .map(|r| r.end)
             .unwrap_or(line.range.start);
-        let content_range = content_start..line.range.end;
 
         let buffer_text = self.buffer.text();
-        let is_empty = buffer_text[content_range.clone()].trim().is_empty();
+        let is_empty = buffer_text[content_start..line.range.end].trim().is_empty();
 
         let prev_line = if line_idx > 0 {
             lines.get(line_idx - 1)
@@ -158,7 +155,6 @@ impl EditorState {
             cursor_offset,
             line_idx,
             line,
-            content_range,
             is_empty,
             has_container: line.has_container(),
             prev_line,
@@ -167,7 +163,6 @@ impl EditorState {
 
     /// Check if cursor is at end of a "pending marker" (e.g., `*|` or `1.|`)
     /// that would become a list marker if we added a space.
-    /// Returns true if we should auto-complete the marker.
     fn is_pending_marker(&self, cursor_pos: usize) -> bool {
         let line_idx = self.buffer.byte_to_line(cursor_pos);
         let lines = self.buffer.lines();
@@ -175,12 +170,10 @@ impl EditorState {
             return false;
         };
 
-        // Only applies if line has no markers yet
         if !current_line.markers.is_empty() {
             return false;
         }
 
-        // Get the line content up to cursor
         let line_start = current_line.range.start;
         if cursor_pos < line_start {
             return false;
@@ -189,12 +182,10 @@ impl EditorState {
         let text = self.buffer.text();
         let line_to_cursor = &text[line_start..cursor_pos];
 
-        // Check for pending unordered marker: *, -, +
         if line_to_cursor == "*" || line_to_cursor == "-" || line_to_cursor == "+" {
             return true;
         }
 
-        // Check for pending ordered marker: digits followed by .
         if let Some(before_dot) = line_to_cursor.strip_suffix('.')
             && !before_dot.is_empty()
             && before_dot.chars().all(|c| c.is_ascii_digit())
@@ -205,13 +196,11 @@ impl EditorState {
         false
     }
 
-    /// Complete a pending marker by inserting a space.
     fn complete_pending_marker(&mut self) {
         self.insert_text(" ");
     }
 
     /// Auto-insert space after `>` if it just became a blockquote marker.
-    /// This prevents the user from typing `>text` when they meant `> text`.
     /// Returns true if a space was inserted.
     pub fn maybe_complete_blockquote_marker(&mut self) -> bool {
         let cursor_pos = self.cursor().offset;
@@ -219,14 +208,12 @@ impl EditorState {
             return false;
         }
 
-        // The character right before cursor should be `>`
         let text = self.buffer.text();
         let prev_char = text.as_bytes().get(cursor_pos - 1);
         if prev_char != Some(&b'>') {
             return false;
         }
 
-        // Check if the marker already has a trailing space
         let next_char = text.as_bytes().get(cursor_pos);
         if next_char == Some(&b' ') {
             return false;
@@ -238,7 +225,6 @@ impl EditorState {
             return false;
         };
 
-        // Check if this line has a blockquote marker
         let has_blockquote = line
             .markers
             .iter()
@@ -248,7 +234,6 @@ impl EditorState {
             return false;
         }
 
-        // Insert a space after the `>`
         self.insert_text(" ");
         true
     }
@@ -271,9 +256,6 @@ impl EditorState {
     }
 
     /// Smart tab: adds structure based on context.
-    /// - On empty line after container: adds continuation (e.g., "- ")
-    /// - On line with markers: increases nesting by adding indentation
-    /// - On plain text adjacent to container: adds the container's marker
     pub fn smart_tab(&mut self) {
         let Some(ctx) = self.line_context() else {
             return;
@@ -283,21 +265,15 @@ impl EditorState {
         let line_start = ctx.line.range.start;
 
         if !ctx.line.markers.is_empty() {
-            // Line already has markers - check if we can nest deeper
-            if let Some(prev) = ctx.prev_line {
-                let prev_marker_width = prev.marker_width();
-                let current_marker_width = ctx.line.marker_width();
-
-                // Can only indent one level deeper than previous line
-                if current_marker_width >= prev_marker_width + 2 {
-                    return;
-                }
+            // Check if we can nest deeper (only one level beyond previous line)
+            if let Some(prev) = ctx.prev_line
+                && ctx.line.marker_width() >= prev.marker_width() + 2
+            {
+                return;
             }
-
-            // Increase nesting by adding 2 spaces at start
             self.insert_at(line_start, "  ");
         } else if ctx.line_idx > 0 {
-            // No markers on current line - find the nearest container to nest under
+            // Find the nearest container to nest under
             let lines = self.buffer.lines();
             let mut container_line = None;
             for i in (0..ctx.line_idx).rev() {
@@ -306,7 +282,6 @@ impl EditorState {
                     container_line = Some(line);
                     break;
                 }
-                // If we hit a non-empty line without markers, stop looking
                 let line_text = &buffer_text[line.range.clone()];
                 if !line_text.trim().is_empty() {
                     break;
@@ -314,17 +289,16 @@ impl EditorState {
             }
 
             if let Some(container) = container_line {
-                // Check if previous line is blank (meaning we're starting a nested block)
                 let prev_line = &lines[ctx.line_idx - 1];
                 let prev_line_text = &buffer_text[prev_line.range.clone()];
                 let is_after_blank = prev_line_text.trim().is_empty();
 
                 if is_after_blank {
-                    // After blank line - just indent with spaces to nest as block
+                    // After blank line - indent as nested block
                     let indent = " ".repeat(container.marker_width());
                     self.insert_at(line_start, &indent);
                 } else {
-                    // Not after blank - use full continuation (adds list marker)
+                    // Adjacent to container - add list marker
                     let continuation = container.continuation(&buffer_text);
                     if !continuation.is_empty() {
                         self.insert_at(line_start, &continuation);
@@ -335,10 +309,7 @@ impl EditorState {
     }
 
     /// Smart enter: creates sibling or exits container.
-    /// - On line with content: creates sibling with same structure
-    /// - On empty container line: exits the innermost container
     pub fn smart_enter(&mut self) {
-        // Auto-complete pending markers like `*|` → `* |`
         if self.is_pending_marker(self.cursor().offset) {
             self.complete_pending_marker();
             let text = self.compute_smart_enter_text(self.cursor().offset);
@@ -354,12 +325,12 @@ impl EditorState {
         let buffer_text = self.buffer.text();
 
         if !ctx.has_container {
-            // Paragraph (no container markers)
+            // Paragraph
             if ctx.is_empty && !ctx.line.markers.is_empty() {
-                // Empty nested paragraph (just indent) - exit by removing indent
+                // Empty nested paragraph - exit by removing indent
                 self.delete_and_adjust(ctx.line.markers[0].range.clone());
             } else {
-                // Paragraph with content - create paragraph break
+                // Create paragraph break
                 let indent = if ctx.line.markers.len() == 1 {
                     buffer_text[ctx.line.markers[0].range.clone()].to_string()
                 } else {
@@ -369,10 +340,8 @@ impl EditorState {
             }
         } else if ctx.is_empty {
             // Empty container line - exit the innermost container
-            let innermost = &ctx.line.markers[0];
-            let delete_range = innermost.range.clone();
+            let delete_range = ctx.line.markers[0].range.clone();
 
-            // Calculate remaining continuation after removing innermost
             let remaining_continuation: String = ctx
                 .line
                 .markers
@@ -402,16 +371,12 @@ impl EditorState {
         }
     }
 
-    /// Smart shift-tab: removes structure.
-    /// - On nested line: removes one level of indentation
-    /// - On line with markers: removes the innermost marker
-    /// - Does nothing if result would be invalid (empty line after container)
+    /// Smart shift-tab: removes one level of structure.
     pub fn smart_shift_tab(&mut self) {
         let Some(ctx) = self.line_context() else {
             return;
         };
 
-        // No markers = nothing to remove
         if ctx.line.markers.is_empty() {
             return;
         }
@@ -419,33 +384,21 @@ impl EditorState {
         let buffer_text = self.buffer.text();
         let line_text = &buffer_text[ctx.line.range.clone()];
 
-        // Check if line starts with indentation (2 spaces) - this means it's nested
         if line_text.starts_with("  ") {
-            // Unnesting is always valid - remove 2 spaces of indentation
+            // Nested - remove indentation
             let delete_start = ctx.line.range.start;
-            let delete_end = delete_start + 2;
-            self.delete_and_adjust(delete_start..delete_end);
+            self.delete_and_adjust(delete_start..delete_start + 2);
         } else {
-            // Line is at root level - removing the marker would leave an empty line
-            // after the previous container, which is invalid
+            // At root level - don't remove if it would leave invalid empty line
             if ctx.is_empty && ctx.line_idx > 0 {
                 return;
             }
-
-            // Remove the innermost (first) marker
             self.delete_and_adjust(ctx.line.markers[0].range.clone());
         }
     }
 
-    /// Plain enter: just inserts a newline.
-    pub fn enter(&mut self) {
-        self.insert_text("\n");
-    }
-
-    /// Shift+Enter: always creates a sibling (maintains current continuation).
-    /// Unlike smart_enter which exits on empty container lines.
+    /// Shift+Enter: always creates a sibling, even on empty container lines.
     pub fn shift_enter(&mut self) {
-        // Auto-complete pending markers like `*|` → `* |`
         if self.is_pending_marker(self.cursor().offset) {
             self.complete_pending_marker();
         }
@@ -454,7 +407,6 @@ impl EditorState {
         self.insert_text(&text);
     }
 
-    /// Returns the range to delete and whether it's an Indent marker.
     fn smart_backspace_range_with_type(
         &self,
         cursor_pos: usize,
@@ -471,11 +423,7 @@ impl EditorState {
         None
     }
 
-    /// Delete backward (backspace).
-    /// - When on an empty container line (just marker, no content), deletes the
-    ///   marker AND the preceding newline to join back to the previous line.
-    /// - When on an empty line (just whitespace/newlines), joins to the previous
-    ///   line's content.
+    /// Delete backward (backspace). Joins lines when appropriate.
     pub fn delete_backward(&mut self) {
         if !self.selection.is_collapsed() {
             self.delete_selection();
@@ -485,19 +433,14 @@ impl EditorState {
             if let Some((delete_range, is_indent_marker)) =
                 self.smart_backspace_range_with_type(cursor_pos)
             {
-                // Deleting a marker - check if we should also delete the newline
-                // to join to the previous line (but NOT for Indent markers)
                 let new_pos = delete_range.start;
                 self.buffer.delete(delete_range, cursor_pos);
 
-                // If we're now at the start of a line (after a newline), delete
-                // the newline too to join to the previous line.
-                // But don't do this for Indent markers - those are just whitespace.
+                // Also delete preceding newline to join lines (but not for Indent markers)
                 if new_pos > 0 && !is_indent_marker {
                     let text = self.buffer.text();
                     let char_before = text[..new_pos].chars().last();
                     if char_before == Some('\n') {
-                        // Delete the newline
                         self.buffer.delete(new_pos - 1..new_pos, new_pos);
                         self.selection = Selection::new(new_pos - 1, new_pos - 1);
                     } else {
@@ -507,33 +450,26 @@ impl EditorState {
                     self.selection = Selection::new(new_pos, new_pos);
                 }
             } else {
-                // Check if we're on an empty line - if so, join to previous content
                 let text = self.buffer.text();
                 let char_before = text[..cursor_pos].chars().last();
 
                 if char_before == Some('\n') {
-                    // We're at the start of a line. Check if this line is empty.
                     let line_idx = self.buffer.byte_to_line(cursor_pos);
                     let lines = self.buffer.lines();
                     if let Some(current_line) = lines.get(line_idx) {
                         let line_text = &text[current_line.range.clone()];
                         if line_text.trim().is_empty() {
-                            // Current line is empty. Check if we should collapse multiple
-                            // newlines or just delete one.
-
-                            // Check if there are more lines after this one with content
                             let has_content_after = lines
                                 .get(line_idx + 1)
                                 .is_some_and(|next| !text[next.range.clone()].trim().is_empty());
 
                             if has_content_after {
-                                // There's content after - just delete one newline
                                 self.buffer.delete(cursor_pos - 1..cursor_pos, cursor_pos);
                                 self.selection = Selection::new(cursor_pos - 1, cursor_pos - 1);
                                 return;
                             }
 
-                            // No content after - delete all the way back to previous content
+                            // Collapse all trailing newlines
                             let mut delete_start = cursor_pos;
                             let bytes = text.as_bytes();
                             while delete_start > 0 && bytes[delete_start - 1] == b'\n' {
@@ -546,7 +482,7 @@ impl EditorState {
                     }
                 }
 
-                // Normal backspace - delete one character
+                // Normal backspace
                 let new_cursor = self.cursor().move_left(&self.buffer);
                 self.buffer
                     .delete(new_cursor.offset..cursor_pos, cursor_pos);
