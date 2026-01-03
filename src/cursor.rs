@@ -33,12 +33,13 @@ impl Cursor {
             return *self;
         }
 
-        // Find the start of the previous character (handle UTF-8)
-        let text = buffer.text();
-        let mut new_offset = self.offset - 1;
-        while new_offset > 0 && !text.is_char_boundary(new_offset) {
-            new_offset -= 1;
+        // Convert byte offset to char index, move back one char, convert back to bytes
+        let rope = buffer.rope();
+        let char_idx = rope.byte_to_char(self.offset);
+        if char_idx == 0 {
+            return *self;
         }
+        let new_offset = rope.char_to_byte(char_idx - 1);
 
         Self { offset: new_offset }
     }
@@ -49,12 +50,14 @@ impl Cursor {
             return *self;
         }
 
-        // Find the start of the next character (handle UTF-8)
-        let text = buffer.text();
-        let mut new_offset = self.offset + 1;
-        while new_offset < len && !text.is_char_boundary(new_offset) {
-            new_offset += 1;
+        // Convert byte offset to char index, move forward one char, convert back to bytes
+        let rope = buffer.rope();
+        let char_idx = rope.byte_to_char(self.offset);
+        let char_count = rope.len_chars();
+        if char_idx >= char_count {
+            return *self;
         }
+        let new_offset = rope.char_to_byte(char_idx + 1);
 
         Self { offset: new_offset }
     }
@@ -212,49 +215,56 @@ impl Selection {
     }
 
     pub fn select_word_at(offset: usize, buffer: &Buffer) -> Self {
-        let text = buffer.text();
-        let len = text.len();
+        let rope = buffer.rope();
+        let len_bytes = buffer.len_bytes();
 
-        if len == 0 || offset >= len {
-            return Self::new(offset.min(len), offset.min(len));
+        if len_bytes == 0 || offset >= len_bytes {
+            return Self::new(offset.min(len_bytes), offset.min(len_bytes));
         }
 
         // Helper to check if a character is part of a word
         let is_word_char = |c: char| c.is_alphanumeric() || c == '_';
 
-        // Find the character at offset
-        let char_at_offset = text[offset..].chars().next();
+        // Convert byte offset to char index
+        let char_idx = rope.byte_to_char(offset);
+        let char_count = rope.len_chars();
+
+        if char_idx >= char_count {
+            return Self::new(offset, offset);
+        }
+
+        // Get the character at the cursor position
+        let c = rope.char(char_idx);
 
         // If we're on a non-word character, just select that character
-        if let Some(c) = char_at_offset
-            && !is_word_char(c)
-        {
-            // Find end of this character
-            let char_end = offset + c.len_utf8();
-            return Self::new(offset, char_end.min(len));
+        if !is_word_char(c) {
+            let char_end = rope.char_to_byte(char_idx + 1);
+            return Self::new(offset, char_end.min(len_bytes));
         }
 
-        // Find word start (scan backward)
-        let mut start = offset;
-        for (i, c) in text[..offset].char_indices().rev() {
-            if is_word_char(c) {
-                start = i;
+        // Find word start (scan backward from char_idx)
+        let mut start_char_idx = char_idx;
+        for i in (0..char_idx).rev() {
+            if is_word_char(rope.char(i)) {
+                start_char_idx = i;
             } else {
                 break;
             }
         }
 
-        // Find word end (scan forward)
-        let mut end = offset;
-        for (i, c) in text[offset..].char_indices() {
-            if is_word_char(c) {
-                end = offset + i + c.len_utf8();
+        // Find word end (scan forward from char_idx)
+        let mut end_char_idx = char_idx + 1;
+        for i in (char_idx + 1)..char_count {
+            if is_word_char(rope.char(i)) {
+                end_char_idx = i + 1;
             } else {
                 break;
             }
         }
 
-        Self::new(start, end)
+        let start_byte = rope.char_to_byte(start_char_idx);
+        let end_byte = rope.char_to_byte(end_char_idx);
+        Self::new(start_byte, end_byte)
     }
 
     pub fn select_line_at(offset: usize, buffer: &Buffer) -> Self {

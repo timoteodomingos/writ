@@ -456,10 +456,13 @@ impl BufferContent {
             {
                 let start = marker.start_byte();
                 let end = marker.end_byte();
-                let text = self.text();
-                let marker_text = &text[start..end];
 
-                let number: usize = marker_text
+                // Extract digits from the marker using rope slice
+                let char_start = self.text.byte_to_char(start);
+                let char_end = self.text.byte_to_char(end);
+                let slice = self.text.slice(char_start..char_end);
+
+                let number: usize = slice
                     .chars()
                     .take_while(|c| c.is_ascii_digit())
                     .collect::<String>()
