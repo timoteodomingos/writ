@@ -113,6 +113,11 @@ impl LineMarkers {
         self.markers.iter().any(|m| m.kind.has_border())
     }
 
+    /// Returns true if this line has any container markers (list, blockquote, checkbox).
+    pub fn has_container(&self) -> bool {
+        self.markers.iter().any(|m| m.kind.is_container())
+    }
+
     /// Returns the checkbox state if this line has a task list marker.
     pub fn checkbox(&self) -> Option<bool> {
         for m in &self.markers {
@@ -193,6 +198,16 @@ impl MarkerKind {
     /// Whether this marker has a left border.
     pub fn has_border(&self) -> bool {
         matches!(self, MarkerKind::BlockQuote)
+    }
+
+    /// Whether this marker represents an active container.
+    /// Containers are structures where Enter creates siblings or exits,
+    /// as opposed to plain text where Enter creates paragraph breaks.
+    pub fn is_container(&self) -> bool {
+        matches!(
+            self,
+            MarkerKind::ListItem { .. } | MarkerKind::BlockQuote | MarkerKind::Checkbox { .. }
+        )
     }
 }
 

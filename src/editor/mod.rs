@@ -34,6 +34,25 @@ type CodeBlockRange = (usize, Option<usize>);
 /// ```ignore
 /// let editor = cx.new(|cx| Editor::new("# Hello, world!", cx));
 /// ```
+
+/// Context about the line at the cursor, used by smart editing actions.
+pub struct LineContext<'a> {
+    /// Current cursor byte offset.
+    pub cursor_offset: usize,
+    /// Index of the current line.
+    pub line_idx: usize,
+    /// The current line's markers.
+    pub line: &'a LineMarkers,
+    /// Byte range of content after markers (not trimmed).
+    pub content_range: std::ops::Range<usize>,
+    /// Whether content after markers is empty (whitespace only).
+    pub is_empty: bool,
+    /// Whether this line has any container markers.
+    pub has_container: bool,
+    /// The previous line, if any.
+    pub prev_line: Option<&'a LineMarkers>,
+}
+
 /// Core editing state that can be used without GPUI context.
 /// This contains the buffer and selection, and all editing logic.
 pub struct EditorState {
@@ -82,6 +101,69 @@ impl EditorState {
     fn find_line_at(&self, byte_pos: usize) -> Option<(usize, &LineMarkers)> {
         let idx = self.buffer.byte_to_line(byte_pos);
         self.buffer.lines().get(idx).map(|line| (idx, line))
+    }
+
+    /// Delete a range and adjust cursor position accordingly.
+    /// If deleting before the cursor, the cursor shifts back.
+    /// If deleting at or after the cursor, the cursor moves to the start of deleted range.
+    fn delete_and_adjust(&mut self, range: std::ops::Range<usize>) {
+        let cursor_offset = self.cursor().offset;
+        self.buffer.delete(range.clone(), cursor_offset);
+        let deleted_len = range.end - range.start;
+        let new_pos = if range.end <= cursor_offset {
+            cursor_offset - deleted_len
+        } else {
+            range.start
+        };
+        self.selection = Selection::new(new_pos, new_pos);
+    }
+
+    /// Insert text at a position and adjust cursor accordingly.
+    /// If inserting before the cursor, the cursor shifts forward.
+    /// If inserting at or after the cursor, the cursor moves to end of inserted text.
+    fn insert_at(&mut self, pos: usize, text: &str) {
+        let cursor_offset = self.cursor().offset;
+        self.buffer.insert(pos, text, cursor_offset);
+        let new_pos = if pos <= cursor_offset {
+            cursor_offset + text.len()
+        } else {
+            pos + text.len()
+        };
+        self.selection = Selection::new(new_pos, new_pos);
+    }
+
+    /// Get context about the line at the cursor.
+    /// Returns None if the cursor is not on a valid line.
+    fn line_context(&self) -> Option<LineContext<'_>> {
+        let cursor_offset = self.cursor().offset;
+        let line_idx = self.buffer.byte_to_line(cursor_offset);
+        let lines = self.buffer.lines();
+        let line = lines.get(line_idx)?;
+
+        let content_start = line
+            .marker_range()
+            .map(|r| r.end)
+            .unwrap_or(line.range.start);
+        let content_range = content_start..line.range.end;
+
+        let buffer_text = self.buffer.text();
+        let is_empty = buffer_text[content_range.clone()].trim().is_empty();
+
+        let prev_line = if line_idx > 0 {
+            lines.get(line_idx - 1)
+        } else {
+            None
+        };
+
+        Some(LineContext {
+            cursor_offset,
+            line_idx,
+            line,
+            content_range,
+            is_empty,
+            has_container: line.has_container(),
+            prev_line,
+        })
     }
 
     /// Check if cursor is at end of a "pending marker" (e.g., `*|` or `1.|`)
@@ -194,43 +276,32 @@ impl EditorState {
     /// - On line with markers: increases nesting by adding indentation
     /// - On plain text adjacent to container: adds the container's marker
     pub fn smart_tab(&mut self) {
-        let cursor_offset = self.cursor().offset;
-        let line_idx = self.buffer.byte_to_line(cursor_offset);
-        let lines = self.buffer.lines();
-        let buffer_text = self.buffer.text();
-
-        let Some(current_line) = lines.get(line_idx) else {
+        let Some(ctx) = self.line_context() else {
             return;
         };
 
-        let line_start = current_line.range.start;
-        let current_has_markers = !current_line.markers.is_empty();
+        let buffer_text = self.buffer.text();
+        let line_start = ctx.line.range.start;
 
-        if current_has_markers {
+        if !ctx.line.markers.is_empty() {
             // Line already has markers - check if we can nest deeper
-            // Can only nest one level deeper than previous line
-            if line_idx > 0 {
-                let prev_line = &lines[line_idx - 1];
-                let prev_marker_width = prev_line.marker_width();
-                let current_marker_width = current_line.marker_width();
+            if let Some(prev) = ctx.prev_line {
+                let prev_marker_width = prev.marker_width();
+                let current_marker_width = ctx.line.marker_width();
 
-                // Can only indent if current indent is less than prev + one nesting level
-                // One nesting level is typically 2 spaces
+                // Can only indent one level deeper than previous line
                 if current_marker_width >= prev_marker_width + 2 {
-                    // Already at max nesting, do nothing
                     return;
                 }
             }
 
             // Increase nesting by adding 2 spaces at start
-            self.buffer.insert(line_start, "  ", cursor_offset);
-            let new_offset = cursor_offset + 2;
-            self.selection = Selection::new(new_offset, new_offset);
-        } else if line_idx > 0 {
+            self.insert_at(line_start, "  ");
+        } else if ctx.line_idx > 0 {
             // No markers on current line - find the nearest container to nest under
-            // Walk backwards to find a line with markers (skip blank lines)
+            let lines = self.buffer.lines();
             let mut container_line = None;
-            for i in (0..line_idx).rev() {
+            for i in (0..ctx.line_idx).rev() {
                 let line = &lines[i];
                 if !line.markers.is_empty() {
                     container_line = Some(line);
@@ -245,23 +316,19 @@ impl EditorState {
 
             if let Some(container) = container_line {
                 // Check if previous line is blank (meaning we're starting a nested block)
-                let prev_line = &lines[line_idx - 1];
+                let prev_line = &lines[ctx.line_idx - 1];
                 let prev_line_text = &buffer_text[prev_line.range.clone()];
                 let is_after_blank = prev_line_text.trim().is_empty();
 
                 if is_after_blank {
                     // After blank line - just indent with spaces to nest as block
                     let indent = " ".repeat(container.marker_width());
-                    self.buffer.insert(line_start, &indent, cursor_offset);
-                    let new_offset = cursor_offset + indent.len();
-                    self.selection = Selection::new(new_offset, new_offset);
+                    self.insert_at(line_start, &indent);
                 } else {
                     // Not after blank - use full continuation (adds list marker)
                     let continuation = container.continuation(&buffer_text);
                     if !continuation.is_empty() {
-                        self.buffer.insert(line_start, &continuation, cursor_offset);
-                        let new_offset = cursor_offset + continuation.len();
-                        self.selection = Selection::new(new_offset, new_offset);
+                        self.insert_at(line_start, &continuation);
                     }
                 }
             }
@@ -273,8 +340,6 @@ impl EditorState {
     /// - On empty container line: exits the innermost container
     pub fn smart_enter(&mut self) {
         // Auto-complete pending markers like `*|` → `* |`
-        // After completing, use shift_enter logic (create sibling) since user
-        // just created the marker and wants to continue the list
         if self.is_pending_marker(self.cursor().offset) {
             self.complete_pending_marker();
             let text = self.compute_smart_enter_text(self.cursor().offset);
@@ -282,96 +347,58 @@ impl EditorState {
             return;
         }
 
-        let cursor_offset = self.cursor().offset;
-        let line_idx = self.buffer.byte_to_line(cursor_offset);
-        let lines = self.buffer.lines();
-
-        let Some(current_line) = lines.get(line_idx) else {
+        let Some(ctx) = self.line_context() else {
             self.insert_text("\n");
             return;
         };
 
-        // Check if line is empty after markers
         let buffer_text = self.buffer.text();
-        let line_text = &buffer_text[current_line.range.clone()];
-        let marker_end = current_line
-            .marker_range()
-            .map(|r| r.end - current_line.range.start)
-            .unwrap_or(0);
-        let content_after_marker = line_text[marker_end..].trim();
 
-        // Check if this is a paragraph line (no markers, or only Indent marker)
-        let is_paragraph = current_line.markers.is_empty()
-            || (current_line.markers.len() == 1
-                && matches!(
-                    current_line.markers[0].kind,
-                    crate::marker::MarkerKind::Indent
-                ));
-
-        if is_paragraph {
-            if content_after_marker.is_empty() && !current_line.markers.is_empty() {
-                // Empty nested paragraph line (just indent) - exit by removing indent
-                // Just delete the indent, cursor stays on the now-empty line
-                let indent_marker = &current_line.markers[0];
-                let delete_range = indent_marker.range.clone();
-                let delete_len = delete_range.len();
-                self.buffer.delete(delete_range, cursor_offset);
-                let new_cursor = cursor_offset - delete_len;
-                self.selection = Selection::new(new_cursor, new_cursor);
+        if !ctx.has_container {
+            // Paragraph (no container markers)
+            if ctx.is_empty && !ctx.line.markers.is_empty() {
+                // Empty nested paragraph (just indent) - exit by removing indent
+                self.delete_and_adjust(ctx.line.markers[0].range.clone());
             } else {
                 // Paragraph with content - create paragraph break
-                // For nested paragraph, maintain the indent after the blank line
-                let indent = if current_line.markers.len() == 1 {
-                    buffer_text[current_line.markers[0].range.clone()].to_string()
+                let indent = if ctx.line.markers.len() == 1 {
+                    buffer_text[ctx.line.markers[0].range.clone()].to_string()
                 } else {
                     String::new()
                 };
-                let insert_text = format!("\n\n{}", indent);
-                self.insert_text(&insert_text);
+                self.insert_text(&format!("\n\n{}", indent));
             }
-        } else if content_after_marker.is_empty() {
-            // Empty container line (list/blockquote) - exit the innermost container
-            // Delete the innermost marker and insert newline with remaining structure
-            let innermost = &current_line.markers[0];
+        } else if ctx.is_empty {
+            // Empty container line - exit the innermost container
+            let innermost = &ctx.line.markers[0];
             let delete_range = innermost.range.clone();
 
-            // Calculate what continuation remains after removing innermost
-            // Need to compute this BEFORE deleting, using the original buffer text
-            let remaining_continuation: String = current_line
+            // Calculate remaining continuation after removing innermost
+            let remaining_continuation: String = ctx
+                .line
                 .markers
                 .iter()
-                .skip(1) // Skip innermost
-                .rev() // Markers are innermost to outermost, so reverse for text order
+                .skip(1)
+                .rev()
                 .map(|m| match &m.kind {
-                    crate::marker::MarkerKind::Indent
-                    | crate::marker::MarkerKind::ListItem { .. } => {
+                    MarkerKind::Indent | MarkerKind::ListItem { .. } => {
                         buffer_text[m.range.clone()].to_string()
                     }
                     _ => m.kind.continuation().to_string(),
                 })
                 .collect();
 
-            // Delete the innermost marker
-            let delete_len = delete_range.len();
-            self.buffer.delete(delete_range, cursor_offset);
+            self.delete_and_adjust(delete_range);
+            let pos = self.cursor().offset;
 
-            // Cursor moves back by the deleted length
-            let new_cursor = cursor_offset - delete_len;
-            self.selection = Selection::new(new_cursor, new_cursor);
-
-            // Insert newline with remaining continuation
             if remaining_continuation.is_empty() {
-                self.buffer.insert(new_cursor, "\n", new_cursor);
-                self.selection = Selection::new(new_cursor + 1, new_cursor + 1);
+                self.insert_at(pos, "\n");
             } else {
-                let insert_text = format!("\n{}", remaining_continuation);
-                self.buffer.insert(new_cursor, &insert_text, new_cursor);
-                let new_offset = new_cursor + insert_text.len();
-                self.selection = Selection::new(new_offset, new_offset);
+                self.insert_at(pos, &format!("\n{}", remaining_continuation));
             }
         } else {
             // Line has content - create sibling
-            let text = self.compute_smart_enter_text(cursor_offset);
+            let text = self.compute_smart_enter_text(ctx.cursor_offset);
             self.insert_text(&text);
         }
     }
@@ -381,50 +408,33 @@ impl EditorState {
     /// - On line with markers: removes the innermost marker
     /// - Does nothing if result would be invalid (empty line after container)
     pub fn smart_shift_tab(&mut self) {
-        let cursor_offset = self.cursor().offset;
-        let line_idx = self.buffer.byte_to_line(cursor_offset);
-        let lines = self.buffer.lines();
-
-        let Some(current_line) = lines.get(line_idx) else {
+        let Some(ctx) = self.line_context() else {
             return;
         };
 
         // No markers = nothing to remove
-        if current_line.markers.is_empty() {
+        if ctx.line.markers.is_empty() {
             return;
         }
 
-        // Check if line has content after the markers
-        let line_text = &self.buffer.text()[current_line.range.clone()];
-        let marker_end = current_line
-            .marker_range()
-            .map(|r| r.end - current_line.range.start)
-            .unwrap_or(0);
-        let content_after_marker = line_text[marker_end..].trim();
+        let buffer_text = self.buffer.text();
+        let line_text = &buffer_text[ctx.line.range.clone()];
 
         // Check if line starts with indentation (2 spaces) - this means it's nested
         if line_text.starts_with("  ") {
             // Unnesting is always valid - remove 2 spaces of indentation
-            let delete_start = current_line.range.start;
+            let delete_start = ctx.line.range.start;
             let delete_end = delete_start + 2;
-            self.buffer.delete(delete_start..delete_end, cursor_offset);
-            let new_offset = cursor_offset.saturating_sub(2);
-            self.selection = Selection::new(new_offset, new_offset);
+            self.delete_and_adjust(delete_start..delete_end);
         } else {
             // Line is at root level - removing the marker would leave an empty line
             // after the previous container, which is invalid
-            if content_after_marker.is_empty() && line_idx > 0 {
+            if ctx.is_empty && ctx.line_idx > 0 {
                 return;
             }
 
             // Remove the innermost (first) marker
-            // Markers are stored innermost to outermost
-            let innermost = &current_line.markers[0];
-            let delete_range = innermost.range.clone();
-            let delete_len = delete_range.len();
-            self.buffer.delete(delete_range, cursor_offset);
-            let new_offset = cursor_offset.saturating_sub(delete_len);
-            self.selection = Selection::new(new_offset, new_offset);
+            self.delete_and_adjust(ctx.line.markers[0].range.clone());
         }
     }
 
