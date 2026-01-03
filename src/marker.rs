@@ -19,8 +19,11 @@ pub enum MarkerKind {
         checked: bool,
     },
     Heading(u8),
+    /// A code block fence (``` or ~~~).
+    /// `is_opening` is true for the opening fence, false for the closing fence.
     CodeBlockFence {
         language: Option<String>,
+        is_opening: bool,
     },
     CodeBlockContent,
     ThematicBreak,
@@ -378,7 +381,7 @@ pub fn markers_at(nodes: &[Node], rope: &Rope, line_start: usize, line_end: usiz
             "fenced_code_block_delimiter" => {
                 // Check if we already recorded a language from info_string
                 let language = markers.iter().find_map(|m| {
-                    if let MarkerKind::CodeBlockFence { language } = &m.kind {
+                    if let MarkerKind::CodeBlockFence { language, .. } = &m.kind {
                         language.clone()
                     } else {
                         None
@@ -386,8 +389,32 @@ pub fn markers_at(nodes: &[Node], rope: &Rope, line_start: usize, line_end: usiz
                 });
                 // Remove any placeholder fence marker we added from info_string
                 markers.retain(|m| !matches!(m.kind, MarkerKind::CodeBlockFence { .. }));
+
+                // Determine if this is opening or closing fence by checking if it's
+                // the first fenced_code_block_delimiter child of the parent fenced_code_block.
+                // Default to true (opening) for incomplete/unparsed fences.
+                let is_opening = node
+                    .parent()
+                    .map(|parent| {
+                        if parent.kind() == "fenced_code_block" {
+                            // Find the first delimiter child
+                            let mut cursor = parent.walk();
+                            for child in parent.children(&mut cursor) {
+                                if child.kind() == "fenced_code_block_delimiter" {
+                                    return child.start_byte() == start;
+                                }
+                            }
+                        }
+                        // Not inside a proper fenced_code_block - treat as opening
+                        true
+                    })
+                    .unwrap_or(true);
+
                 markers.push(Marker {
-                    kind: MarkerKind::CodeBlockFence { language },
+                    kind: MarkerKind::CodeBlockFence {
+                        language,
+                        is_opening,
+                    },
                     range: start..end,
                 });
             }
@@ -400,13 +427,41 @@ pub fn markers_at(nodes: &[Node], rope: &Rope, line_start: usize, line_end: usiz
                     Some(lang.to_string())
                 };
                 // Store the language temporarily - will be picked up by delimiter
+                // Mark as opening since info_string only appears on opening fences
                 markers.push(Marker {
-                    kind: MarkerKind::CodeBlockFence { language },
+                    kind: MarkerKind::CodeBlockFence {
+                        language,
+                        is_opening: true,
+                    },
                     range: start..end,
                 });
             }
 
             _ => {}
+        }
+    }
+
+    // Fallback: If no fence marker was detected but the line looks like a fence,
+    // add a closing fence marker. This handles the case where tree-sitter doesn't
+    // parse the closing fence when there's no trailing content.
+    if !markers
+        .iter()
+        .any(|m| matches!(m.kind, MarkerKind::CodeBlockFence { .. }))
+    {
+        let line_text = rope_slice_cow(rope, line_start, line_end);
+        let trimmed = line_text.trim();
+        // Check for fence pattern: 3+ backticks or tildes, nothing else
+        if (trimmed.starts_with("```") && trimmed.chars().skip(3).all(|c| c == '`'))
+            || (trimmed.starts_with("~~~") && trimmed.chars().skip(3).all(|c| c == '~'))
+        {
+            // This is likely an undetected closing fence
+            markers.push(Marker {
+                kind: MarkerKind::CodeBlockFence {
+                    language: None,
+                    is_opening: false,
+                },
+                range: line_start..line_end,
+            });
         }
     }
 
@@ -623,7 +678,8 @@ mod tests {
         assert_eq!(
             kinds(&lines[0].markers),
             vec![&MarkerKind::CodeBlockFence {
-                language: Some("rust".to_string())
+                language: Some("rust".to_string()),
+                is_opening: true,
             }]
         );
         // Content lines have no markers (code block detection handled separately)
@@ -631,7 +687,10 @@ mod tests {
         // Closing fence
         assert_eq!(
             kinds(&lines[2].markers),
-            vec![&MarkerKind::CodeBlockFence { language: None }]
+            vec![&MarkerKind::CodeBlockFence {
+                language: None,
+                is_opening: false,
+            }]
         );
     }
 
@@ -645,7 +704,8 @@ mod tests {
         assert_eq!(
             kinds(&lines[0].markers),
             vec![&MarkerKind::CodeBlockFence {
-                language: Some("rust".to_string())
+                language: Some("rust".to_string()),
+                is_opening: true,
             }]
         );
         // Content lines have no markers
@@ -655,7 +715,36 @@ mod tests {
         // Closing fence
         assert_eq!(
             kinds(&lines[4].markers),
-            vec![&MarkerKind::CodeBlockFence { language: None }]
+            vec![&MarkerKind::CodeBlockFence {
+                language: None,
+                is_opening: false,
+            }]
+        );
+    }
+
+    #[test]
+    fn test_closing_fence_without_trailing_newline() {
+        // Without trailing newline - the closing fence should still be detected
+        let buf: Buffer = "```rust\ncode\n```".parse().unwrap();
+        let lines = buf.lines();
+
+        // Opening fence
+        assert_eq!(
+            kinds(&lines[0].markers),
+            vec![&MarkerKind::CodeBlockFence {
+                language: Some("rust".to_string()),
+                is_opening: true,
+            }]
+        );
+        // Content line
+        assert_eq!(kinds(&lines[1].markers), vec![] as Vec<&MarkerKind>);
+        // Closing fence should be detected even without trailing newline
+        assert_eq!(
+            kinds(&lines[2].markers),
+            vec![&MarkerKind::CodeBlockFence {
+                language: None,
+                is_opening: false,
+            }]
         );
     }
 

@@ -288,7 +288,7 @@ impl BufferContent {
         while i < lines.len() {
             // Check if this is a fence line with a language
             let fence_lang = lines[i].markers.iter().find_map(|m| {
-                if let MarkerKind::CodeBlockFence { language } = &m.kind {
+                if let MarkerKind::CodeBlockFence { language, .. } = &m.kind {
                     language.clone()
                 } else {
                     None

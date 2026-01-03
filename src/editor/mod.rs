@@ -136,6 +136,62 @@ impl EditorState {
         self.buffer.lines().get(idx).map(|line| (idx, line))
     }
 
+    /// Check if the cursor is inside a code block (between opening and closing fences,
+    /// or after an opening fence with no closing fence yet).
+    fn cursor_in_code_block(&self) -> bool {
+        let lines = self.buffer.lines();
+        let cursor_line = self.buffer.byte_to_line(self.cursor().offset);
+
+        let mut i = 0;
+        while i < lines.len() {
+            // Check for opening fence
+            let is_opening_fence = lines[i].markers.iter().any(|m| {
+                matches!(
+                    m.kind,
+                    MarkerKind::CodeBlockFence {
+                        is_opening: true,
+                        ..
+                    }
+                )
+            });
+
+            if is_opening_fence {
+                let start = i;
+                i += 1;
+                let mut found_close = false;
+                while i < lines.len() {
+                    // Check for closing fence
+                    let is_closing_fence = lines[i].markers.iter().any(|m| {
+                        matches!(
+                            m.kind,
+                            MarkerKind::CodeBlockFence {
+                                is_opening: false,
+                                ..
+                            }
+                        )
+                    });
+                    if is_closing_fence {
+                        // Found a complete code block
+                        if cursor_line > start && cursor_line < i {
+                            return true;
+                        }
+                        i += 1;
+                        found_close = true;
+                        break;
+                    }
+                    i += 1;
+                }
+                // Incomplete code block (no closing fence) - cursor is inside if after start
+                if !found_close && cursor_line > start {
+                    return true;
+                }
+            } else {
+                i += 1;
+            }
+        }
+        false
+    }
+
     /// Delete a range and adjust cursor position accordingly.
     /// If deleting before the cursor, the cursor shifts back.
     /// If deleting at or after the cursor, the cursor moves to the start of deleted range.
@@ -360,16 +416,34 @@ impl EditorState {
 
         let buffer_text = self.buffer.text();
 
-        // Check if line has a code fence marker
-        let has_fence = ctx
-            .line
-            .markers
-            .iter()
-            .any(|m| matches!(m.kind, MarkerKind::CodeBlockFence { .. }));
+        // Check if line has an opening code fence marker
+        let has_opening_fence = ctx.line.markers.iter().any(|m| {
+            matches!(
+                m.kind,
+                MarkerKind::CodeBlockFence {
+                    is_opening: true,
+                    ..
+                }
+            )
+        });
 
-        if has_fence {
-            // Code fence: just insert newline with any outer container continuations
-            // (e.g., blockquote markers), but not the fence itself
+        // Check if line has a closing code fence marker
+        let has_closing_fence = ctx.line.markers.iter().any(|m| {
+            matches!(
+                m.kind,
+                MarkerKind::CodeBlockFence {
+                    is_opening: false,
+                    ..
+                }
+            )
+        });
+
+        // Check if we're inside a code block (between fences)
+        let in_code_block = self.cursor_in_code_block();
+
+        if has_opening_fence || in_code_block {
+            // Opening fence or inside code block: just insert newline with any outer container
+            // continuations (e.g., blockquote markers), but not the fence itself
             let continuation: String = ctx
                 .line
                 .markers
@@ -383,14 +457,35 @@ impl EditorState {
             } else {
                 self.insert_text(&format!("\n{}", continuation));
             }
+        } else if has_closing_fence {
+            // Closing fence: create paragraph break to start new content
+            let continuation: String = ctx
+                .line
+                .markers
+                .iter()
+                .rev()
+                .filter(|m| !matches!(m.kind, MarkerKind::CodeBlockFence { .. }))
+                .map(|m| m.kind.continuation())
+                .collect();
+            if continuation.is_empty() {
+                self.insert_text("\n\n");
+            } else {
+                self.insert_text(&format!("\n\n{}", continuation));
+            }
         } else if !ctx.has_container {
             // Paragraph
             if ctx.is_empty && !ctx.line.markers.is_empty() {
                 // Empty nested paragraph - exit by removing indent
                 self.delete_and_adjust(ctx.line.markers[0].range.clone());
+            } else if ctx.is_empty {
+                // Already on empty line - just add one newline
+                self.insert_text("\n");
             } else {
                 // Create paragraph break
-                let indent = if ctx.line.markers.len() == 1 {
+                // Only preserve Indent markers as indent, not other single markers like CodeBlockFence
+                let indent = if ctx.line.markers.len() == 1
+                    && matches!(ctx.line.markers[0].kind, MarkerKind::Indent)
+                {
                     buffer_text[ctx.line.markers[0].range.clone()].to_string()
                 } else {
                     String::new()
@@ -1669,8 +1764,8 @@ hello world
         }
 
         #[test]
-        fn enter_on_closing_code_fence_inserts_single_newline() {
-            // Closing fence: just insert newline
+        fn enter_on_closing_code_fence_creates_paragraph_break() {
+            // Closing fence: create paragraph break to start new content
             // The closing fence needs trailing content for tree-sitter to parse it
             let mut state = editor_with_cursor(
                 r#"
@@ -1686,8 +1781,30 @@ after"#,
 ```rust
 code
 ```
+
 |
 after"#,
+            );
+        }
+
+        #[test]
+        fn enter_on_closing_code_fence_without_trailing_content() {
+            // Closing fence without trailing content - should still create paragraph break
+            let mut state = editor_with_cursor(
+                r#"
+```rust
+code
+```|"#,
+            );
+            state.smart_enter();
+            assert_editor_eq(
+                &state,
+                r#"
+```rust
+code
+```
+
+|"#,
             );
         }
 
@@ -1704,6 +1821,54 @@ after"#,
                 r#"
 > ```rust
 > |"#,
+            );
+        }
+
+        #[test]
+        fn enter_inside_code_block_inserts_single_newline() {
+            // Inside code block: just insert newline, not paragraph break
+            // Need trailing newline after closing fence for tree-sitter to detect it
+            let mut state = editor_with_cursor(
+                r#"
+```rust
+let x = 1;|
+```
+"#,
+            );
+            state.smart_enter();
+            assert_editor_eq(
+                &state,
+                r#"
+```rust
+let x = 1;
+|
+```
+"#,
+            );
+        }
+
+        #[test]
+        fn enter_after_code_block_creates_paragraph_break() {
+            // After a complete code block, Enter should create paragraph break
+            let mut state = editor_with_cursor(
+                r#"
+```rust
+```
+|"#,
+            );
+            // Debug
+            println!("Text before: {:?}", state.text());
+            println!("Lines: {:?}", state.buffer.lines());
+            println!("cursor_in_code_block: {}", state.cursor_in_code_block());
+
+            state.smart_enter();
+            assert_editor_eq(
+                &state,
+                r#"
+```rust
+```
+
+|"#,
             );
         }
     }
