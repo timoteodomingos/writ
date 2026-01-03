@@ -287,80 +287,8 @@ impl Selection {
 mod tests {
     use super::*;
 
-    #[test]
-    fn test_cursor_move_left_right() {
-        let buf: Buffer = "hello".parse().unwrap();
-        let cursor = Cursor::new(2);
-
-        let left = cursor.move_left(&buf);
-        assert_eq!(left.offset, 1);
-
-        let right = cursor.move_right(&buf);
-        assert_eq!(right.offset, 3);
-    }
-
-    #[test]
-    fn test_cursor_move_left_at_start() {
-        let buf: Buffer = "hello".parse().unwrap();
-        let cursor = Cursor::start();
-
-        let left = cursor.move_left(&buf);
-        assert_eq!(left.offset, 0); // stays at 0
-    }
-
-    #[test]
-    fn test_cursor_move_right_at_end() {
-        let buf: Buffer = "hello".parse().unwrap();
-        let cursor = Cursor::end(&buf);
-
-        let right = cursor.move_right(&buf);
-        assert_eq!(right.offset, 5); // stays at end
-    }
-
-    #[test]
-    fn test_cursor_move_up_down() {
-        let buf: Buffer = "line one\nline two\nline three".parse().unwrap();
-        // Start at "two" (offset 14, column 5 on line 1)
-        let cursor = Cursor::new(14);
-
-        let up = cursor.move_up(&buf);
-        // Should be at column 5 on line 0 = offset 5
-        assert_eq!(up.offset, 5);
-
-        let down = cursor.move_down(&buf);
-        // Should be at column 5 on line 2 = offset 9 + 9 + 5 = 23
-        assert_eq!(down.offset, 23);
-    }
-
-    #[test]
-    fn test_cursor_move_up_from_first_line() {
-        let buf: Buffer = "hello\nworld".parse().unwrap();
-        let cursor = Cursor::new(3); // middle of "hello"
-
-        let up = cursor.move_up(&buf);
-        assert_eq!(up.offset, 0); // goes to start
-    }
-
-    #[test]
-    fn test_cursor_move_down_from_last_line() {
-        let buf: Buffer = "hello\nworld".parse().unwrap();
-        let cursor = Cursor::new(8); // middle of "world"
-
-        let down = cursor.move_down(&buf);
-        assert_eq!(down.offset, 11); // goes to end
-    }
-
-    #[test]
-    fn test_cursor_line_start_end() {
-        let buf: Buffer = "hello\nworld".parse().unwrap();
-        let cursor = Cursor::new(8); // middle of "world"
-
-        let start = cursor.move_to_line_start(&buf);
-        assert_eq!(start.offset, 6); // start of "world"
-
-        let end = cursor.move_to_line_end(&buf);
-        assert_eq!(end.offset, 11); // end of "world"
-    }
+    // Cursor movement tests are in editor/mod.rs using the | cursor style.
+    // These tests cover Selection data structure behavior.
 
     #[test]
     fn test_selection_range() {

@@ -80,6 +80,42 @@ impl EditorState {
         self.selection = Selection::new(offset, offset);
     }
 
+    /// Move cursor left by one character.
+    pub fn move_left(&mut self) {
+        let new_cursor = self.cursor().move_left(&self.buffer);
+        self.selection = Selection::new(new_cursor.offset, new_cursor.offset);
+    }
+
+    /// Move cursor right by one character.
+    pub fn move_right(&mut self) {
+        let new_cursor = self.cursor().move_right(&self.buffer);
+        self.selection = Selection::new(new_cursor.offset, new_cursor.offset);
+    }
+
+    /// Move cursor up by one line.
+    pub fn move_up(&mut self) {
+        let new_cursor = self.cursor().move_up(&self.buffer);
+        self.selection = Selection::new(new_cursor.offset, new_cursor.offset);
+    }
+
+    /// Move cursor down by one line.
+    pub fn move_down(&mut self) {
+        let new_cursor = self.cursor().move_down(&self.buffer);
+        self.selection = Selection::new(new_cursor.offset, new_cursor.offset);
+    }
+
+    /// Move cursor to start of current line.
+    pub fn move_to_line_start(&mut self) {
+        let new_cursor = self.cursor().move_to_line_start(&self.buffer);
+        self.selection = Selection::new(new_cursor.offset, new_cursor.offset);
+    }
+
+    /// Move cursor to end of current line.
+    pub fn move_to_line_end(&mut self) {
+        let new_cursor = self.cursor().move_to_line_end(&self.buffer);
+        self.selection = Selection::new(new_cursor.offset, new_cursor.offset);
+    }
+
     /// Insert text at the current cursor position.
     pub fn insert_text(&mut self, text: &str) {
         let cursor_before = self.cursor().offset;
@@ -2067,6 +2103,87 @@ plain text|"#,
 |
   paragraph"#,
             );
+        }
+    }
+
+    mod cursor_movement_tests {
+        use super::*;
+
+        #[test]
+        fn move_left() {
+            let mut state = editor_with_cursor("hel|lo");
+            state.move_left();
+            assert_editor_eq(&state, "he|llo");
+        }
+
+        #[test]
+        fn move_left_at_start() {
+            let mut state = editor_with_cursor("|hello");
+            state.move_left();
+            assert_editor_eq(&state, "|hello");
+        }
+
+        #[test]
+        fn move_right() {
+            let mut state = editor_with_cursor("he|llo");
+            state.move_right();
+            assert_editor_eq(&state, "hel|lo");
+        }
+
+        #[test]
+        fn move_right_at_end() {
+            let mut state = editor_with_cursor("hello|");
+            state.move_right();
+            assert_editor_eq(&state, "hello|");
+        }
+
+        #[test]
+        fn move_up() {
+            let mut state = editor_with_cursor("line one\nline |two\nline three");
+            state.move_up();
+            assert_editor_eq(&state, "line |one\nline two\nline three");
+        }
+
+        #[test]
+        fn move_up_from_first_line() {
+            let mut state = editor_with_cursor("hel|lo\nworld");
+            state.move_up();
+            assert_editor_eq(&state, "|hello\nworld");
+        }
+
+        #[test]
+        fn move_down() {
+            let mut state = editor_with_cursor("line |one\nline two\nline three");
+            state.move_down();
+            assert_editor_eq(&state, "line one\nline |two\nline three");
+        }
+
+        #[test]
+        fn move_down_from_last_line() {
+            let mut state = editor_with_cursor("hello\nwor|ld");
+            state.move_down();
+            assert_editor_eq(&state, "hello\nworld|");
+        }
+
+        #[test]
+        fn move_up_preserves_column() {
+            let mut state = editor_with_cursor("short\nlonger line|");
+            state.move_up();
+            assert_editor_eq(&state, "short|\nlonger line");
+        }
+
+        #[test]
+        fn move_to_line_start() {
+            let mut state = editor_with_cursor("hello\nwor|ld");
+            state.move_to_line_start();
+            assert_editor_eq(&state, "hello\n|world");
+        }
+
+        #[test]
+        fn move_to_line_end() {
+            let mut state = editor_with_cursor("hello\nwor|ld");
+            state.move_to_line_end();
+            assert_editor_eq(&state, "hello\nworld|");
         }
     }
 }
