@@ -79,8 +79,13 @@ impl LineMarkers {
             return String::new();
         }
 
-        // If the only marker is Indent, return empty - padding is handled by rendering
-        if self.markers.len() == 1 && matches!(self.markers[0].kind, MarkerKind::Indent) {
+        // If the only marker is Indent or BlockQuote, return empty - padding is handled by rendering
+        if self.markers.len() == 1
+            && matches!(
+                self.markers[0].kind,
+                MarkerKind::Indent | MarkerKind::BlockQuote
+            )
+        {
             return String::new();
         }
 
@@ -108,8 +113,13 @@ impl LineMarkers {
             return String::new();
         }
 
-        // If the only marker is Indent, return empty - padding is handled by rendering
-        if self.markers.len() == 1 && matches!(self.markers[0].kind, MarkerKind::Indent) {
+        // If the only marker is Indent or BlockQuote, return empty - padding is handled by rendering
+        if self.markers.len() == 1
+            && matches!(
+                self.markers[0].kind,
+                MarkerKind::Indent | MarkerKind::BlockQuote
+            )
+        {
             return String::new();
         }
 

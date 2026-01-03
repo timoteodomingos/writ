@@ -757,8 +757,11 @@ impl IntoElement for Line<'_> {
                     };
                 }
                 MarkerKind::BlockQuote => {
+                    // Use marker width for padding so wrapped lines align with content
+                    let marker_chars = marker.range.len();
+                    let padding = self.theme.monospace_char_width * marker_chars as f32;
                     line_div = line_div
-                        .pl_3()
+                        .pl(padding)
                         .border_l_2()
                         .border_color(self.theme.border_color);
                 }
