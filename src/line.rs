@@ -735,6 +735,39 @@ impl<'a> Line<'a> {
         boundaries.sort();
         boundaries.dedup();
 
+        // Pre-compute hidden ranges and style ranges once (O(n) in regions)
+        // to avoid O(n²) nested loops
+        let mut hidden_ranges: Vec<(usize, usize)> = Vec::new();
+        let mut style_ranges: Vec<(Range<usize>, &StyledRegion)> = Vec::new();
+
+        for region in &self.inline_styles {
+            let cursor_inside = self.cursor_offset >= region.full_range.start
+                && self.cursor_offset <= region.full_range.end;
+
+            if !show_all_markers && !cursor_inside {
+                // Opening delimiter range
+                let opening_start = region.full_range.start.max(content_range.start);
+                let opening_end = region.content_range.start.min(content_range.end);
+                if opening_end > opening_start {
+                    hidden_ranges.push((opening_start, opening_end));
+                }
+                // Closing delimiter range
+                let closing_start = region.content_range.end.max(content_range.start);
+                let closing_end = region.full_range.end.min(content_range.end);
+                if closing_end > closing_start {
+                    hidden_ranges.push((closing_start, closing_end));
+                }
+            }
+
+            // Compute the effective style range for this region
+            let style_range = if show_all_markers || cursor_inside {
+                region.full_range.clone()
+            } else {
+                region.content_range.clone()
+            };
+            style_ranges.push((style_range, region));
+        }
+
         for window in boundaries.windows(2) {
             let start = window[0];
             let end = window[1];
@@ -743,25 +776,10 @@ impl<'a> Line<'a> {
                 continue;
             }
 
-            let mut is_hidden = false;
-            if !show_all_markers {
-                for region in &self.inline_styles {
-                    let cursor_inside = self.cursor_offset >= region.full_range.start
-                        && self.cursor_offset <= region.full_range.end;
-
-                    if !cursor_inside {
-                        let in_opening =
-                            start >= region.full_range.start && end <= region.content_range.start;
-                        let in_closing =
-                            start >= region.content_range.end && end <= region.full_range.end;
-
-                        if in_opening || in_closing {
-                            is_hidden = true;
-                            break;
-                        }
-                    }
-                }
-            }
+            // Check if this segment is hidden (O(h) where h = hidden ranges, typically small)
+            let is_hidden = hidden_ranges
+                .iter()
+                .any(|&(h_start, h_end)| start >= h_start && end <= h_end);
 
             if is_hidden {
                 continue;
@@ -777,16 +795,8 @@ impl<'a> Line<'a> {
             let mut is_strikethrough = false;
             let mut is_link = false;
 
-            for region in &self.inline_styles {
-                let cursor_inside = self.cursor_offset >= region.full_range.start
-                    && self.cursor_offset <= region.full_range.end;
-
-                let style_range = if show_all_markers || cursor_inside {
-                    &region.full_range
-                } else {
-                    &region.content_range
-                };
-
+            // Check which styles apply to this segment
+            for (style_range, region) in &style_ranges {
                 if style_range.start <= start && end <= style_range.end {
                     if region.style.bold {
                         is_bold = true;

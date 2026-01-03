@@ -247,8 +247,12 @@ impl BufferContent {
 
     pub fn line(&self, line_idx: usize) -> String {
         let line = self.text.line(line_idx);
-        let s = line.to_string();
-        s.trim_end_matches('\n').to_string()
+        // Avoid double allocation - trim in place
+        let mut s = line.to_string();
+        if s.ends_with('\n') {
+            s.pop();
+        }
+        s
     }
 
     pub fn line_byte_range(&self, line_idx: usize) -> Range<usize> {
@@ -304,7 +308,6 @@ impl BufferContent {
     fn rebuild_code_highlight_cache(&mut self) {
         self.code_highlight_cache.highlights.clear();
 
-        let text = self.text.to_string();
         let lines = &self.lines;
 
         let mut i = 0;
@@ -338,7 +341,12 @@ impl BufferContent {
                         if content_start_offset.is_none() {
                             content_start_offset = Some(lines[i].range.start);
                         }
-                        code_content.push_str(&text[lines[i].range.clone()]);
+                        // Use rope slice instead of full buffer string
+                        let range = &lines[i].range;
+                        let char_start = self.text.byte_to_char(range.start);
+                        let char_end = self.text.byte_to_char(range.end);
+                        let slice = self.text.slice(char_start..char_end);
+                        code_content.push_str(&slice.to_string());
                         code_content.push('\n');
                         block_end = lines[i].range.end;
                         i += 1;
