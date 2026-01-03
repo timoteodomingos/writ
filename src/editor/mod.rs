@@ -519,9 +519,28 @@ impl EditorState {
                 self.insert_at(pos, &format!("\n{}", remaining_continuation));
             }
         } else {
-            // Line has content - create sibling
-            let text = self.compute_smart_enter_text(ctx.cursor_offset);
-            self.insert_text(&text);
+            // Line has content
+            // Check if this is a blockquote-only line (no list markers) - create paragraph break
+            let is_blockquote_only = ctx
+                .line
+                .markers
+                .iter()
+                .all(|m| matches!(m.kind, MarkerKind::BlockQuote | MarkerKind::Indent))
+                && ctx
+                    .line
+                    .markers
+                    .iter()
+                    .any(|m| matches!(m.kind, MarkerKind::BlockQuote));
+
+            if is_blockquote_only {
+                // Paragraph break within blockquote: "> text" -> "> text\n>\n> "
+                let continuation = ctx.line.continuation(&buffer_text);
+                self.insert_text(&format!("\n{}\n{}", continuation.trim_end(), continuation));
+            } else {
+                // Create sibling (for lists, etc.)
+                let text = self.compute_smart_enter_text(ctx.cursor_offset);
+                self.insert_text(&text);
+            }
         }
     }
 
@@ -1561,7 +1580,7 @@ mod tests {
         }
 
         #[test]
-        fn enter_on_blockquote_creates_sibling() {
+        fn enter_on_blockquote_creates_paragraph_break() {
             let mut state = editor_with_cursor(
                 r#"
 > quote one|"#,
@@ -1571,6 +1590,7 @@ mod tests {
                 &state,
                 r#"
 > quote one
+>
 > |"#,
             );
         }
@@ -1602,6 +1622,23 @@ hello world|"#,
                 &state,
                 r#"
 hello world
+
+|"#,
+            );
+        }
+
+        #[test]
+        fn enter_on_heading_creates_paragraph_break() {
+            // Headings get a blank line (paragraph break) on Enter
+            let mut state = editor_with_cursor(
+                r#"
+# Hello|"#,
+            );
+            state.smart_enter();
+            assert_editor_eq(
+                &state,
+                r#"
+# Hello
 
 |"#,
             );
