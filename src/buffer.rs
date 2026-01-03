@@ -245,6 +245,7 @@ impl BufferContent {
         self.text.len_lines()
     }
 
+    #[cfg(test)]
     pub fn line(&self, line_idx: usize) -> String {
         let line = self.text.line(line_idx);
         // Avoid double allocation - trim in place

@@ -75,9 +75,10 @@ impl Cursor {
 
         // Move to previous line, same column (or end of line if shorter)
         let prev_line = current_line - 1;
-        let prev_line_start = buffer.line_to_byte(prev_line);
-        let prev_line_text = buffer.line(prev_line);
-        let prev_line_len = prev_line_text.len();
+        let prev_line_range = buffer.line_byte_range(prev_line);
+        let prev_line_start = prev_line_range.start;
+        // Subtract 1 for newline if not the last line
+        let prev_line_len = prev_line_range.len().saturating_sub(1);
 
         let new_column = column.min(prev_line_len);
         Self {
@@ -100,9 +101,15 @@ impl Cursor {
 
         // Move to next line, same column (or end of line if shorter)
         let next_line = current_line + 1;
-        let next_line_start = buffer.line_to_byte(next_line);
-        let next_line_text = buffer.line(next_line);
-        let next_line_len = next_line_text.len();
+        let next_line_range = buffer.line_byte_range(next_line);
+        let next_line_start = next_line_range.start;
+        // Subtract 1 for newline if not the last line
+        let is_last_line = next_line + 1 >= buffer.line_count();
+        let next_line_len = if is_last_line {
+            next_line_range.len()
+        } else {
+            next_line_range.len().saturating_sub(1)
+        };
 
         let new_column = column.min(next_line_len);
         Self {
@@ -119,11 +126,15 @@ impl Cursor {
 
     pub fn move_to_line_end(&self, buffer: &Buffer) -> Self {
         let current_line = buffer.byte_to_line(self.offset);
-        let line_start = buffer.line_to_byte(current_line);
-        let line_text = buffer.line(current_line);
-        Self {
-            offset: line_start + line_text.len(),
-        }
+        let line_range = buffer.line_byte_range(current_line);
+        // End of line is end of range minus newline (if not last line)
+        let is_last_line = current_line + 1 >= buffer.line_count();
+        let line_end = if is_last_line {
+            line_range.end
+        } else {
+            line_range.end.saturating_sub(1)
+        };
+        Self { offset: line_end }
     }
 
     pub fn move_to_start(&self) -> Self {
