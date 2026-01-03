@@ -326,6 +326,49 @@ impl EditorState {
         true
     }
 
+    /// Try to insert a space. Returns false if space should be ignored
+    /// (at line start, or at blockquote content start outside code blocks).
+    pub fn try_insert_space(&mut self) -> bool {
+        if self.cursor_in_code_block() {
+            self.insert_text(" ");
+            return true;
+        }
+
+        let cursor = self.cursor();
+        let line_start = cursor.move_to_line_start(&self.buffer).offset;
+
+        // Ignore space at line start or at blockquote content start
+        if cursor.offset == line_start || self.cursor_at_blockquote_content_start() {
+            return false;
+        }
+
+        self.insert_text(" ");
+        true
+    }
+
+    /// Check if cursor is at the content start of a blockquote-only line.
+    /// Used to prevent inserting spaces/tabs at the "beginning" of blockquote content.
+    fn cursor_at_blockquote_content_start(&self) -> bool {
+        let cursor_pos = self.cursor().offset;
+        let line_idx = self.buffer.byte_to_line(cursor_pos);
+        let lines = self.buffer.lines();
+        let Some(line) = lines.get(line_idx) else {
+            return false;
+        };
+
+        // Only applies to blockquote-only lines (no lists)
+        if !line.is_blockquote_only() {
+            return false;
+        }
+
+        // Check if cursor is at the content start (right after marker)
+        if let Some(marker_range) = line.marker_range() {
+            cursor_pos == marker_range.end
+        } else {
+            false
+        }
+    }
+
     fn compute_smart_enter_text(&self, cursor_pos: usize) -> String {
         let lines = self.buffer.lines();
         let cursor_line_idx = self.buffer.byte_to_line(cursor_pos);
@@ -347,6 +390,11 @@ impl EditorState {
         let Some(ctx) = self.line_context() else {
             return;
         };
+
+        // Blockquote-only lines: tab does nothing (don't nest blockquotes)
+        if ctx.line.is_blockquote_only() {
+            return;
+        }
 
         let line_start = ctx.line.range.start;
 
@@ -596,24 +644,74 @@ impl EditorState {
             if let Some((delete_range, is_indent_marker)) =
                 self.smart_backspace_range_with_type(cursor_pos)
             {
-                let new_pos = delete_range.start;
-                self.buffer.delete(delete_range, cursor_pos);
+                // Check if we're on an empty container line with an empty previous line
+                // e.g., "> hey\n>\n> |" should delete both empty lines
+                let line_idx = self.buffer.byte_to_line(cursor_pos);
+                let lines = self.buffer.lines();
+                let current_line = &lines[line_idx];
 
-                // Also delete preceding newline to join lines (but not for Indent markers)
-                if new_pos > 0 && !is_indent_marker {
-                    let char_before = if new_pos > 0 {
-                        self.buffer.byte_at(new_pos - 1).map(|b| b as char)
+                // Check if current line content is empty (cursor at marker end = empty content)
+                let content_start = current_line
+                    .marker_range()
+                    .map(|r| r.end)
+                    .unwrap_or(current_line.range.start);
+                let current_is_empty = self
+                    .buffer
+                    .slice_cow(content_start..current_line.range.end)
+                    .trim()
+                    .is_empty();
+
+                // Check if previous line is also an empty continuation
+                let prev_empty_start = if current_is_empty && line_idx > 0 {
+                    let prev = &lines[line_idx - 1];
+                    let prev_content_start = prev
+                        .marker_range()
+                        .map(|r| r.end)
+                        .unwrap_or(prev.range.start);
+                    let prev_is_empty = self
+                        .buffer
+                        .slice_cow(prev_content_start..prev.range.end)
+                        .trim()
+                        .is_empty();
+                    if prev_is_empty && !prev.markers.is_empty() {
+                        Some(prev.range.start)
                     } else {
                         None
-                    };
-                    if char_before == Some('\n') {
-                        self.buffer.delete(new_pos - 1..new_pos, new_pos);
-                        self.selection = Selection::new(new_pos - 1, new_pos - 1);
+                    }
+                } else {
+                    None
+                };
+
+                if let Some(start) = prev_empty_start {
+                    // Delete from start of previous empty line to end of current marker
+                    let delete_end = delete_range.end;
+                    self.buffer.delete(start..delete_end, cursor_pos);
+                    self.selection = Selection::new(start, start);
+                    // Also delete the newline before to join to content
+                    if start > 0 && self.buffer.byte_at(start - 1) == Some(b'\n') {
+                        self.buffer.delete(start - 1..start, start);
+                        self.selection = Selection::new(start - 1, start - 1);
+                    }
+                } else {
+                    let new_pos = delete_range.start;
+                    self.buffer.delete(delete_range, cursor_pos);
+
+                    // Also delete preceding newline to join lines (but not for Indent markers)
+                    if new_pos > 0 && !is_indent_marker {
+                        let char_before = if new_pos > 0 {
+                            self.buffer.byte_at(new_pos - 1).map(|b| b as char)
+                        } else {
+                            None
+                        };
+                        if char_before == Some('\n') {
+                            self.buffer.delete(new_pos - 1..new_pos, new_pos);
+                            self.selection = Selection::new(new_pos - 1, new_pos - 1);
+                        } else {
+                            self.selection = Selection::new(new_pos, new_pos);
+                        }
                     } else {
                         self.selection = Selection::new(new_pos, new_pos);
                     }
-                } else {
-                    self.selection = Selection::new(new_pos, new_pos);
                 }
             } else {
                 let char_before = if cursor_pos > 0 {
@@ -1077,14 +1175,13 @@ impl Editor {
 
             _ => {
                 if let Some(key_char) = &keystroke.key_char {
-                    if key_char == " " && !self.state.cursor_in_code_block() {
-                        let cursor = self.cursor();
-                        let line_start = cursor.move_to_line_start(&self.state.buffer).offset;
-                        if cursor.offset == line_start {
+                    if key_char == " " {
+                        if !self.state.try_insert_space() {
                             return;
                         }
+                    } else {
+                        self.insert_text(key_char);
                     }
-                    self.insert_text(key_char);
 
                     // Auto-insert space after blockquote marker if needed
                     if key_char == ">" {
@@ -2052,6 +2149,97 @@ text|"#,
   |"#,
             );
         }
+
+        #[test]
+        fn tab_on_blockquote_line_does_nothing() {
+            // Blockquotes shouldn't nest via tab
+            let mut state = editor_with_cursor(
+                r#"
+> |"#,
+            );
+            state.smart_tab();
+            assert_editor_eq(
+                &state, r#"
+> |"#,
+            );
+        }
+
+        #[test]
+        fn tab_on_blockquote_with_content_does_nothing() {
+            let mut state = editor_with_cursor(
+                r#"
+> some text|"#,
+            );
+            state.smart_tab();
+            assert_editor_eq(
+                &state,
+                r#"
+> some text|"#,
+            );
+        }
+    }
+
+    mod space_tests {
+        use super::*;
+
+        #[test]
+        fn space_at_blockquote_content_start_does_nothing() {
+            let mut state = editor_with_cursor(
+                r#"
+> |"#,
+            );
+            let inserted = state.try_insert_space();
+            assert!(!inserted);
+            assert_editor_eq(
+                &state, r#"
+> |"#,
+            );
+        }
+
+        #[test]
+        fn space_after_blockquote_content_works() {
+            let mut state = editor_with_cursor(
+                r#"
+> a|"#,
+            );
+            let inserted = state.try_insert_space();
+            assert!(inserted);
+            assert_editor_eq(
+                &state,
+                r#"
+> a |"#,
+            );
+        }
+
+        #[test]
+        fn space_at_line_start_does_nothing() {
+            let mut state = editor_with_cursor(
+                r#"
+|text"#,
+            );
+            let inserted = state.try_insert_space();
+            assert!(!inserted);
+            assert_editor_eq(
+                &state,
+                r#"
+|text"#,
+            );
+        }
+
+        #[test]
+        fn space_in_middle_of_line_works() {
+            let mut state = editor_with_cursor(
+                r#"
+hello|world"#,
+            );
+            let inserted = state.try_insert_space();
+            assert!(inserted);
+            assert_editor_eq(
+                &state,
+                r#"
+hello |world"#,
+            );
+        }
     }
 
     mod smart_shift_tab_tests {
@@ -2376,6 +2564,46 @@ plain text|"#,
                 &state,
                 r#"
 - [ ] task one|"#,
+            );
+        }
+
+        #[test]
+        fn backspace_on_empty_blockquote_joins_to_previous() {
+            let mut state = editor_with_cursor(
+                r#"
+> hey
+> |"#,
+            );
+            state.delete_backward();
+            assert_editor_eq(
+                &state,
+                r#"
+> hey|"#,
+            );
+        }
+
+        #[test]
+        fn backspace_on_single_empty_blockquote_deletes_marker() {
+            let mut state = editor_with_cursor("> |");
+            state.delete_backward();
+            assert_editor_eq(&state, "|");
+        }
+
+        #[test]
+        fn backspace_on_blockquote_after_empty_continuation_joins_to_content() {
+            // "> paraga\n>\n> |" -> backspace -> "> paraga|"
+            // This is the reverse of double-enter which exits and cleans up
+            let mut state = editor_with_cursor(
+                r#"
+> paraga
+>
+> |"#,
+            );
+            state.delete_backward();
+            assert_editor_eq(
+                &state,
+                r#"
+> paraga|"#,
             );
         }
     }

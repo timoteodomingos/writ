@@ -412,9 +412,15 @@ pub fn markers_at(nodes: &[Node], rope: &Rope, line_start: usize, line_end: usiz
                 }
                 let content = rope_slice_cow(rope, start, end);
                 if content.contains('>') {
+                    // Include trailing space after > if present
+                    let range_end = if rope.get_byte(end) == Some(b' ') {
+                        end + 1
+                    } else {
+                        end
+                    };
                     markers.push(Marker {
                         kind: MarkerKind::BlockQuote,
-                        range: start..end,
+                        range: start..range_end,
                     });
                 } else if !content.is_empty() && content.chars().all(|c| c.is_whitespace()) {
                     markers.push(Marker {
