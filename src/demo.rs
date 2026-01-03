@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use crate::editor::{Direction, EditorAction};
+use crate::editor::EditorAction;
 
 #[derive(Clone, Debug)]
 pub enum DemoStep {
@@ -11,7 +11,6 @@ pub enum DemoStep {
 
 pub fn demo_script() -> Vec<DemoStep> {
     use DemoStep::*;
-    use Direction::*;
     use EditorAction as A;
 
     vec![
