@@ -13,6 +13,8 @@ pub enum EditorAction {
     /// Smart tab: indents the current line to nest under the previous sibling.
     /// Does nothing if there's no valid previous sibling to nest under.
     Tab,
+    /// Smart shift-tab: un-indents the current line.
+    ShiftTab,
     /// Delete the character before the cursor.
     Backspace,
     /// Move the cursor in a direction.

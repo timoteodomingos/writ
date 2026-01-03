@@ -11,10 +11,17 @@ use tree_sitter::Node;
 #[derive(Debug, Clone, PartialEq)]
 pub enum MarkerKind {
     BlockQuote,
-    ListItem { ordered: bool },
-    Checkbox { checked: bool },
+    ListItem {
+        ordered: bool,
+    },
+    /// A task list item: `- [ ]` or `- [x]` (combines list marker + checkbox)
+    TaskList {
+        checked: bool,
+    },
     Heading(u8),
-    CodeBlockFence { language: Option<String> },
+    CodeBlockFence {
+        language: Option<String>,
+    },
     CodeBlockContent,
     ThematicBreak,
     Indent,
@@ -122,7 +129,7 @@ impl LineMarkers {
     /// Returns the checkbox state if this line has a task list marker.
     pub fn checkbox(&self) -> Option<bool> {
         for m in &self.markers {
-            if let MarkerKind::Checkbox { checked } = m.kind {
+            if let MarkerKind::TaskList { checked } = m.kind {
                 return Some(checked);
             }
         }
@@ -171,8 +178,8 @@ impl MarkerKind {
             MarkerKind::BlockQuote => "  ", // Replace "> " with spaces, border shows visually
             MarkerKind::ListItem { ordered: false } => "• ",
             MarkerKind::ListItem { ordered: true } => "",
-            MarkerKind::Checkbox { checked: false } => "[ ] ",
-            MarkerKind::Checkbox { checked: true } => "[x] ",
+            MarkerKind::TaskList { checked: false } => "• [ ] ",
+            MarkerKind::TaskList { checked: true } => "• [x] ",
             MarkerKind::Heading(_) => "",
             MarkerKind::CodeBlockFence { .. } => "",
             MarkerKind::CodeBlockContent => "",
@@ -187,7 +194,7 @@ impl MarkerKind {
             MarkerKind::BlockQuote => "> ",
             MarkerKind::ListItem { ordered: false } => "- ",
             MarkerKind::ListItem { ordered: true } => "1. ",
-            MarkerKind::Checkbox { .. } => "[ ] ",
+            MarkerKind::TaskList { .. } => "- [ ] ",
             MarkerKind::Heading(_) => "",
             MarkerKind::CodeBlockFence { .. } => "",
             MarkerKind::CodeBlockContent => "",
@@ -207,7 +214,7 @@ impl MarkerKind {
     pub fn is_container(&self) -> bool {
         matches!(
             self,
-            MarkerKind::ListItem { .. } | MarkerKind::BlockQuote | MarkerKind::Checkbox { .. }
+            MarkerKind::ListItem { .. } | MarkerKind::BlockQuote | MarkerKind::TaskList { .. }
         )
     }
 }
@@ -260,6 +267,10 @@ pub fn collect_nodes<'a>(root: &Node<'a>) -> Vec<Node<'a>> {
 /// Takes a pre-computed nodes vec from `collect_nodes()` for efficiency.
 pub fn markers_at(nodes: &[Node], rope: &Rope, line_start: usize, line_end: usize) -> Vec<Marker> {
     let mut markers = Vec::new();
+    // Pending task marker info: (checked, checkbox_end_byte)
+    // We see task_list_marker before list_marker (iterating innermost to outermost),
+    // so we store the checkbox info and combine when we see the list marker.
+    let mut pending_task: Option<(bool, usize)> = None;
 
     // Binary search to find first node past line_end - we iterate backwards from here
     let end_idx = find_node_index(nodes, line_end + 1);
@@ -297,10 +308,19 @@ pub fn markers_at(nodes: &[Node], rope: &Rope, line_start: usize, line_end: usiz
                 }
             }
             "list_marker_minus" | "list_marker_plus" | "list_marker_star" => {
-                markers.push(Marker {
-                    kind: MarkerKind::ListItem { ordered: false },
-                    range: start..end,
-                });
+                // Check if this list marker has a pending task checkbox
+                if let Some((checked, checkbox_end)) = pending_task.take() {
+                    // Combine into a single TaskList marker spanning list marker to checkbox end
+                    markers.push(Marker {
+                        kind: MarkerKind::TaskList { checked },
+                        range: start..checkbox_end,
+                    });
+                } else {
+                    markers.push(Marker {
+                        kind: MarkerKind::ListItem { ordered: false },
+                        range: start..end,
+                    });
+                }
             }
             "list_marker_dot" | "list_marker_parenthesis" => {
                 markers.push(Marker {
@@ -315,10 +335,8 @@ pub fn markers_at(nodes: &[Node], rope: &Rope, line_start: usize, line_end: usiz
                 } else {
                     end
                 };
-                markers.push(Marker {
-                    kind: MarkerKind::Checkbox { checked: false },
-                    range: start..range_end,
-                });
+                // Store for combining with list marker
+                pending_task = Some((false, range_end));
             }
             "task_list_marker_checked" => {
                 // Include trailing space after ] if present
@@ -327,10 +345,8 @@ pub fn markers_at(nodes: &[Node], rope: &Rope, line_start: usize, line_end: usiz
                 } else {
                     end
                 };
-                markers.push(Marker {
-                    kind: MarkerKind::Checkbox { checked: true },
-                    range: start..range_end,
-                });
+                // Store for combining with list marker
+                pending_task = Some((true, range_end));
             }
             "atx_h1_marker" | "atx_h2_marker" | "atx_h3_marker" | "atx_h4_marker"
             | "atx_h5_marker" | "atx_h6_marker" => {
@@ -580,19 +596,14 @@ mod tests {
         let buf: Buffer = "- [ ] Todo\n- [x] Done\n".parse().unwrap();
         let lines = buf.lines();
 
+        // TaskList is a single combined marker for "- [ ] " or "- [x] "
         assert_eq!(
             kinds(&lines[0].markers),
-            vec![
-                &MarkerKind::Checkbox { checked: false },
-                &MarkerKind::ListItem { ordered: false },
-            ]
+            vec![&MarkerKind::TaskList { checked: false }]
         );
         assert_eq!(
             kinds(&lines[1].markers),
-            vec![
-                &MarkerKind::Checkbox { checked: true },
-                &MarkerKind::ListItem { ordered: false },
-            ]
+            vec![&MarkerKind::TaskList { checked: true }]
         );
     }
 
@@ -799,21 +810,14 @@ mod tests {
     #[test]
     fn test_line_substitution_task_list() {
         let text = "- [ ] Task item";
-        // Markers are innermost to outermost: Checkbox is inside ListItem
+        // TaskList is a single combined marker for "- [ ] "
         let line = make_line(
             0..15,
-            vec![
-                Marker {
-                    kind: MarkerKind::Checkbox { checked: false },
-                    range: 2..6,
-                },
-                Marker {
-                    kind: MarkerKind::ListItem { ordered: false },
-                    range: 0..2,
-                },
-            ],
+            vec![Marker {
+                kind: MarkerKind::TaskList { checked: false },
+                range: 0..6,
+            }],
         );
-        // Substitution reverses to outermost first: bullet then checkbox
         assert_eq!(line.substitution(text), "• [ ] ");
     }
 
@@ -891,31 +895,19 @@ mod tests {
     fn test_line_checkbox() {
         let line_unchecked = make_line(
             0..15,
-            vec![
-                Marker {
-                    kind: MarkerKind::ListItem { ordered: false },
-                    range: 0..2,
-                },
-                Marker {
-                    kind: MarkerKind::Checkbox { checked: false },
-                    range: 2..6,
-                },
-            ],
+            vec![Marker {
+                kind: MarkerKind::TaskList { checked: false },
+                range: 0..6,
+            }],
         );
         assert_eq!(line_unchecked.checkbox(), Some(false));
 
         let line_checked = make_line(
             0..15,
-            vec![
-                Marker {
-                    kind: MarkerKind::ListItem { ordered: false },
-                    range: 0..2,
-                },
-                Marker {
-                    kind: MarkerKind::Checkbox { checked: true },
-                    range: 2..6,
-                },
-            ],
+            vec![Marker {
+                kind: MarkerKind::TaskList { checked: true },
+                range: 0..6,
+            }],
         );
         assert_eq!(line_checked.checkbox(), Some(true));
 

@@ -1099,7 +1099,7 @@ impl IntoElement for Line<'_> {
                         return hr_div;
                     }
                 }
-                MarkerKind::ListItem { .. } | MarkerKind::Checkbox { .. } | MarkerKind::Indent => {}
+                MarkerKind::ListItem { .. } | MarkerKind::TaskList { .. } | MarkerKind::Indent => {}
             }
         }
 

@@ -360,7 +360,30 @@ impl EditorState {
 
         let buffer_text = self.buffer.text();
 
-        if !ctx.has_container {
+        // Check if line has a code fence marker
+        let has_fence = ctx
+            .line
+            .markers
+            .iter()
+            .any(|m| matches!(m.kind, MarkerKind::CodeBlockFence { .. }));
+
+        if has_fence {
+            // Code fence: just insert newline with any outer container continuations
+            // (e.g., blockquote markers), but not the fence itself
+            let continuation: String = ctx
+                .line
+                .markers
+                .iter()
+                .rev()
+                .filter(|m| !matches!(m.kind, MarkerKind::CodeBlockFence { .. }))
+                .map(|m| m.kind.continuation())
+                .collect();
+            if continuation.is_empty() {
+                self.insert_text("\n");
+            } else {
+                self.insert_text(&format!("\n{}", continuation));
+            }
+        } else if !ctx.has_container {
             // Paragraph
             if ctx.is_empty && !ctx.line.markers.is_empty() {
                 // Empty nested paragraph - exit by removing indent
@@ -1158,6 +1181,9 @@ impl Editor {
             EditorAction::Tab => {
                 self.smart_tab();
             }
+            EditorAction::ShiftTab => {
+                self.smart_shift_tab();
+            }
             EditorAction::Backspace => {
                 self.delete_backward();
             }
@@ -1623,6 +1649,61 @@ hello world
 > quote
 
 |"#,
+            );
+        }
+
+        #[test]
+        fn enter_on_code_fence_inserts_single_newline() {
+            // Opening fence: just insert newline, not paragraph break
+            let mut state = editor_with_cursor(
+                r#"
+```rust|"#,
+            );
+            state.smart_enter();
+            assert_editor_eq(
+                &state,
+                r#"
+```rust
+|"#,
+            );
+        }
+
+        #[test]
+        fn enter_on_closing_code_fence_inserts_single_newline() {
+            // Closing fence: just insert newline
+            // The closing fence needs trailing content for tree-sitter to parse it
+            let mut state = editor_with_cursor(
+                r#"
+```rust
+code
+```|
+after"#,
+            );
+            state.smart_enter();
+            assert_editor_eq(
+                &state,
+                r#"
+```rust
+code
+```
+|
+after"#,
+            );
+        }
+
+        #[test]
+        fn enter_on_code_fence_in_blockquote_continues_blockquote() {
+            // Code fence inside blockquote: continue the blockquote but not the fence
+            let mut state = editor_with_cursor(
+                r#"
+> ```rust|"#,
+            );
+            state.smart_enter();
+            assert_editor_eq(
+                &state,
+                r#"
+> ```rust
+> |"#,
             );
         }
     }
@@ -2102,6 +2183,30 @@ plain text|"#,
 - item
 |
   paragraph"#,
+            );
+        }
+
+        #[test]
+        fn backspace_on_empty_task_list_deletes_entire_marker() {
+            // Task list marker "- [ ] " is a single marker, so backspace
+            // should delete it all at once (not just the checkbox)
+            let mut state = editor_with_cursor("- [ ] |");
+            state.delete_backward();
+            assert_editor_eq(&state, "|");
+        }
+
+        #[test]
+        fn backspace_on_task_list_with_content_joins_to_previous() {
+            let mut state = editor_with_cursor(
+                r#"
+- [ ] task one
+- [ ] |"#,
+            );
+            state.delete_backward();
+            assert_editor_eq(
+                &state,
+                r#"
+- [ ] task one|"#,
             );
         }
     }
