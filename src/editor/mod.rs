@@ -231,11 +231,13 @@ impl EditorState {
             .map(|r| r.end)
             .unwrap_or(line.range.start);
 
-        let is_empty = self
-            .buffer
-            .slice_cow(content_start..line.range.end)
-            .trim()
-            .is_empty();
+        // Lines with code fences are never considered empty (the fence is content)
+        let is_empty = !line.is_fence()
+            && self
+                .buffer
+                .slice_cow(content_start..line.range.end)
+                .trim()
+                .is_empty();
 
         let prev_line = if line_idx > 0 {
             lines.get(line_idx - 1)
@@ -444,8 +446,14 @@ impl EditorState {
         }
     }
 
-    /// Smart enter: creates sibling or exits container.
+    /// Smart enter: creates paragraph break or exits container on empty line.
     pub fn smart_enter(&mut self) {
+        self.do_enter(true);
+    }
+
+    /// Core enter logic. If `allow_exit` is true, empty container lines will exit.
+    /// If false, they create a paragraph break instead (shift+enter behavior).
+    fn do_enter(&mut self, allow_exit: bool) {
         if self.is_pending_marker(self.cursor().offset) {
             self.complete_pending_marker();
             let text = self.compute_smart_enter_text(self.cursor().offset);
@@ -483,7 +491,27 @@ impl EditorState {
         // Check if we're inside a code block (between fences)
         let in_code_block = self.cursor_in_code_block();
 
-        if has_opening_fence || in_code_block {
+        // Fallback: if parser thinks we're in a code block but line content looks like
+        // a closing fence, treat it as such (parser may not recognize closing fence
+        // inside blockquotes without trailing content)
+        let content_start = ctx
+            .line
+            .marker_range()
+            .map(|r| r.end)
+            .unwrap_or(ctx.line.range.start);
+        let line_content = self.buffer.slice_cow(content_start..ctx.line.range.end);
+        let looks_like_closing_fence =
+            in_code_block && !has_opening_fence && line_content.trim().starts_with("```");
+
+        if has_closing_fence || looks_like_closing_fence {
+            // Closing fence: create paragraph break to start new content
+            let continuation = ctx.line.continuation_without_fence();
+            if continuation.is_empty() {
+                self.insert_text("\n\n");
+            } else {
+                self.insert_text(&format!("\n{}\n{}", continuation.trim_end(), continuation));
+            }
+        } else if has_opening_fence || in_code_block {
             // Opening fence or inside code block: just insert newline with any outer container
             // continuations (e.g., blockquote markers), but not the fence itself
             let continuation = ctx.line.continuation_without_fence();
@@ -492,17 +520,9 @@ impl EditorState {
             } else {
                 self.insert_text(&format!("\n{}", continuation));
             }
-        } else if has_closing_fence {
-            // Closing fence: create paragraph break to start new content
-            let continuation = ctx.line.continuation_without_fence();
-            if continuation.is_empty() {
-                self.insert_text("\n\n");
-            } else {
-                self.insert_text(&format!("\n\n{}", continuation));
-            }
         } else if !ctx.has_container {
             // Paragraph
-            if ctx.is_empty && !ctx.line.markers.is_empty() {
+            if allow_exit && ctx.is_empty && !ctx.line.markers.is_empty() {
                 // Empty nested paragraph - exit by removing indent
                 self.delete_and_adjust(ctx.line.markers[0].range.clone());
             } else if ctx.is_empty {
@@ -514,7 +534,7 @@ impl EditorState {
                 let indent = ctx.line.indent_only_rope(self.buffer.rope());
                 self.insert_text(&format!("\n\n{}", indent));
             }
-        } else if ctx.is_empty {
+        } else if allow_exit && ctx.is_empty {
             // Empty container line - exit ALL markers
             let marker_range = ctx.line.marker_range().unwrap_or(ctx.line.range.clone());
 
@@ -545,17 +565,10 @@ impl EditorState {
 
             self.insert_at(self.cursor().offset, "\n");
         } else {
-            // Line has content
-            // Check if this is a blockquote-only line (no list markers) - create paragraph break
-            if ctx.line.is_blockquote_only() {
-                // Paragraph break within blockquote: "> text" -> "> text\n>\n> "
-                let continuation = ctx.line.continuation_rope(self.buffer.rope());
-                self.insert_text(&format!("\n{}\n{}", continuation.trim_end(), continuation));
-            } else {
-                // Create sibling (for lists, etc.)
-                let text = self.compute_smart_enter_text(ctx.cursor_offset);
-                self.insert_text(&text);
-            }
+            // Line has content (or is empty but not exiting) - create paragraph break
+            let empty_line = ctx.line.continuation_without_list();
+            let continuation = ctx.line.continuation_rope(self.buffer.rope());
+            self.insert_text(&format!("\n{}\n{}", empty_line.trim_end(), continuation));
         }
     }
 
@@ -576,46 +589,19 @@ impl EditorState {
             let delete_start = ctx.line.range.start;
             self.delete_and_adjust(delete_start..delete_start + 2);
         } else {
-            // At root level - don't remove if it would leave invalid empty line
-            if ctx.is_empty && ctx.line_idx > 0 {
+            // At root level - don't remove if it would leave a completely empty line
+            // (but allow removing if there are outer markers that will remain)
+            if ctx.is_empty && ctx.line_idx > 0 && ctx.line.markers.len() == 1 {
                 return;
             }
             self.delete_and_adjust(ctx.line.markers[0].range.clone());
         }
     }
 
-    /// Shift+Enter: same as first Enter (sibling/paragraph break), but never exits.
+    /// Shift+Enter: same as Enter, but never exits containers.
     /// Use this to add more items without exiting the container.
     pub fn shift_enter(&mut self) {
-        if self.is_pending_marker(self.cursor().offset) {
-            self.complete_pending_marker();
-            let text = self.compute_smart_enter_text(self.cursor().offset);
-            self.insert_text(&text);
-            return;
-        }
-
-        let Some(ctx) = self.line_context() else {
-            self.insert_text("\n");
-            return;
-        };
-
-        // Same logic as smart_enter for content, but skip the "exit on empty" branch
-        if !ctx.has_container {
-            // Paragraph - create paragraph break with indent if nested
-            let indent = ctx
-                .line
-                .indent_only_string(&self.buffer.slice_cow(ctx.line.range.clone()));
-            self.insert_text(&format!("\n\n{}", indent));
-        } else {
-            // Container - check if blockquote-only (paragraph break) or list (sibling)
-            if ctx.line.is_blockquote_only() {
-                let continuation = ctx.line.continuation_rope(self.buffer.rope());
-                self.insert_text(&format!("\n{}\n{}", continuation.trim_end(), continuation));
-            } else {
-                let text = self.compute_smart_enter_text(ctx.cursor_offset);
-                self.insert_text(&text);
-            }
-        }
+        self.do_enter(false);
     }
 
     fn smart_backspace_range_with_type(
@@ -651,28 +637,32 @@ impl EditorState {
                 let current_line = &lines[line_idx];
 
                 // Check if current line content is empty (cursor at marker end = empty content)
+                // Lines with code fences are never considered empty (the fence is content)
                 let content_start = current_line
                     .marker_range()
                     .map(|r| r.end)
                     .unwrap_or(current_line.range.start);
-                let current_is_empty = self
-                    .buffer
-                    .slice_cow(content_start..current_line.range.end)
-                    .trim()
-                    .is_empty();
+                let current_is_empty = !current_line.is_fence()
+                    && self
+                        .buffer
+                        .slice_cow(content_start..current_line.range.end)
+                        .trim()
+                        .is_empty();
 
                 // Check if previous line is also an empty continuation
+                // (but not if it's a fence line - fences count as content)
                 let prev_empty_start = if current_is_empty && line_idx > 0 {
                     let prev = &lines[line_idx - 1];
                     let prev_content_start = prev
                         .marker_range()
                         .map(|r| r.end)
                         .unwrap_or(prev.range.start);
-                    let prev_is_empty = self
-                        .buffer
-                        .slice_cow(prev_content_start..prev.range.end)
-                        .trim()
-                        .is_empty();
+                    let prev_is_empty = !prev.is_fence()
+                        && self
+                            .buffer
+                            .slice_cow(prev_content_start..prev.range.end)
+                            .trim()
+                            .is_empty();
                     if prev_is_empty && !prev.markers.is_empty() {
                         Some(prev.range.start)
                     } else {
@@ -1605,7 +1595,7 @@ mod tests {
         use super::*;
 
         #[test]
-        fn enter_on_list_item_creates_sibling() {
+        fn enter_on_list_item_creates_paragraph_break() {
             let mut state = editor_with_cursor(
                 r#"
 - item one|"#,
@@ -1615,6 +1605,7 @@ mod tests {
                 &state,
                 r#"
 - item one
+
 - |"#,
             );
         }
@@ -1630,6 +1621,7 @@ mod tests {
                 &state,
                 r#"
 - item o
+
 - |ne"#,
             );
         }
@@ -1661,6 +1653,7 @@ mod tests {
                 &state,
                 r#"
 > - item
+>
 > - |"#,
             );
         }
@@ -1744,7 +1737,7 @@ hello world
         }
 
         #[test]
-        fn shift_enter_on_empty_list_item_creates_sibling() {
+        fn shift_enter_on_empty_list_item_creates_paragraph_break() {
             // Shift+Enter always maintains continuation, unlike Enter which exits
             let mut state = editor_with_cursor(
                 r#"
@@ -1752,11 +1745,11 @@ hello world
 - |"#,
             );
             state.shift_enter();
-            assert_editor_eq(&state, "- item one\n- \n- |");
+            assert_editor_eq(&state, "- item one\n- \n\n- |");
         }
 
         #[test]
-        fn shift_enter_on_list_item_with_content_creates_sibling() {
+        fn shift_enter_on_list_item_with_content_creates_paragraph_break() {
             let mut state = editor_with_cursor(
                 r#"
 - item one|"#,
@@ -1766,6 +1759,7 @@ hello world
                 &state,
                 r#"
 - item one
+
 - |"#,
             );
         }
@@ -1910,8 +1904,8 @@ code
         }
 
         #[test]
-        fn enter_on_code_fence_in_blockquote_continues_blockquote() {
-            // Code fence inside blockquote: continue the blockquote but not the fence
+        fn enter_on_opening_fence_in_blockquote_continues_blockquote() {
+            // Opening fence inside blockquote: continue the blockquote but not the fence
             let mut state = editor_with_cursor(
                 r#"
 > ```rust|"#,
@@ -1921,6 +1915,27 @@ code
                 &state,
                 r#"
 > ```rust
+> |"#,
+            );
+        }
+
+        #[test]
+        fn enter_on_closing_fence_in_blockquote_creates_paragraph_break() {
+            // Closing fence inside blockquote: create paragraph break with blockquote continuation
+            let mut state = editor_with_cursor(
+                r#"
+> ```
+> code
+> ```|"#,
+            );
+            state.smart_enter();
+            assert_editor_eq(
+                &state,
+                r#"
+> ```
+> code
+> ```
+>
 > |"#,
             );
         }
@@ -1972,6 +1987,10 @@ let x = 1;
 |"#,
             );
         }
+
+        // TODO: Test for code block nested inside list inside blockquote
+        // Currently the closing fence logic doesn't preserve nested indentation context.
+        // See: enter_on_closing_fence_in_nested_list_in_blockquote
     }
 
     mod smart_tab_tests {
@@ -2319,6 +2338,20 @@ item|"#,
         }
 
         #[test]
+        fn shift_tab_on_empty_list_in_blockquote_removes_list() {
+            // Empty list item in blockquote: shift-tab should remove list marker, keep blockquote
+            let mut state = editor_with_cursor(
+                r#"
+> - |"#,
+            );
+            state.smart_shift_tab();
+            assert_editor_eq(
+                &state, r#"
+> |"#,
+            );
+        }
+
+        #[test]
         fn shift_tab_on_empty_nested_list_item_unnests() {
             // Unnesting is valid - becomes sibling, not empty line
             let mut state = editor_with_cursor(
@@ -2437,8 +2470,8 @@ plain text|"#,
 
         #[test]
         fn backspace_after_enter_on_list_item_joins_to_content() {
-            // Scenario: "- item one|" -> Enter -> "- item one\n- |" -> Backspace
-            // Should go back to "- item one|", not "- item one\n|"
+            // Scenario: "- item one|" -> Enter -> "- item one\n\n- |" -> Backspace x2
+            // Should go back to "- item one|"
             let mut state = editor_with_cursor(
                 r#"
 - item one|"#,
@@ -2448,8 +2481,18 @@ plain text|"#,
                 &state,
                 r#"
 - item one
+
 - |"#,
             );
+            // First backspace removes the list marker and joins to blank line
+            state.delete_backward();
+            assert_editor_eq(
+                &state,
+                r#"
+- item one
+|"#,
+            );
+            // Second backspace joins to content
             state.delete_backward();
             assert_editor_eq(
                 &state,
@@ -2604,6 +2647,27 @@ plain text|"#,
                 &state,
                 r#"
 > paraga|"#,
+            );
+        }
+
+        #[test]
+        fn backspace_after_closing_fence_in_blockquote() {
+            // Closing fence should not be treated as empty - backspace should just
+            // remove the empty continuation line, not the fence
+            let mut state = editor_with_cursor(
+                r#"
+> ```
+> code
+> ```
+> |"#,
+            );
+            state.delete_backward();
+            assert_editor_eq(
+                &state,
+                r#"
+> ```
+> code
+> ```|"#,
             );
         }
     }

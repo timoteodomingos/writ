@@ -1003,40 +1003,36 @@ mod tests {
     #[test]
     fn test_nested_list_continuation() {
         let buf: Buffer = "- Item 1\n  - Nested\n".parse().unwrap();
-        let text = buf.text();
         let lines = buf.lines();
 
-        let continuation = lines[1].continuation(&text);
+        let continuation = lines[1].continuation_rope(buf.rope());
         assert!(continuation.contains("- "));
     }
 
     #[test]
     fn test_substitution() {
         let buf: Buffer = "- Item\n".parse().unwrap();
-        let text = buf.text();
         let lines = buf.lines();
 
-        let sub = lines[0].substitution(&text);
+        let sub = lines[0].substitution_rope(buf.rope());
         assert!(sub.contains('•') || sub.contains('-'));
     }
 
     #[test]
     fn test_list_in_blockquote_continuation() {
         let buf: Buffer = "> - Item\n".parse().unwrap();
-        let text = buf.text();
         let lines = buf.lines();
 
-        let continuation = lines[0].continuation(&text);
+        let continuation = lines[0].continuation_rope(buf.rope());
         assert_eq!(continuation, "> - ");
     }
 
     #[test]
     fn test_multiline_blockquote_with_list_continuation() {
         let buf: Buffer = "> hey\n>\n> - foo\n".parse().unwrap();
-        let text = buf.text();
         let lines = buf.lines();
 
-        let continuation = lines[2].continuation(&text);
+        let continuation = lines[2].continuation_rope(buf.rope());
         assert_eq!(continuation, "> - ");
     }
 

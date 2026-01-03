@@ -73,53 +73,20 @@ impl LineMarkers {
     /// E.g., "• " for unordered list, "[ ] " for unchecked task.
     /// Computes leading whitespace from line start to the first non-whitespace
     /// character, to respect user's manual indentation.
-    pub fn substitution(&self, text: &str) -> String {
-        // No markers = no substitution (e.g., code block content lines)
-        if self.markers.is_empty() {
-            return String::new();
-        }
-
-        // If the only marker is Indent or BlockQuote, return empty - padding is handled by rendering
-        if self.markers.len() == 1
-            && matches!(
-                self.markers[0].kind,
-                MarkerKind::Indent | MarkerKind::BlockQuote
-            )
-        {
-            return String::new();
-        }
-
-        let line_text = &text[self.range.clone()];
-
-        // Find leading whitespace in the line
-        let leading_ws_len = line_text.len() - line_text.trim_start().len();
-        let leading_ws = &line_text[..leading_ws_len];
-
-        // Build substitution: leading whitespace + non-Indent marker substitutions
-        let mut result = leading_ws.to_string();
-        for m in self.markers.iter().rev() {
-            if !matches!(m.kind, MarkerKind::Indent) {
-                result.push_str(m.kind.substitution());
-            }
-        }
-        result
-    }
-
-    /// Returns the visual substitution text using a Rope for efficient slicing.
-    /// Same as `substitution()` but avoids allocating the full buffer text.
     pub fn substitution_rope(&self, rope: &Rope) -> String {
         // No markers = no substitution (e.g., code block content lines)
         if self.markers.is_empty() {
             return String::new();
         }
 
-        // If the only marker is Indent or BlockQuote, return empty - padding is handled by rendering
-        if self.markers.len() == 1
-            && matches!(
-                self.markers[0].kind,
-                MarkerKind::Indent | MarkerKind::BlockQuote
+        // If markers are only Indent, BlockQuote, or CodeBlockFence, return empty
+        // - padding is handled by rendering for these
+        if self.markers.iter().all(|m| {
+            matches!(
+                m.kind,
+                MarkerKind::Indent | MarkerKind::BlockQuote | MarkerKind::CodeBlockFence { .. }
             )
-        {
+        }) {
             return String::new();
         }
 
@@ -145,10 +112,11 @@ impl LineMarkers {
             std::borrow::Cow::Borrowed("")
         };
 
-        // Build substitution: leading whitespace + non-Indent marker substitutions
+        // Build substitution: leading whitespace + marker substitutions
+        // Skip Indent and BlockQuote - their padding is handled by rendering
         let mut result = leading_ws.into_owned();
         for m in self.markers.iter().rev() {
-            if !matches!(m.kind, MarkerKind::Indent) {
+            if !matches!(m.kind, MarkerKind::Indent | MarkerKind::BlockQuote) {
                 result.push_str(m.kind.substitution());
             }
         }
@@ -161,21 +129,6 @@ impl LineMarkers {
     /// (which includes leading whitespace for nested lists).
     /// Markers are stored innermost to outermost, but continuation should be
     /// in text order (outermost to innermost), so we reverse.
-    pub fn continuation(&self, text: &str) -> String {
-        self.markers
-            .iter()
-            .rev()
-            .map(|m| match &m.kind {
-                MarkerKind::Indent | MarkerKind::ListItem { .. } => {
-                    text[m.range.clone()].to_string()
-                }
-                _ => m.kind.continuation().to_string(),
-            })
-            .collect()
-    }
-
-    /// Returns the continuation text using a Rope for efficient slicing.
-    /// Same as `continuation()` but avoids allocating the full buffer text.
     pub fn continuation_rope(&self, rope: &Rope) -> String {
         self.markers
             .iter()
@@ -255,16 +208,6 @@ impl LineMarkers {
     }
 
     /// Returns the indent string if this line has exactly one Indent marker, empty otherwise.
-    pub fn indent_only_string(&self, text: &str) -> String {
-        if self.markers.len() == 1 && matches!(self.markers[0].kind, MarkerKind::Indent) {
-            text[self.markers[0].range.clone()].to_string()
-        } else {
-            String::new()
-        }
-    }
-
-    /// Returns the indent string using a Rope for efficient slicing.
-    /// Same as `indent_only_string()` but avoids allocating the full buffer text.
     pub fn indent_only_rope(&self, rope: &Rope) -> String {
         if self.markers.len() == 1 && matches!(self.markers[0].kind, MarkerKind::Indent) {
             rope_slice_cow(rope, self.markers[0].range.start, self.markers[0].range.end)
@@ -282,6 +225,24 @@ impl LineMarkers {
             .iter()
             .rev()
             .filter(|m| !matches!(m.kind, MarkerKind::CodeBlockFence { .. }))
+            .map(|m| m.kind.continuation())
+            .collect()
+    }
+
+    /// Returns continuation text excluding list markers.
+    /// Used for paragraph breaks within lists to preserve outer container markers (e.g., blockquotes)
+    /// without repeating the list marker on the empty line.
+    /// Note: Uses static continuation strings, not actual buffer text.
+    pub fn continuation_without_list(&self) -> String {
+        self.markers
+            .iter()
+            .rev()
+            .filter(|m| {
+                !matches!(
+                    m.kind,
+                    MarkerKind::ListItem { .. } | MarkerKind::TaskList { .. } | MarkerKind::Indent
+                )
+            })
             .map(|m| m.kind.continuation())
             .collect()
     }
@@ -996,86 +957,42 @@ mod tests {
 
     #[test]
     fn test_line_substitution() {
-        // Markers are innermost to outermost (ListItem inside BlockQuote)
-        let line = make_line(
-            0..15,
-            vec![
-                Marker {
-                    kind: MarkerKind::ListItem { ordered: false },
-                    range: 2..4,
-                },
-                Marker {
-                    kind: MarkerKind::BlockQuote,
-                    range: 0..2,
-                },
-            ],
-        );
-        let text = "> - Item text here";
-        // Blockquote substitutes "> " with "  " (spaces), plus bullet "• "
-        assert_eq!(line.substitution(text), "  • ");
+        let buf: Buffer = "> - Item text here\n".parse().unwrap();
+        let lines = buf.lines();
+        // Blockquote padding is handled by rendering, substitution only includes bullet
+        assert_eq!(lines[0].substitution_rope(buf.rope()), "• ");
     }
 
     #[test]
     fn test_line_substitution_task_list() {
-        let text = "- [ ] Task item";
-        // TaskList is a single combined marker for "- [ ] "
-        let line = make_line(
-            0..15,
-            vec![Marker {
-                kind: MarkerKind::TaskList { checked: false },
-                range: 0..6,
-            }],
-        );
-        assert_eq!(line.substitution(text), "• [ ] ");
+        let buf: Buffer = "- [ ] Task item\n".parse().unwrap();
+        let lines = buf.lines();
+        assert_eq!(lines[0].substitution_rope(buf.rope()), "• [ ] ");
     }
 
     #[test]
     fn test_line_continuation() {
-        let text = "> - Item text here";
-        // Markers are innermost to outermost (ListItem inside BlockQuote)
-        let line = make_line(
-            0..18,
-            vec![
-                Marker {
-                    kind: MarkerKind::ListItem { ordered: false },
-                    range: 2..4,
-                },
-                Marker {
-                    kind: MarkerKind::BlockQuote,
-                    range: 0..2,
-                },
-            ],
-        );
-        assert_eq!(line.continuation(text), "> - ");
+        let buf: Buffer = "> - Item text here\n".parse().unwrap();
+        let lines = buf.lines();
+        assert_eq!(lines[0].continuation_rope(buf.rope()), "> - ");
     }
 
     #[test]
     fn test_line_continuation_with_indent() {
-        let text = "  Second paragraph";
-        let line = make_line(
-            0..18,
-            vec![Marker {
-                kind: MarkerKind::Indent,
-                range: 0..2,
-            }],
-        );
-        // Indent marker extracts actual whitespace from text
-        assert_eq!(line.continuation(text), "  ");
+        // Indent markers appear in nested paragraphs under list items
+        let buf: Buffer = "- item\n\n  Second paragraph\n".parse().unwrap();
+        let lines = buf.lines();
+        // Line 2 is the indented paragraph
+        assert_eq!(lines[2].continuation_rope(buf.rope()), "  ");
     }
 
     #[test]
     fn test_line_continuation_nested_list() {
-        // Nested list: "    - Nested" where marker includes leading whitespace
-        let text = "    - Nested";
-        let line = make_line(
-            0..12,
-            vec![Marker {
-                kind: MarkerKind::ListItem { ordered: false },
-                range: 0..6, // "    - " includes indent
-            }],
-        );
+        // Nested list: "  - Nested" where marker includes leading whitespace
+        let buf: Buffer = "- Top\n  - Nested\n".parse().unwrap();
+        let lines = buf.lines();
         // ListItem marker extracts actual text including indent
-        assert_eq!(line.continuation(text), "    - ");
+        assert_eq!(lines[1].continuation_rope(buf.rope()), "  - ");
     }
 
     #[test]
@@ -1197,7 +1114,7 @@ mod tests {
         for (i, line) in lines.iter().enumerate() {
             let line_text = &text[line.range.clone()];
             let leading = line.leading_whitespace(&text);
-            let sub = line.substitution(&text);
+            let sub = line.substitution_rope(buf.rope());
             println!(
                 "Line {}: {:?}\n  markers={:?}\n  leading_whitespace={:?} substitution={:?}",
                 i, line_text, line.markers, leading, sub
@@ -1206,7 +1123,10 @@ mod tests {
 
         // Both line 1 and line 2 should have the same substitution
         // (indentation is now included in substitution via Indent markers)
-        assert_eq!(lines[1].substitution(&text), lines[2].substitution(&text));
+        assert_eq!(
+            lines[1].substitution_rope(buf.rope()),
+            lines[2].substitution_rope(buf.rope())
+        );
     }
 
     #[test]
