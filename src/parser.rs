@@ -421,7 +421,7 @@ mod tests {
 
         let ranges: Vec<_> = tree2
             .block_tree()
-            .changed_ranges(&tree1.block_tree())
+            .changed_ranges(tree1.block_tree())
             .collect();
         eprintln!("Changed ranges after removing first blockquote marker:");
         for range in &ranges {

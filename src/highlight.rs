@@ -149,8 +149,6 @@ impl Highlighter {
         // Convert events to spans
         let mut spans = Vec::new();
         let mut current_highlight: Option<usize> = None;
-        let mut current_start: usize = 0;
-        let mut pos: usize = 0;
 
         for event in highlights {
             match event {
@@ -162,11 +160,9 @@ impl Highlighter {
                             highlight_id,
                         });
                     }
-                    pos = end;
                 }
                 Ok(HighlightEvent::HighlightStart(Highlight(id))) => {
                     current_highlight = Some(id);
-                    current_start = pos;
                 }
                 Ok(HighlightEvent::HighlightEnd) => {
                     current_highlight = None;
@@ -174,8 +170,6 @@ impl Highlighter {
                 Err(_) => break,
             }
         }
-
-        let _ = current_start; // suppress unused warning
 
         spans
     }

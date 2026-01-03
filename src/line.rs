@@ -85,7 +85,7 @@ pub fn extract_inline_styles(buffer: &Buffer, line: &LineMarkers) -> Vec<StyledR
     extract_inline_styles_from_parts(&buffer.text(), buffer.tree(), line)
 }
 
-pub fn extract_inline_styles_from_parts(
+fn extract_inline_styles_from_parts(
     text: &str,
     tree: Option<&MarkdownTree>,
     line: &LineMarkers,

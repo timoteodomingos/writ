@@ -230,42 +230,6 @@ fn rope_slice_cow(rope: &Rope, start: usize, end: usize) -> std::borrow::Cow<'_,
     }
 }
 
-/// Find the nearest container to the left of cursor position.
-/// Returns the marker width needed to nest into that container.
-/// Uses cached LineMarkers for O(log n) lookup instead of traversing nodes.
-pub fn find_container_indent_from_lines(lines: &[LineMarkers], cursor_pos: usize) -> Option<usize> {
-    // Binary search to find the line containing cursor_pos
-    let line_idx = lines
-        .binary_search_by(|line| {
-            if cursor_pos < line.range.start {
-                std::cmp::Ordering::Greater
-            } else if cursor_pos >= line.range.end {
-                std::cmp::Ordering::Less
-            } else {
-                std::cmp::Ordering::Equal
-            }
-        })
-        .unwrap_or_else(|idx| idx.saturating_sub(1));
-
-    // Walk backwards from cursor line looking for a container marker
-    for line in lines[..=line_idx.min(lines.len().saturating_sub(1))]
-        .iter()
-        .rev()
-    {
-        // Check if this line has a list or blockquote marker
-        for marker in &line.markers {
-            match &marker.kind {
-                MarkerKind::ListItem { .. } | MarkerKind::BlockQuote => {
-                    return Some(marker.range.end - marker.range.start);
-                }
-                _ => {}
-            }
-        }
-    }
-
-    None
-}
-
 /// Collect all nodes in document order (preorder traversal).
 pub fn collect_nodes<'a>(root: &Node<'a>) -> Vec<Node<'a>> {
     let mut cursor = root.walk();
