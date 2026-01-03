@@ -493,31 +493,10 @@ impl EditorState {
                 self.insert_text(&format!("\n\n{}", indent));
             }
         } else if ctx.is_empty {
-            // Empty container line - exit the innermost container
-            let delete_range = ctx.line.markers[0].range.clone();
-
-            let remaining_continuation: String = ctx
-                .line
-                .markers
-                .iter()
-                .skip(1)
-                .rev()
-                .map(|m| match &m.kind {
-                    MarkerKind::Indent | MarkerKind::ListItem { .. } => {
-                        buffer_text[m.range.clone()].to_string()
-                    }
-                    _ => m.kind.continuation().to_string(),
-                })
-                .collect();
-
-            self.delete_and_adjust(delete_range);
-            let pos = self.cursor().offset;
-
-            if remaining_continuation.is_empty() {
-                self.insert_at(pos, "\n");
-            } else {
-                self.insert_at(pos, &format!("\n{}", remaining_continuation));
-            }
+            // Empty container line - exit ALL markers
+            let marker_range = ctx.line.marker_range().unwrap_or(ctx.line.range.clone());
+            self.delete_and_adjust(marker_range);
+            self.insert_at(self.cursor().offset, "\n");
         } else {
             // Line has content
             // Check if this is a blockquote-only line (no list markers) - create paragraph break
@@ -1755,16 +1734,15 @@ hello world
         }
 
         #[test]
-        fn enter_on_empty_nested_list_exits_to_parent() {
+        fn enter_on_empty_nested_list_exits_all() {
+            // Empty container line exits ALL markers
             let mut state = editor_with_cursor(
                 r#"
 > - item
 > - |"#,
             );
             state.smart_enter();
-            // Should exit the list but stay in blockquote
-            // The middle line has "> " as continuation for the blockquote
-            assert_editor_eq(&state, "> - item\n> \n> |");
+            assert_editor_eq(&state, "> - item\n\n|");
         }
 
         #[test]
