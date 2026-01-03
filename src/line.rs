@@ -363,6 +363,8 @@ pub struct Line<'a> {
     on_checkbox: Option<CheckboxCallback>,
     on_hover: Option<HoverCallback>,
     scroll_anchor: Option<ScrollAnchor>,
+    /// Cached substitution string (computed once in new())
+    substitution: Option<String>,
 }
 
 impl<'a> Line<'a> {
@@ -376,6 +378,11 @@ impl<'a> Line<'a> {
         code_highlights: Vec<(HighlightSpan, Rgba)>,
         base_path: Option<PathBuf>,
     ) -> Self {
+        // Compute substitution once upfront
+        let substitution = {
+            let s = line.substitution_rope(&rope);
+            if s.is_empty() { None } else { Some(s) }
+        };
         Self {
             line,
             rope,
@@ -390,6 +397,7 @@ impl<'a> Line<'a> {
             on_checkbox: None,
             on_hover: None,
             scroll_anchor: None,
+            substitution,
         }
     }
 
@@ -505,13 +513,8 @@ impl<'a> Line<'a> {
         }
     }
 
-    fn get_substitution(&self) -> Option<String> {
-        let substitution = self.line.substitution_rope(&self.rope);
-        if substitution.is_empty() {
-            None
-        } else {
-            Some(substitution)
-        }
+    fn get_substitution(&self) -> Option<&str> {
+        self.substitution.as_deref()
     }
 
     fn text_run(&self, len: usize, font: Font, color: Rgba) -> TextRun {
@@ -740,6 +743,11 @@ impl<'a> Line<'a> {
         let mut hidden_ranges: Vec<(usize, usize)> = Vec::new();
         let mut style_ranges: Vec<(Range<usize>, &StyledRegion)> = Vec::new();
 
+        // Pre-clone fonts once outside the loop to avoid repeated clones
+        let is_code_block = self.is_code_block_line();
+        let base_code_font = &self.theme.code_font;
+        let base_text_font = &self.theme.text_font;
+
         for region in &self.inline_styles {
             let cursor_inside = self.cursor_offset >= region.full_range.start
                 && self.cursor_offset <= region.full_range.end;
@@ -798,28 +806,23 @@ impl<'a> Line<'a> {
             // Check which styles apply to this segment
             for (style_range, region) in &style_ranges {
                 if style_range.start <= start && end <= style_range.end {
-                    if region.style.bold {
-                        is_bold = true;
-                    }
-                    if region.style.italic {
-                        is_italic = true;
-                    }
-                    if region.style.code {
-                        is_code = true;
-                    }
-                    if region.style.strikethrough {
-                        is_strikethrough = true;
-                    }
-                    if region.link_url.is_some() {
-                        is_link = true;
+                    is_bold = is_bold || region.style.bold;
+                    is_italic = is_italic || region.style.italic;
+                    is_code = is_code || region.style.code;
+                    is_strikethrough = is_strikethrough || region.style.strikethrough;
+                    is_link = is_link || region.link_url.is_some();
+
+                    // Early exit if all styles are already set
+                    if is_bold && is_italic && is_code && is_strikethrough && is_link {
+                        break;
                     }
                 }
             }
 
-            let base_font = if is_code || self.is_code_block_line() {
-                self.theme.code_font.clone()
+            let base_font = if is_code || is_code_block {
+                base_code_font
             } else {
-                self.theme.text_font.clone()
+                base_text_font
             };
 
             let font = Font {
@@ -833,14 +836,14 @@ impl<'a> Line<'a> {
                 } else {
                     base_font.style
                 },
-                ..base_font
+                ..base_font.clone()
             };
 
             let color: Hsla = if is_link {
                 self.theme.link_color.into()
             } else if let Some(highlight_color) = self.get_highlight_color_for_range(start, end) {
                 highlight_color.into()
-            } else if is_code && !self.is_code_block_line() {
+            } else if is_code && !is_code_block {
                 self.theme.code_color.into()
             } else {
                 self.theme.text_color.into()

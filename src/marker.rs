@@ -113,14 +113,30 @@ impl LineMarkers {
             return String::new();
         }
 
-        let line_text = rope_slice_cow(rope, self.range.start, self.range.end);
+        // Find leading whitespace by scanning bytes from line start
+        // This avoids slicing the entire line content
+        let mut leading_ws_end = self.range.start;
+        for byte_idx in self.range.start..self.range.end {
+            if let Some(b) = rope.get_byte(byte_idx) {
+                if b == b' ' || b == b'\t' {
+                    leading_ws_end = byte_idx + 1;
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
 
-        // Find leading whitespace in the line
-        let leading_ws_len = line_text.len() - line_text.trim_start().len();
-        let leading_ws = &line_text[..leading_ws_len];
+        // Get just the leading whitespace (small slice)
+        let leading_ws = if leading_ws_end > self.range.start {
+            rope_slice_cow(rope, self.range.start, leading_ws_end)
+        } else {
+            std::borrow::Cow::Borrowed("")
+        };
 
         // Build substitution: leading whitespace + non-Indent marker substitutions
-        let mut result = leading_ws.to_string();
+        let mut result = leading_ws.into_owned();
         for m in self.markers.iter().rev() {
             if !matches!(m.kind, MarkerKind::Indent) {
                 result.push_str(m.kind.substitution());
