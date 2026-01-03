@@ -1,3 +1,4 @@
+use std::borrow::Cow;
 use std::ops::Range;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -7,6 +8,7 @@ use gpui::{
     MouseMoveEvent, Rgba, ScrollAnchor, SharedString, StyledText, TextRun, Window, canvas, div,
     img, point, prelude::*, px, rems,
 };
+use ropey::Rope;
 
 use crate::highlight::HighlightSpan;
 use crate::marker::{LineMarkers, MarkerKind};
@@ -82,11 +84,11 @@ use crate::parser::MarkdownTree;
 use tree_sitter::Node;
 
 pub fn extract_inline_styles(buffer: &Buffer, line: &LineMarkers) -> Vec<StyledRegion> {
-    extract_inline_styles_from_parts(&buffer.text(), buffer.tree(), line)
+    extract_inline_styles_from_parts(buffer.rope(), buffer.tree(), line)
 }
 
 fn extract_inline_styles_from_parts(
-    text: &str,
+    rope: &Rope,
     tree: Option<&MarkdownTree>,
     line: &LineMarkers,
 ) -> Vec<StyledRegion> {
@@ -96,7 +98,7 @@ fn extract_inline_styles_from_parts(
 
     let mut styles = Vec::new();
     let root = tree.block_tree().root_node();
-    collect_inline_styles_in_range(&root, tree, text, &line.range, &mut styles);
+    collect_inline_styles_in_range(&root, tree, rope, &line.range, &mut styles);
 
     styles
 }
@@ -104,7 +106,7 @@ fn extract_inline_styles_from_parts(
 fn collect_inline_styles_in_range(
     node: &Node,
     tree: &MarkdownTree,
-    text: &str,
+    rope: &Rope,
     range: &Range<usize>,
     styles: &mut Vec<StyledRegion>,
 ) {
@@ -116,7 +118,7 @@ fn collect_inline_styles_in_range(
     // If this is an inline node, get its inline tree and collect styles
     if node.kind() == "inline" {
         if let Some(inline_tree) = tree.inline_tree(node) {
-            collect_inline_styles_recursive(inline_tree.root_node(), text, styles);
+            collect_inline_styles_recursive(inline_tree.root_node(), rope, styles);
         }
         return;
     }
@@ -124,12 +126,12 @@ fn collect_inline_styles_in_range(
     // Recurse into children
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i as u32) {
-            collect_inline_styles_in_range(&child, tree, text, range, styles);
+            collect_inline_styles_in_range(&child, tree, rope, range, styles);
         }
     }
 }
 
-fn collect_inline_styles_recursive(node: Node, text: &str, styles: &mut Vec<StyledRegion>) {
+fn collect_inline_styles_recursive(node: Node, rope: &Rope, styles: &mut Vec<StyledRegion>) {
     match node.kind() {
         "emphasis" => {
             if let Some(region) = extract_emphasis_region(&node, TextStyle::italic()) {
@@ -152,12 +154,12 @@ fn collect_inline_styles_recursive(node: Node, text: &str, styles: &mut Vec<Styl
             }
         }
         "inline_link" | "full_reference_link" | "collapsed_reference_link" | "shortcut_link" => {
-            if let Some(region) = extract_link_region(&node, text) {
+            if let Some(region) = extract_link_region(&node, rope) {
                 styles.push(region);
             }
         }
         "image" => {
-            if let Some(region) = extract_image_region(&node, text) {
+            if let Some(region) = extract_image_region(&node, rope) {
                 styles.push(region);
             }
         }
@@ -167,7 +169,7 @@ fn collect_inline_styles_recursive(node: Node, text: &str, styles: &mut Vec<Styl
     // Recurse into children
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i as u32) {
-            collect_inline_styles_recursive(child, text, styles);
+            collect_inline_styles_recursive(child, rope, styles);
         }
     }
 }
@@ -241,7 +243,7 @@ fn extract_code_span_region(node: &Node) -> Option<StyledRegion> {
     })
 }
 
-fn extract_link_region(node: &Node, text: &str) -> Option<StyledRegion> {
+fn extract_link_region(node: &Node, rope: &Rope) -> Option<StyledRegion> {
     let full_start = node.start_byte();
     let full_end = node.end_byte();
 
@@ -257,7 +259,9 @@ fn extract_link_region(node: &Node, text: &str) -> Option<StyledRegion> {
                     content_end = child.end_byte();
                 }
                 "link_destination" => {
-                    url = Some(text[child.start_byte()..child.end_byte()].to_string());
+                    let start = rope.byte_to_char(child.start_byte());
+                    let end = rope.byte_to_char(child.end_byte());
+                    url = Some(rope.slice(start..end).to_string());
                 }
                 _ => {}
             }
@@ -285,7 +289,7 @@ fn extract_link_region(node: &Node, text: &str) -> Option<StyledRegion> {
     })
 }
 
-fn extract_image_region(node: &Node, text: &str) -> Option<StyledRegion> {
+fn extract_image_region(node: &Node, rope: &Rope) -> Option<StyledRegion> {
     let full_start = node.start_byte();
     let full_end = node.end_byte();
 
@@ -301,7 +305,9 @@ fn extract_image_region(node: &Node, text: &str) -> Option<StyledRegion> {
                     alt_end = child.end_byte();
                 }
                 "link_destination" => {
-                    url = Some(text[child.start_byte()..child.end_byte()].to_string());
+                    let start = rope.byte_to_char(child.start_byte());
+                    let end = rope.byte_to_char(child.end_byte());
+                    url = Some(rope.slice(start..end).to_string());
                 }
                 _ => {}
             }
@@ -344,7 +350,8 @@ pub struct LineTheme {
 
 pub struct Line<'a> {
     line: &'a LineMarkers,
-    text: &'a str,
+    /// Owned Rope - clone is O(1) due to internal Arc sharing.
+    rope: Rope,
     cursor_offset: usize,
     inline_styles: Vec<StyledRegion>,
     theme: LineTheme,
@@ -361,7 +368,7 @@ pub struct Line<'a> {
 impl<'a> Line<'a> {
     pub fn new(
         line: &'a LineMarkers,
-        text: &'a str,
+        rope: Rope,
         cursor_offset: usize,
         inline_styles: Vec<StyledRegion>,
         theme: LineTheme,
@@ -371,7 +378,7 @@ impl<'a> Line<'a> {
     ) -> Self {
         Self {
             line,
-            text,
+            rope,
             cursor_offset,
             inline_styles,
             theme,
@@ -383,6 +390,17 @@ impl<'a> Line<'a> {
             on_checkbox: None,
             on_hover: None,
             scroll_anchor: None,
+        }
+    }
+
+    /// Get a slice from the rope as a Cow<str>.
+    fn slice(&self, range: Range<usize>) -> Cow<'_, str> {
+        let start = self.rope.byte_to_char(range.start);
+        let end = self.rope.byte_to_char(range.end);
+        let slice = self.rope.slice(start..end);
+        match slice.as_str() {
+            Some(s) => Cow::Borrowed(s),
+            None => Cow::Owned(slice.to_string()),
         }
     }
 
@@ -451,9 +469,10 @@ impl<'a> Line<'a> {
             return None;
         }
 
-        let line_content = self.text[self.line.range.clone()].trim_end();
-        let image_text = &self.text[style.full_range.clone()];
-        if line_content != image_text {
+        let line_content = self.slice(self.line.range.clone());
+        let line_content = line_content.trim_end();
+        let image_text = self.slice(style.full_range.clone());
+        if line_content != image_text.as_ref() {
             return None;
         }
 
@@ -487,7 +506,7 @@ impl<'a> Line<'a> {
     }
 
     fn get_substitution(&self) -> Option<String> {
-        let substitution = self.line.substitution(self.text);
+        let substitution = self.line.substitution_rope(&self.rope);
         if substitution.is_empty() {
             None
         } else {
@@ -658,7 +677,7 @@ impl<'a> Line<'a> {
         }
 
         if self.line.is_fence() {
-            let fence_text = &self.text[content_range.clone()];
+            let fence_text = self.slice(content_range.clone());
             let backticks: String = fence_text.chars().take_while(|&c| c == '`').collect();
             let language = fence_text[backticks.len()..].trim_end();
 
@@ -748,9 +767,9 @@ impl<'a> Line<'a> {
                 continue;
             }
 
-            let span_text = &self.text[start..end];
+            let span_text = self.slice(start..end);
             let span_len = span_text.len();
-            display_text.push_str(span_text);
+            display_text.push_str(&span_text);
 
             let mut is_bold = false;
             let mut is_italic = false;
@@ -1046,7 +1065,7 @@ impl IntoElement for Line<'_> {
                 }
                 MarkerKind::ThematicBreak => {
                     if !self.cursor_on_line() && !self.selection_on_line() {
-                        let line_text = &self.text[self.line.range.clone()];
+                        let line_text = self.slice(self.line.range.clone());
                         let invisible_run = TextRun {
                             len: line_text.len(),
                             font: self.theme.text_font.clone(),
@@ -1055,7 +1074,7 @@ impl IntoElement for Line<'_> {
                             underline: None,
                             strikethrough: None,
                         };
-                        let shared_text: SharedString = line_text.to_string().into();
+                        let shared_text: SharedString = line_text.into_owned().into();
                         let styled_text =
                             StyledText::new(shared_text).with_runs(vec![invisible_run]);
                         let text_layout = styled_text.layout().clone();

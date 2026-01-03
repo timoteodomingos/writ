@@ -100,6 +100,35 @@ impl LineMarkers {
         result
     }
 
+    /// Returns the visual substitution text using a Rope for efficient slicing.
+    /// Same as `substitution()` but avoids allocating the full buffer text.
+    pub fn substitution_rope(&self, rope: &Rope) -> String {
+        // No markers = no substitution (e.g., code block content lines)
+        if self.markers.is_empty() {
+            return String::new();
+        }
+
+        // If the only marker is Indent, return empty - padding is handled by rendering
+        if self.markers.len() == 1 && matches!(self.markers[0].kind, MarkerKind::Indent) {
+            return String::new();
+        }
+
+        let line_text = rope_slice_cow(rope, self.range.start, self.range.end);
+
+        // Find leading whitespace in the line
+        let leading_ws_len = line_text.len() - line_text.trim_start().len();
+        let leading_ws = &line_text[..leading_ws_len];
+
+        // Build substitution: leading whitespace + non-Indent marker substitutions
+        let mut result = leading_ws.to_string();
+        for m in self.markers.iter().rev() {
+            if !matches!(m.kind, MarkerKind::Indent) {
+                result.push_str(m.kind.substitution());
+            }
+        }
+        result
+    }
+
     /// Returns the continuation text to insert on Enter.
     /// E.g., "> " for blockquote, "- " for list.
     /// For Indent and ListItem markers, extracts the actual text from the range
@@ -113,6 +142,21 @@ impl LineMarkers {
             .map(|m| match &m.kind {
                 MarkerKind::Indent | MarkerKind::ListItem { .. } => {
                     text[m.range.clone()].to_string()
+                }
+                _ => m.kind.continuation().to_string(),
+            })
+            .collect()
+    }
+
+    /// Returns the continuation text using a Rope for efficient slicing.
+    /// Same as `continuation()` but avoids allocating the full buffer text.
+    pub fn continuation_rope(&self, rope: &Rope) -> String {
+        self.markers
+            .iter()
+            .rev()
+            .map(|m| match &m.kind {
+                MarkerKind::Indent | MarkerKind::ListItem { .. } => {
+                    rope_slice_cow(rope, m.range.start, m.range.end).into_owned()
                 }
                 _ => m.kind.continuation().to_string(),
             })
@@ -171,6 +215,49 @@ impl LineMarkers {
             }
         }
         None
+    }
+
+    /// Returns true if this line contains only blockquote/indent markers (no lists).
+    pub fn is_blockquote_only(&self) -> bool {
+        self.markers
+            .iter()
+            .all(|m| matches!(m.kind, MarkerKind::BlockQuote | MarkerKind::Indent))
+            && self
+                .markers
+                .iter()
+                .any(|m| matches!(m.kind, MarkerKind::BlockQuote))
+    }
+
+    /// Returns the indent string if this line has exactly one Indent marker, empty otherwise.
+    pub fn indent_only_string(&self, text: &str) -> String {
+        if self.markers.len() == 1 && matches!(self.markers[0].kind, MarkerKind::Indent) {
+            text[self.markers[0].range.clone()].to_string()
+        } else {
+            String::new()
+        }
+    }
+
+    /// Returns the indent string using a Rope for efficient slicing.
+    /// Same as `indent_only_string()` but avoids allocating the full buffer text.
+    pub fn indent_only_rope(&self, rope: &Rope) -> String {
+        if self.markers.len() == 1 && matches!(self.markers[0].kind, MarkerKind::Indent) {
+            rope_slice_cow(rope, self.markers[0].range.start, self.markers[0].range.end)
+                .into_owned()
+        } else {
+            String::new()
+        }
+    }
+
+    /// Returns continuation text excluding code fence markers.
+    /// Used when inside code blocks to preserve outer container markers (e.g., blockquotes).
+    /// Note: Uses static continuation strings, not actual buffer text.
+    pub fn continuation_without_fence(&self) -> String {
+        self.markers
+            .iter()
+            .rev()
+            .filter(|m| !matches!(m.kind, MarkerKind::CodeBlockFence { .. }))
+            .map(|m| m.kind.continuation())
+            .collect()
     }
 }
 

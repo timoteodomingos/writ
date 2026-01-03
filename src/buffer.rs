@@ -208,6 +208,17 @@ impl BufferContent {
         self.text.len_bytes() == 0
     }
 
+    /// Get a single byte at the given offset, if it exists.
+    pub fn byte_at(&self, offset: usize) -> Option<u8> {
+        if offset >= self.text.len_bytes() {
+            return None;
+        }
+        self.text
+            .byte_slice(offset..offset + 1)
+            .as_str()
+            .and_then(|s| s.bytes().next())
+    }
+
     pub fn rope(&self) -> &Rope {
         &self.text
     }
@@ -256,6 +267,18 @@ impl BufferContent {
         let char_start = self.text.byte_to_char(range.start);
         let char_end = self.text.byte_to_char(range.end);
         self.text.slice(char_start..char_end).to_string()
+    }
+
+    /// Get a byte slice from the rope, borrowing if possible.
+    /// Returns a Cow that borrows if the slice fits in one chunk, allocates otherwise.
+    pub fn slice_cow(&self, range: Range<usize>) -> std::borrow::Cow<'_, str> {
+        let char_start = self.text.byte_to_char(range.start);
+        let char_end = self.text.byte_to_char(range.end);
+        let slice = self.text.slice(char_start..char_end);
+        match slice.as_str() {
+            Some(s) => std::borrow::Cow::Borrowed(s),
+            None => std::borrow::Cow::Owned(slice.to_string()),
+        }
     }
 
     pub fn code_highlights_for_range(&mut self, range: Range<usize>) -> Vec<HighlightSpan> {

@@ -21,8 +21,6 @@ use crate::line::extract_inline_styles;
 use crate::line::{CheckboxCallback, ClickCallback, DragCallback, HoverCallback, Line, LineTheme};
 use crate::marker::{LineMarkers, MarkerKind};
 
-type CodeBlockRange = (usize, Option<usize>);
-
 /// A markdown editor component with live inline rendering.
 ///
 /// The editor hides markdown syntax (like `**`, `#`, `-`) when the cursor
@@ -234,8 +232,11 @@ impl EditorState {
             .map(|r| r.end)
             .unwrap_or(line.range.start);
 
-        let buffer_text = self.buffer.text();
-        let is_empty = buffer_text[content_start..line.range.end].trim().is_empty();
+        let is_empty = self
+            .buffer
+            .slice_cow(content_start..line.range.end)
+            .trim()
+            .is_empty();
 
         let prev_line = if line_idx > 0 {
             lines.get(line_idx - 1)
@@ -271,8 +272,7 @@ impl EditorState {
             return false;
         }
 
-        let text = self.buffer.text();
-        let line_to_cursor = &text[line_start..cursor_pos];
+        let line_to_cursor = self.buffer.slice_cow(line_start..cursor_pos);
 
         if line_to_cursor == "*" || line_to_cursor == "-" || line_to_cursor == "+" {
             return true;
@@ -300,14 +300,11 @@ impl EditorState {
             return false;
         }
 
-        let text = self.buffer.text();
-        let prev_char = text.as_bytes().get(cursor_pos - 1);
-        if prev_char != Some(&b'>') {
+        if self.buffer.byte_at(cursor_pos - 1) != Some(b'>') {
             return false;
         }
 
-        let next_char = text.as_bytes().get(cursor_pos);
-        if next_char == Some(&b' ') {
+        if self.buffer.byte_at(cursor_pos) == Some(b' ') {
             return false;
         }
 
@@ -338,8 +335,7 @@ impl EditorState {
             return "\n".to_string();
         };
 
-        let buffer_text = self.buffer.text();
-        let continuation = line_info.continuation(&buffer_text);
+        let continuation = line_info.continuation_rope(self.buffer.rope());
         if continuation.is_empty() {
             "\n".to_string()
         } else {
@@ -353,7 +349,6 @@ impl EditorState {
             return;
         };
 
-        let buffer_text = self.buffer.text();
         let line_start = ctx.line.range.start;
 
         if !ctx.line.markers.is_empty() {
@@ -374,16 +369,18 @@ impl EditorState {
                     container_line = Some(line);
                     break;
                 }
-                let line_text = &buffer_text[line.range.clone()];
-                if !line_text.trim().is_empty() {
+                if !self.buffer.slice_cow(line.range.clone()).trim().is_empty() {
                     break;
                 }
             }
 
             if let Some(container) = container_line {
                 let prev_line = &lines[ctx.line_idx - 1];
-                let prev_line_text = &buffer_text[prev_line.range.clone()];
-                let is_after_blank = prev_line_text.trim().is_empty();
+                let is_after_blank = self
+                    .buffer
+                    .slice_cow(prev_line.range.clone())
+                    .trim()
+                    .is_empty();
 
                 if is_after_blank {
                     // After blank line - indent as nested block
@@ -391,7 +388,7 @@ impl EditorState {
                     self.insert_at(line_start, &indent);
                 } else {
                     // Adjacent to container - add list marker
-                    let continuation = container.continuation(&buffer_text);
+                    let continuation = container.continuation_rope(self.buffer.rope());
                     if !continuation.is_empty() {
                         self.insert_at(line_start, &continuation);
                     }
@@ -413,8 +410,6 @@ impl EditorState {
             self.insert_text("\n");
             return;
         };
-
-        let buffer_text = self.buffer.text();
 
         // Check if line has an opening code fence marker
         let has_opening_fence = ctx.line.markers.iter().any(|m| {
@@ -444,14 +439,7 @@ impl EditorState {
         if has_opening_fence || in_code_block {
             // Opening fence or inside code block: just insert newline with any outer container
             // continuations (e.g., blockquote markers), but not the fence itself
-            let continuation: String = ctx
-                .line
-                .markers
-                .iter()
-                .rev()
-                .filter(|m| !matches!(m.kind, MarkerKind::CodeBlockFence { .. }))
-                .map(|m| m.kind.continuation())
-                .collect();
+            let continuation = ctx.line.continuation_without_fence();
             if continuation.is_empty() {
                 self.insert_text("\n");
             } else {
@@ -459,14 +447,7 @@ impl EditorState {
             }
         } else if has_closing_fence {
             // Closing fence: create paragraph break to start new content
-            let continuation: String = ctx
-                .line
-                .markers
-                .iter()
-                .rev()
-                .filter(|m| !matches!(m.kind, MarkerKind::CodeBlockFence { .. }))
-                .map(|m| m.kind.continuation())
-                .collect();
+            let continuation = ctx.line.continuation_without_fence();
             if continuation.is_empty() {
                 self.insert_text("\n\n");
             } else {
@@ -483,13 +464,7 @@ impl EditorState {
             } else {
                 // Create paragraph break
                 // Only preserve Indent markers as indent, not other single markers like CodeBlockFence
-                let indent = if ctx.line.markers.len() == 1
-                    && matches!(ctx.line.markers[0].kind, MarkerKind::Indent)
-                {
-                    buffer_text[ctx.line.markers[0].range.clone()].to_string()
-                } else {
-                    String::new()
-                };
+                let indent = ctx.line.indent_only_rope(self.buffer.rope());
                 self.insert_text(&format!("\n\n{}", indent));
             }
         } else if ctx.is_empty {
@@ -503,7 +478,9 @@ impl EditorState {
                     .marker_range()
                     .map(|r| r.end)
                     .unwrap_or(prev.range.start);
-                let prev_is_empty = buffer_text[prev_content_start..prev.range.end]
+                let prev_is_empty = self
+                    .buffer
+                    .slice_cow(prev_content_start..prev.range.end)
                     .trim()
                     .is_empty();
                 if prev_is_empty && !prev.markers.is_empty() {
@@ -523,20 +500,9 @@ impl EditorState {
         } else {
             // Line has content
             // Check if this is a blockquote-only line (no list markers) - create paragraph break
-            let is_blockquote_only = ctx
-                .line
-                .markers
-                .iter()
-                .all(|m| matches!(m.kind, MarkerKind::BlockQuote | MarkerKind::Indent))
-                && ctx
-                    .line
-                    .markers
-                    .iter()
-                    .any(|m| matches!(m.kind, MarkerKind::BlockQuote));
-
-            if is_blockquote_only {
+            if ctx.line.is_blockquote_only() {
                 // Paragraph break within blockquote: "> text" -> "> text\n>\n> "
-                let continuation = ctx.line.continuation(&buffer_text);
+                let continuation = ctx.line.continuation_rope(self.buffer.rope());
                 self.insert_text(&format!("\n{}\n{}", continuation.trim_end(), continuation));
             } else {
                 // Create sibling (for lists, etc.)
@@ -556,8 +522,7 @@ impl EditorState {
             return;
         }
 
-        let buffer_text = self.buffer.text();
-        let line_text = &buffer_text[ctx.line.range.clone()];
+        let line_text = self.buffer.slice_cow(ctx.line.range.clone());
 
         if line_text.starts_with("  ") {
             // Nested - remove indentation
@@ -587,34 +552,17 @@ impl EditorState {
             return;
         };
 
-        let buffer_text = self.buffer.text();
-
         // Same logic as smart_enter for content, but skip the "exit on empty" branch
         if !ctx.has_container {
             // Paragraph - create paragraph break with indent if nested
-            let indent = if ctx.line.markers.len() == 1
-                && matches!(ctx.line.markers[0].kind, MarkerKind::Indent)
-            {
-                buffer_text[ctx.line.markers[0].range.clone()].to_string()
-            } else {
-                String::new()
-            };
+            let indent = ctx
+                .line
+                .indent_only_string(&self.buffer.slice_cow(ctx.line.range.clone()));
             self.insert_text(&format!("\n\n{}", indent));
         } else {
             // Container - check if blockquote-only (paragraph break) or list (sibling)
-            let is_blockquote_only = ctx
-                .line
-                .markers
-                .iter()
-                .all(|m| matches!(m.kind, MarkerKind::BlockQuote | MarkerKind::Indent))
-                && ctx
-                    .line
-                    .markers
-                    .iter()
-                    .any(|m| matches!(m.kind, MarkerKind::BlockQuote));
-
-            if is_blockquote_only {
-                let continuation = ctx.line.continuation(&buffer_text);
+            if ctx.line.is_blockquote_only() {
+                let continuation = ctx.line.continuation_rope(self.buffer.rope());
                 self.insert_text(&format!("\n{}\n{}", continuation.trim_end(), continuation));
             } else {
                 let text = self.compute_smart_enter_text(ctx.cursor_offset);
@@ -654,8 +602,11 @@ impl EditorState {
 
                 // Also delete preceding newline to join lines (but not for Indent markers)
                 if new_pos > 0 && !is_indent_marker {
-                    let text = self.buffer.text();
-                    let char_before = text[..new_pos].chars().last();
+                    let char_before = if new_pos > 0 {
+                        self.buffer.byte_at(new_pos - 1).map(|b| b as char)
+                    } else {
+                        None
+                    };
                     if char_before == Some('\n') {
                         self.buffer.delete(new_pos - 1..new_pos, new_pos);
                         self.selection = Selection::new(new_pos - 1, new_pos - 1);
@@ -666,18 +617,21 @@ impl EditorState {
                     self.selection = Selection::new(new_pos, new_pos);
                 }
             } else {
-                let text = self.buffer.text();
-                let char_before = text[..cursor_pos].chars().last();
+                let char_before = if cursor_pos > 0 {
+                    self.buffer.byte_at(cursor_pos - 1).map(|b| b as char)
+                } else {
+                    None
+                };
 
                 if char_before == Some('\n') {
                     let line_idx = self.buffer.byte_to_line(cursor_pos);
                     let lines = self.buffer.lines();
                     if let Some(current_line) = lines.get(line_idx) {
-                        let line_text = &text[current_line.range.clone()];
+                        let line_text = self.buffer.slice_cow(current_line.range.clone());
                         if line_text.trim().is_empty() {
-                            let has_content_after = lines
-                                .get(line_idx + 1)
-                                .is_some_and(|next| !text[next.range.clone()].trim().is_empty());
+                            let has_content_after = lines.get(line_idx + 1).is_some_and(|next| {
+                                !self.buffer.slice_cow(next.range.clone()).trim().is_empty()
+                            });
 
                             if has_content_after {
                                 self.buffer.delete(cursor_pos - 1..cursor_pos, cursor_pos);
@@ -687,8 +641,9 @@ impl EditorState {
 
                             // Collapse all trailing newlines
                             let mut delete_start = cursor_pos;
-                            let bytes = text.as_bytes();
-                            while delete_start > 0 && bytes[delete_start - 1] == b'\n' {
+                            while delete_start > 0
+                                && self.buffer.byte_at(delete_start - 1) == Some(b'\n')
+                            {
                                 delete_start -= 1;
                             }
                             self.buffer.delete(delete_start..cursor_pos, cursor_pos);
@@ -876,12 +831,11 @@ impl Editor {
             return;
         };
 
-        let buffer_text = self.state.buffer.text();
         let Some(is_checked) = line.checkbox() else {
             return;
         };
 
-        let line_text = &buffer_text[line.range.clone()];
+        let line_text = self.state.buffer.slice_cow(line.range.clone());
         let checkbox_pattern = if is_checked { "[x]" } else { "[ ]" };
         let alt_pattern = if is_checked { "[X]" } else { "" };
 
@@ -1002,51 +956,6 @@ impl Editor {
         self.cursor().move_right(&self.state.buffer)
     }
 
-    fn compute_code_block_ranges(lines: &[LineMarkers]) -> Vec<CodeBlockRange> {
-        let mut ranges = Vec::new();
-        let mut i = 0;
-
-        while i < lines.len() {
-            if lines[i].is_fence() {
-                let start = i;
-                i += 1;
-                let mut found_close = false;
-
-                while i < lines.len() {
-                    if lines[i].is_fence() {
-                        ranges.push((start, Some(i)));
-                        i += 1;
-                        found_close = true;
-                        break;
-                    }
-                    i += 1;
-                }
-
-                if !found_close {
-                    ranges.push((start, None));
-                }
-            } else {
-                i += 1;
-            }
-        }
-
-        ranges
-    }
-
-    fn cursor_in_code_block(&self) -> bool {
-        let lines = self.state.buffer.lines();
-        let cursor_line = self.state.buffer.byte_to_line(self.cursor().offset);
-        let ranges = Self::compute_code_block_ranges(lines);
-
-        for (start, end) in ranges {
-            let block_end = end.unwrap_or(lines.len().saturating_sub(1));
-            if cursor_line >= start && cursor_line <= block_end {
-                return true;
-            }
-        }
-        false
-    }
-
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
         if self.input_blocked {
             return;
@@ -1109,7 +1018,7 @@ impl Editor {
                 cx.notify();
             }
             "tab" => {
-                if self.cursor_in_code_block() {
+                if self.state.cursor_in_code_block() {
                     self.insert_text("    ");
                 } else if keystroke.modifiers.shift {
                     self.smart_shift_tab();
@@ -1125,14 +1034,14 @@ impl Editor {
             "c" if keystroke.modifiers.control || keystroke.modifiers.platform => {
                 if !self.state.selection.is_collapsed() {
                     let range = self.state.selection.range();
-                    let text = &self.state.buffer.text()[range];
-                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text.to_string()));
+                    let text = self.state.buffer.slice_cow(range).into_owned();
+                    cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
                 }
             }
             "x" if keystroke.modifiers.control || keystroke.modifiers.platform => {
                 if !self.state.selection.is_collapsed() {
                     let range = self.state.selection.range();
-                    let text = self.state.buffer.text()[range].to_string();
+                    let text = self.state.buffer.slice_cow(range).into_owned();
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
                     self.delete_selection();
                     cx.notify();
@@ -1169,7 +1078,7 @@ impl Editor {
 
             _ => {
                 if let Some(key_char) = &keystroke.key_char {
-                    if key_char == " " && !self.cursor_in_code_block() {
+                    if key_char == " " && !self.state.cursor_in_code_block() {
                         let cursor = self.cursor();
                         let line_start = cursor.move_to_line_start(&self.state.buffer).offset;
                         if cursor.offset == line_start {
@@ -1409,8 +1318,6 @@ impl Render for Editor {
             Some(self.state.selection.range())
         };
 
-        let buffer_text = self.state.buffer.text();
-
         let entity = cx.entity().clone();
         let on_click: ClickCallback =
             Rc::new(move |buffer_offset, shift_held, click_count, _window, cx| {
@@ -1480,11 +1387,11 @@ impl Render for Editor {
         let cursor_line = self.state.buffer.byte_to_line(cursor_offset);
         let cursor_child_index = Some(cursor_line + 1);
 
-        let line_views: Vec<_> = lines
+        // Pre-compute inline styles and code highlights for each line
+        let line_data: Vec<_> = lines
             .iter()
             .map(|line| {
                 let inline_styles = extract_inline_styles(&self.state.buffer, line);
-
                 let code_highlights: Vec<_> = self
                     .state
                     .buffer
@@ -1492,10 +1399,19 @@ impl Render for Editor {
                     .iter()
                     .map(|span| (span.clone(), theme.color_for_highlight(span.highlight_id)))
                     .collect();
+                (inline_styles, code_highlights)
+            })
+            .collect();
 
+        // Clone the rope once - Rope::clone() is O(1) due to internal Arc sharing
+        let rope = self.state.buffer.rope().clone();
+        let line_views: Vec<_> = lines
+            .iter()
+            .zip(line_data.into_iter())
+            .map(|(line, (inline_styles, code_highlights))| {
                 Line::new(
                     line,
-                    &buffer_text,
+                    rope.clone(),
                     cursor_offset,
                     inline_styles,
                     line_theme.clone(),
