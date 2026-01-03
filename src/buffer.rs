@@ -5,6 +5,7 @@ use tree_sitter::{InputEdit, Point};
 use undo::Record;
 
 use crate::highlight::{HighlightSpan, Highlighter};
+use crate::inline::{StyledRegion, extract_all_inline_styles, styles_in_range};
 use crate::marker::{LineMarkers, MarkerKind, collect_nodes, markers_at};
 use crate::parser::{MarkdownParser, MarkdownTree};
 
@@ -64,6 +65,9 @@ pub struct BufferContent {
     code_highlight_cache: CodeHighlightCache,
     /// Cached line info, updated when tree changes.
     lines: Vec<LineMarkers>,
+    /// Cached inline styles, updated when tree changes.
+    /// Sorted by start position for efficient binary search lookup.
+    inline_styles: Vec<StyledRegion>,
 }
 
 impl BufferContent {
@@ -75,10 +79,11 @@ impl BufferContent {
             tree: None,
             code_highlight_cache: CodeHighlightCache::default(),
             lines: Vec::new(),
+            inline_styles: Vec::new(),
         }
     }
 
-    /// Recompute cached lines from current tree.
+    /// Recompute cached lines and inline styles from current tree.
     fn update_lines_cache(&mut self) {
         let nodes = self
             .tree
@@ -115,6 +120,13 @@ impl BufferContent {
                 }
             })
             .collect();
+
+        // Update inline styles cache
+        self.inline_styles = if let Some(ref tree) = self.tree {
+            extract_all_inline_styles(tree, &self.text)
+        } else {
+            Vec::new()
+        };
     }
 
     fn apply_edit(&mut self, offset: usize, to_delete: &str, to_insert: &str) {
@@ -229,6 +241,15 @@ impl BufferContent {
 
     pub fn lines(&self) -> &[LineMarkers] {
         &self.lines
+    }
+
+    /// Get inline styles that overlap with a byte range.
+    /// Uses binary search for efficient O(log n) lookup.
+    pub fn inline_styles_for_range(&self, range: &Range<usize>) -> Vec<StyledRegion> {
+        styles_in_range(&self.inline_styles, range)
+            .into_iter()
+            .cloned()
+            .collect()
     }
 
     pub fn byte_to_line(&self, byte_offset: usize) -> usize {
@@ -602,6 +623,7 @@ impl FromStr for Buffer {
             tree,
             code_highlight_cache: CodeHighlightCache::default(),
             lines: Vec::new(),
+            inline_styles: Vec::new(),
         };
 
         content.normalize_ordered_lists();

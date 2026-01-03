@@ -45,6 +45,7 @@ pub mod demo;
 pub mod editor;
 pub mod highlight;
 pub mod http;
+pub mod inline;
 pub mod line;
 pub mod marker;
 pub mod parser;

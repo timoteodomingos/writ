@@ -17,7 +17,6 @@ use crate::title_bar::FileInfo;
 
 use crate::buffer::Buffer;
 use crate::cursor::{Cursor, Selection};
-use crate::line::extract_inline_styles;
 use crate::line::{CheckboxCallback, ClickCallback, DragCallback, HoverCallback, Line, LineTheme};
 use crate::marker::{LineMarkers, MarkerKind};
 
@@ -1391,7 +1390,7 @@ impl Render for Editor {
         let line_data: Vec<_> = lines
             .iter()
             .map(|line| {
-                let inline_styles = extract_inline_styles(&self.state.buffer, line);
+                let inline_styles = self.state.buffer.inline_styles_for_range(&line.range);
                 let code_highlights: Vec<_> = self
                     .state
                     .buffer
@@ -1407,7 +1406,7 @@ impl Render for Editor {
         let rope = self.state.buffer.rope().clone();
         let line_views: Vec<_> = lines
             .iter()
-            .zip(line_data.into_iter())
+            .zip(line_data)
             .map(|(line, (inline_styles, code_highlights))| {
                 Line::new(
                     line,
