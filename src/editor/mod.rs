@@ -495,7 +495,30 @@ impl EditorState {
         } else if ctx.is_empty {
             // Empty container line - exit ALL markers
             let marker_range = ctx.line.marker_range().unwrap_or(ctx.line.range.clone());
-            self.delete_and_adjust(marker_range);
+
+            // Check if previous line is an empty continuation (e.g., just ">")
+            // This handles: "> hey\n>\n> |" -> Enter -> "> hey\n\n|"
+            let prev_empty_range = ctx.prev_line.and_then(|prev| {
+                let prev_content_start = prev
+                    .marker_range()
+                    .map(|r| r.end)
+                    .unwrap_or(prev.range.start);
+                let prev_is_empty = buffer_text[prev_content_start..prev.range.end]
+                    .trim()
+                    .is_empty();
+                if prev_is_empty && !prev.markers.is_empty() {
+                    Some(prev.range.start..marker_range.end)
+                } else {
+                    None
+                }
+            });
+
+            if let Some(delete_range) = prev_empty_range {
+                self.delete_and_adjust(delete_range);
+            } else {
+                self.delete_and_adjust(marker_range);
+            }
+
             self.insert_at(self.cursor().offset, "\n");
         } else {
             // Line has content
@@ -549,14 +572,55 @@ impl EditorState {
         }
     }
 
-    /// Shift+Enter: always creates a sibling, even on empty container lines.
+    /// Shift+Enter: same as first Enter (sibling/paragraph break), but never exits.
+    /// Use this to add more items without exiting the container.
     pub fn shift_enter(&mut self) {
         if self.is_pending_marker(self.cursor().offset) {
             self.complete_pending_marker();
+            let text = self.compute_smart_enter_text(self.cursor().offset);
+            self.insert_text(&text);
+            return;
         }
 
-        let text = self.compute_smart_enter_text(self.cursor().offset);
-        self.insert_text(&text);
+        let Some(ctx) = self.line_context() else {
+            self.insert_text("\n");
+            return;
+        };
+
+        let buffer_text = self.buffer.text();
+
+        // Same logic as smart_enter for content, but skip the "exit on empty" branch
+        if !ctx.has_container {
+            // Paragraph - create paragraph break with indent if nested
+            let indent = if ctx.line.markers.len() == 1
+                && matches!(ctx.line.markers[0].kind, MarkerKind::Indent)
+            {
+                buffer_text[ctx.line.markers[0].range.clone()].to_string()
+            } else {
+                String::new()
+            };
+            self.insert_text(&format!("\n\n{}", indent));
+        } else {
+            // Container - check if blockquote-only (paragraph break) or list (sibling)
+            let is_blockquote_only = ctx
+                .line
+                .markers
+                .iter()
+                .all(|m| matches!(m.kind, MarkerKind::BlockQuote | MarkerKind::Indent))
+                && ctx
+                    .line
+                    .markers
+                    .iter()
+                    .any(|m| matches!(m.kind, MarkerKind::BlockQuote));
+
+            if is_blockquote_only {
+                let continuation = ctx.line.continuation(&buffer_text);
+                self.insert_text(&format!("\n{}\n{}", continuation.trim_end(), continuation));
+            } else {
+                let text = self.compute_smart_enter_text(ctx.cursor_offset);
+                self.insert_text(&text);
+            }
+        }
     }
 
     fn smart_backspace_range_with_type(
@@ -1760,6 +1824,16 @@ hello world
 
 |"#,
             );
+        }
+
+        #[test]
+        fn double_enter_on_blockquote_exits_and_cleans_up() {
+            // First enter creates paragraph break, second enter exits and removes empty continuation
+            let mut state = editor_with_cursor("> hey|");
+            state.smart_enter();
+            assert_editor_eq(&state, "> hey\n>\n> |");
+            state.smart_enter();
+            assert_editor_eq(&state, "> hey\n\n|");
         }
 
         #[test]

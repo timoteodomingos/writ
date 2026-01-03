@@ -56,9 +56,7 @@ pub fn demo_script() -> Vec<DemoStep> {
         Type("## Blockquotes".into()),
         Action(A::Enter),
         Wait(500),
-        Type("> Blockquotes hide the `>` marker".into()),
-        Action(A::ShiftEnter),
-        Type("and show a border instead.".into()),
+        Type("> Blockquotes hide the `>` marker and show a border instead.".into()),
         Action(A::Enter),
         Wait(800),
         Action(A::Enter),
@@ -76,15 +74,6 @@ pub fn demo_script() -> Vec<DemoStep> {
         Action(A::Enter),
         Action(A::Enter),
         Wait(800),
-        // Move up to show the nested markers
-        Action(A::Move(Up)),
-        Action(A::Move(Up)),
-        Wait(600),
-        // Move back down
-        Action(A::Move(Down)),
-        Action(A::Move(Down)),
-        Wait(500),
-        Action(A::Enter),
         // Code blocks
         Type("## Code".into()),
         Action(A::Enter),
@@ -102,17 +91,7 @@ pub fn demo_script() -> Vec<DemoStep> {
         Type("```".into()),
         Action(A::Enter),
         // Now cursor is outside the block - fences disappear
-        Wait(1000),
-        // Move back up into the code block to show fences reappearing
-        Action(A::Move(Up)),
-        Wait(400),
-        Action(A::Move(Up)),
-        Wait(800),
-        // Move back down outside the block
-        Action(A::Move(Down)),
-        Action(A::Move(Down)),
         Wait(500),
-        Action(A::Enter),
         // Links
         Type("## Links".into()),
         Action(A::Enter),
@@ -120,18 +99,14 @@ pub fn demo_script() -> Vec<DemoStep> {
         Type("Check out [the repo](https://github.com/wilfreddenton/writ)!".into()),
         Wait(1000),
         Action(A::Enter),
-        Action(A::Enter),
         Type("Embed images:".into()),
-        Action(A::Enter),
         Action(A::Enter),
         Type("![Hello, World!](https://upload.wikimedia.org/wikipedia/commons/9/97/The_Earth_seen_from_Apollo_17.jpg)".into()),
         Wait(500),
         Action(A::Enter),
         Wait(1000),
-        Action(A::Enter),
         // Finish
         Type("---".into()),
-        Action(A::Enter),
         Action(A::Enter),
         Type("_That's writ!_".into()),
         Wait(500),
