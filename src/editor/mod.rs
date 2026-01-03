@@ -34,7 +34,6 @@ type CodeBlockRange = (usize, Option<usize>);
 /// ```ignore
 /// let editor = cx.new(|cx| Editor::new("# Hello, world!", cx));
 /// ```
-
 /// Context about the line at the cursor, used by smart editing actions.
 pub struct LineContext<'a> {
     /// Current cursor byte offset.
@@ -196,11 +195,11 @@ impl EditorState {
         }
 
         // Check for pending ordered marker: digits followed by .
-        if line_to_cursor.ends_with('.') {
-            let before_dot = &line_to_cursor[..line_to_cursor.len() - 1];
-            if !before_dot.is_empty() && before_dot.chars().all(|c| c.is_ascii_digit()) {
-                return true;
-            }
+        if let Some(before_dot) = line_to_cursor.strip_suffix('.')
+            && !before_dot.is_empty()
+            && before_dot.chars().all(|c| c.is_ascii_digit())
+        {
+            return true;
         }
 
         false

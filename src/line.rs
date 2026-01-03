@@ -316,8 +316,8 @@ impl<'a> Line<'a> {
                         font: run.font.clone(),
                         color: run.color,
                         background_color: run.background_color,
-                        underline: run.underline.clone(),
-                        strikethrough: run.strikethrough.clone(),
+                        underline: run.underline,
+                        strikethrough: run.strikethrough,
                     });
                 }
 
@@ -329,8 +329,8 @@ impl<'a> Line<'a> {
                         font: run.font.clone(),
                         color: run.color,
                         background_color: Some(selection_color),
-                        underline: run.underline.clone(),
-                        strikethrough: run.strikethrough.clone(),
+                        underline: run.underline,
+                        strikethrough: run.strikethrough,
                     });
                 }
 
