@@ -46,6 +46,22 @@ cargo run -- --file path/to/document.md
 
 On Linux, using a faster linker significantly improves build times. See [Zed's linker documentation](https://github.com/zed-industries/zed/blob/main/docs/src/development/linux.md#linkers-linker) for setup instructions.
 
+### Build Profiles
+
+Debug builds are significantly slower, especially for image loading and text rendering. For day-to-day development with better performance, use the `release-fast` profile:
+
+```bash
+cargo run --profile release-fast -- --file path/to/document.md
+```
+
+For maximum runtime performance (slower compile times), use a full release build:
+
+```bash
+cargo run --release -- --file path/to/document.md
+```
+
+The release profile enables thin LTO and single codegen unit for best optimization. The `release-fast` profile trades some runtime performance for faster compilation by disabling LTO and using parallel codegen units.
+
 ## Features
 
 ### Inline Rendering
