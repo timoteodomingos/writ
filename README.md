@@ -41,10 +41,8 @@ The default fonts are platform-specific: Segoe UI and Consolas on Windows, the s
 ```bash
 git clone https://github.com/wilfreddenton/writ
 cd writ
-cargo run --release -- --file path/to/document.md
+cargo run -- --file path/to/document.md
 ```
-
-The `--release` flag is recommended even during development. Debug builds are noticeably slower due to the volume of text layout and rendering work on every frame.
 
 On Linux, using a faster linker significantly improves build times. See [Zed's linker documentation](https://github.com/zed-industries/zed/blob/main/docs/src/development/linux.md#linkers-linker) for setup instructions.
 
@@ -66,7 +64,7 @@ Nesting is fully supported. A task item inside a blockquote is represented inter
 
 ### Smart Enter
 
-Pressing Shift+Enter continues the current line structure. On a list item, it inserts a new item at the same nesting level. On a blockquote, it continues the quote. On a nested structure like a list inside a blockquote, it continues both.
+Enter behaves contextually. On a list item, it creates a new sibling item. On a blockquote, it creates a paragraph break within the quote. On an empty container line (like `- |` or `> |`), Enter exits all markers and returns to plain text. Shift+Enter always continues the structure without exiting, useful when you want to add more items after an empty one.
 
 ### Code Blocks
 
