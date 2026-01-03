@@ -77,6 +77,248 @@ pub struct StyledRegion {
     pub is_image: bool,
 }
 
+use crate::buffer::Buffer;
+use crate::parser::MarkdownTree;
+use tree_sitter::Node;
+
+pub fn extract_inline_styles(buffer: &Buffer, line: &LineMarkers) -> Vec<StyledRegion> {
+    extract_inline_styles_from_parts(&buffer.text(), buffer.tree(), line)
+}
+
+pub fn extract_inline_styles_from_parts(
+    text: &str,
+    tree: Option<&MarkdownTree>,
+    line: &LineMarkers,
+) -> Vec<StyledRegion> {
+    let Some(tree) = tree else {
+        return Vec::new();
+    };
+
+    let mut styles = Vec::new();
+    let root = tree.block_tree().root_node();
+    collect_inline_styles_in_range(&root, tree, text, &line.range, &mut styles);
+
+    styles
+}
+
+fn collect_inline_styles_in_range(
+    node: &Node,
+    tree: &MarkdownTree,
+    text: &str,
+    range: &Range<usize>,
+    styles: &mut Vec<StyledRegion>,
+) {
+    // Skip nodes that don't overlap with our range
+    if node.end_byte() <= range.start || node.start_byte() >= range.end {
+        return;
+    }
+
+    // If this is an inline node, get its inline tree and collect styles
+    if node.kind() == "inline" {
+        if let Some(inline_tree) = tree.inline_tree(node) {
+            collect_inline_styles_recursive(inline_tree.root_node(), text, styles);
+        }
+        return;
+    }
+
+    // Recurse into children
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i as u32) {
+            collect_inline_styles_in_range(&child, tree, text, range, styles);
+        }
+    }
+}
+
+fn collect_inline_styles_recursive(node: Node, text: &str, styles: &mut Vec<StyledRegion>) {
+    match node.kind() {
+        "emphasis" => {
+            if let Some(region) = extract_emphasis_region(&node, TextStyle::italic()) {
+                styles.push(region);
+            }
+        }
+        "strong_emphasis" => {
+            if let Some(region) = extract_emphasis_region(&node, TextStyle::bold()) {
+                styles.push(region);
+            }
+        }
+        "code_span" => {
+            if let Some(region) = extract_code_span_region(&node) {
+                styles.push(region);
+            }
+        }
+        "strikethrough" => {
+            if let Some(region) = extract_emphasis_region(&node, TextStyle::strikethrough()) {
+                styles.push(region);
+            }
+        }
+        "inline_link" | "full_reference_link" | "collapsed_reference_link" | "shortcut_link" => {
+            if let Some(region) = extract_link_region(&node, text) {
+                styles.push(region);
+            }
+        }
+        "image" => {
+            if let Some(region) = extract_image_region(&node, text) {
+                styles.push(region);
+            }
+        }
+        _ => {}
+    }
+
+    // Recurse into children
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i as u32) {
+            collect_inline_styles_recursive(child, text, styles);
+        }
+    }
+}
+
+fn extract_emphasis_region(node: &Node, style: TextStyle) -> Option<StyledRegion> {
+    let full_start = node.start_byte();
+    let full_end = node.end_byte();
+
+    let mut content_start = full_start;
+    let mut content_end = full_end;
+
+    // Find delimiter boundaries
+    let mut delimiters: Vec<(usize, usize)> = Vec::new();
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i as u32) {
+            let kind = child.kind();
+            if kind == "emphasis_delimiter" || kind.ends_with("_delimiter") {
+                delimiters.push((child.start_byte(), child.end_byte()));
+            }
+        }
+    }
+
+    // Opening delimiters from start
+    for &(start, end) in &delimiters {
+        if start == content_start {
+            content_start = end;
+        }
+    }
+
+    // Closing delimiters from end
+    for &(start, end) in delimiters.iter().rev() {
+        if end == content_end {
+            content_end = start;
+        }
+    }
+
+    Some(StyledRegion {
+        full_range: full_start..full_end,
+        content_range: content_start..content_end,
+        style,
+        link_url: None,
+        is_image: false,
+    })
+}
+
+fn extract_code_span_region(node: &Node) -> Option<StyledRegion> {
+    let full_start = node.start_byte();
+    let full_end = node.end_byte();
+
+    let mut content_start = full_start;
+    let mut content_end = full_end;
+
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i as u32)
+            && child.kind() == "code_span_delimiter"
+        {
+            if child.start_byte() == full_start {
+                content_start = child.end_byte();
+            } else if child.end_byte() == full_end {
+                content_end = child.start_byte();
+            }
+        }
+    }
+
+    Some(StyledRegion {
+        full_range: full_start..full_end,
+        content_range: content_start..content_end,
+        style: TextStyle::code(),
+        link_url: None,
+        is_image: false,
+    })
+}
+
+fn extract_link_region(node: &Node, text: &str) -> Option<StyledRegion> {
+    let full_start = node.start_byte();
+    let full_end = node.end_byte();
+
+    let mut content_start = full_start;
+    let mut content_end = full_end;
+    let mut url: Option<String> = None;
+
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i as u32) {
+            match child.kind() {
+                "link_text" => {
+                    content_start = child.start_byte();
+                    content_end = child.end_byte();
+                }
+                "link_destination" => {
+                    url = Some(text[child.start_byte()..child.end_byte()].to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    if url.is_none() {
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i as u32) {
+                if child.kind() == "[" {
+                    content_start = child.end_byte();
+                } else if child.kind() == "]" {
+                    content_end = child.start_byte();
+                }
+            }
+        }
+    }
+
+    Some(StyledRegion {
+        full_range: full_start..full_end,
+        content_range: content_start..content_end,
+        style: TextStyle::default(),
+        link_url: url,
+        is_image: false,
+    })
+}
+
+fn extract_image_region(node: &Node, text: &str) -> Option<StyledRegion> {
+    let full_start = node.start_byte();
+    let full_end = node.end_byte();
+
+    let mut alt_start = full_start;
+    let mut alt_end = full_end;
+    let mut url: Option<String> = None;
+
+    for i in 0..node.child_count() {
+        if let Some(child) = node.child(i as u32) {
+            match child.kind() {
+                "image_description" => {
+                    alt_start = child.start_byte();
+                    alt_end = child.end_byte();
+                }
+                "link_destination" => {
+                    url = Some(text[child.start_byte()..child.end_byte()].to_string());
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let url = url?;
+
+    Some(StyledRegion {
+        full_range: full_start..full_end,
+        content_range: alt_start..alt_end,
+        style: TextStyle::default(),
+        link_url: Some(url),
+        is_image: true,
+    })
+}
+
 pub type ClickCallback = Rc<dyn Fn(usize, bool, usize, &mut Window, &mut App)>;
 pub type DragCallback = Rc<dyn Fn(usize, &mut Window, &mut App)>;
 pub type CheckboxCallback = Rc<dyn Fn(usize, &mut Window, &mut App)>;

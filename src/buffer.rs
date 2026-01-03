@@ -1,12 +1,11 @@
 use ropey::Rope;
-use std::ops::Range;
+use std::ops::{Deref, DerefMut, Range};
 use std::str::FromStr;
 use tree_sitter::{InputEdit, Point};
 use undo::Record;
 
 use crate::highlight::{HighlightSpan, Highlighter};
-use crate::lines::extract_lines_from_parts;
-use crate::marker::{LineMarkers, MarkerKind};
+use crate::marker::{LineMarkers, MarkerKind, collect_nodes, markers_at};
 use crate::parser::{MarkdownParser, MarkdownTree};
 
 #[derive(Clone, Debug, Default)]
@@ -81,8 +80,41 @@ impl BufferContent {
 
     /// Recompute cached lines from current tree.
     fn update_lines_cache(&mut self) {
-        let text = self.text.to_string();
-        self.lines = extract_lines_from_parts(&text, self.tree.as_ref());
+        let nodes = self
+            .tree
+            .as_ref()
+            .map(|t| collect_nodes(&t.block_tree().root_node()));
+
+        let mut byte_offset = 0;
+        self.lines = self
+            .text
+            .lines()
+            .enumerate()
+            .map(|(line_idx, line_slice)| {
+                let start_byte = byte_offset;
+                let len = line_slice.len_bytes();
+                byte_offset += len;
+                // Rope's lines() includes trailing newline; exclude it from range
+                let has_newline = line_slice.get_byte(len.saturating_sub(1)) == Some(b'\n');
+                let end_byte = if has_newline {
+                    start_byte + len - 1
+                } else {
+                    start_byte + len
+                };
+
+                let markers = if let Some(ref nodes) = nodes {
+                    markers_at(nodes, &self.text, start_byte, end_byte)
+                } else {
+                    Vec::new()
+                };
+
+                LineMarkers {
+                    range: start_byte..end_byte,
+                    line_number: line_idx,
+                    markers,
+                }
+            })
+            .collect();
     }
 
     fn apply_edit(&mut self, offset: usize, to_delete: &str, to_insert: &str) {
@@ -127,10 +159,9 @@ impl BufferContent {
         if let Some(ref mut tree) = self.tree {
             tree.edit(&edit);
         }
-        let text = self.text.to_string();
-        self.tree = self.parser.parse(text.as_bytes(), self.tree.as_ref());
+        self.tree = self.parser.parse_rope(&self.text, self.tree.as_ref());
 
-        // Normalize ordered list numbering
+        // Normalize ordered list numbering (may re-parse)
         self.normalize_ordered_lists();
 
         // Update cached lines
@@ -310,13 +341,16 @@ impl BufferContent {
         self.code_highlight_cache.valid = true;
     }
 
-    pub fn normalize_ordered_lists(&mut self) {
-        let Some(tree) = &self.tree else { return };
+    /// Normalize ordered list numbering. Returns true if any changes were made.
+    pub fn normalize_ordered_lists(&mut self) -> bool {
+        let Some(tree) = &self.tree else {
+            return false;
+        };
 
         let corrections = self.find_ordered_list_corrections(tree.block_tree().root_node());
 
         if corrections.is_empty() {
-            return;
+            return false;
         }
 
         for (marker_range, correct_number) in corrections.into_iter().rev() {
@@ -330,8 +364,8 @@ impl BufferContent {
             self.text.insert(char_offset, &new_marker);
         }
 
-        let text = self.text.to_string();
-        self.tree = self.parser.parse(text.as_bytes(), None);
+        self.tree = self.parser.parse_rope(&self.text, None);
+        true
     }
 
     fn find_ordered_list_corrections(&self, root: tree_sitter::Node) -> Vec<(Range<usize>, usize)> {
@@ -427,6 +461,20 @@ pub struct Buffer {
     history: Record<TextEdit>,
 }
 
+impl Deref for Buffer {
+    type Target = BufferContent;
+
+    fn deref(&self) -> &Self::Target {
+        &self.content
+    }
+}
+
+impl DerefMut for Buffer {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.content
+    }
+}
+
 impl Buffer {
     pub fn new() -> Self {
         Self {
@@ -441,58 +489,6 @@ impl Buffer {
 
     pub fn mark_clean(&mut self) {
         self.history.set_saved();
-    }
-
-    pub fn text(&self) -> String {
-        self.content.text()
-    }
-
-    pub fn len_bytes(&self) -> usize {
-        self.content.len_bytes()
-    }
-
-    pub fn len_chars(&self) -> usize {
-        self.content.len_chars()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.content.is_empty()
-    }
-
-    pub fn rope(&self) -> &Rope {
-        self.content.rope()
-    }
-
-    pub fn tree(&self) -> Option<&MarkdownTree> {
-        self.content.tree()
-    }
-
-    pub fn lines(&self) -> &[LineMarkers] {
-        self.content.lines()
-    }
-
-    pub fn byte_to_line(&self, byte_offset: usize) -> usize {
-        self.content.byte_to_line(byte_offset)
-    }
-
-    pub fn line_to_byte(&self, line: usize) -> usize {
-        self.content.line_to_byte(line)
-    }
-
-    pub fn line_count(&self) -> usize {
-        self.content.line_count()
-    }
-
-    pub fn line(&self, line_idx: usize) -> String {
-        self.content.line(line_idx)
-    }
-
-    pub fn line_byte_range(&self, line_idx: usize) -> Range<usize> {
-        self.content.line_byte_range(line_idx)
-    }
-
-    pub fn code_highlights_for_range(&mut self, range: Range<usize>) -> Vec<HighlightSpan> {
-        self.content.code_highlights_for_range(range)
     }
 
     pub fn insert(&mut self, byte_offset: usize, text: &str, cursor_before: usize) -> usize {
@@ -562,7 +558,7 @@ impl FromStr for Buffer {
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let text = Rope::from_str(s);
         let mut parser = MarkdownParser::default();
-        let tree = parser.parse(s.as_bytes(), None);
+        let tree = parser.parse_rope(&text, None);
 
         let mut content = BufferContent {
             text,
@@ -775,5 +771,224 @@ mod tests {
     fn test_unordered_list_unchanged() {
         let buf: Buffer = "- First\n- Second\n- Third\n".parse().unwrap();
         assert_eq!(buf.text(), "- First\n- Second\n- Third\n");
+    }
+
+    // Line extraction tests (moved from lines.rs)
+
+    use crate::marker::MarkerKind;
+
+    #[test]
+    fn test_lines_empty_buffer() {
+        let buf: Buffer = "".parse().unwrap();
+        let lines = buf.lines();
+
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0].range, 0..0);
+        assert!(lines[0].markers.is_empty());
+    }
+
+    #[test]
+    fn test_lines_single_newline() {
+        let buf: Buffer = "\n".parse().unwrap();
+        let lines = buf.lines();
+
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].range, 0..0);
+        assert_eq!(lines[1].range, 1..1);
+    }
+
+    #[test]
+    fn test_lines_paragraph() {
+        let buf: Buffer = "Hello\n\nWorld\n".parse().unwrap();
+        let lines = buf.lines();
+
+        assert_eq!(lines.len(), 4);
+        assert_eq!(lines[0].range, 0..5);
+        assert_eq!(lines[1].range, 6..6); // blank line
+        assert_eq!(lines[2].range, 7..12);
+    }
+
+    #[test]
+    fn test_heading_markers() {
+        let buf: Buffer = "# Hello\n".parse().unwrap();
+        let lines = buf.lines();
+
+        assert_eq!(lines.len(), 2);
+        assert_eq!(lines[0].heading_level(), Some(1));
+        assert_eq!(lines[0].marker_range(), Some(0..2));
+    }
+
+    #[test]
+    fn test_heading_levels() {
+        let buf: Buffer = "# H1\n## H2\n### H3\n".parse().unwrap();
+        let lines = buf.lines();
+
+        assert_eq!(lines[0].heading_level(), Some(1));
+        assert_eq!(lines[1].heading_level(), Some(2));
+        assert_eq!(lines[2].heading_level(), Some(3));
+    }
+
+    #[test]
+    fn test_unordered_list_markers() {
+        let buf: Buffer = "- Item 1\n- Item 2\n".parse().unwrap();
+        let lines = buf.lines();
+
+        assert!(
+            lines[0]
+                .markers
+                .iter()
+                .any(|m| matches!(m.kind, MarkerKind::ListItem { ordered: false }))
+        );
+        assert_eq!(lines[0].marker_range(), Some(0..2));
+    }
+
+    #[test]
+    fn test_ordered_list_markers() {
+        let buf: Buffer = "1. First\n2. Second\n".parse().unwrap();
+        let lines = buf.lines();
+
+        assert!(
+            lines[0]
+                .markers
+                .iter()
+                .any(|m| matches!(m.kind, MarkerKind::ListItem { ordered: true }))
+        );
+    }
+
+    #[test]
+    fn test_checkbox_markers() {
+        let buf: Buffer = "- [ ] Unchecked\n- [x] Checked\n".parse().unwrap();
+        let lines = buf.lines();
+
+        assert_eq!(lines[0].checkbox(), Some(false));
+        assert_eq!(lines[1].checkbox(), Some(true));
+    }
+
+    #[test]
+    fn test_blockquote_markers() {
+        let buf: Buffer = "> Quote\n".parse().unwrap();
+        let lines = buf.lines();
+
+        assert!(lines[0].has_border());
+        assert!(
+            lines[0]
+                .markers
+                .iter()
+                .any(|m| matches!(m.kind, MarkerKind::BlockQuote))
+        );
+    }
+
+    #[test]
+    fn test_nested_blockquote_lines() {
+        let buf: Buffer = "> Level 1\n> > Level 2\n".parse().unwrap();
+        let lines = buf.lines();
+
+        assert_eq!(
+            lines[0]
+                .markers
+                .iter()
+                .filter(|m| matches!(m.kind, MarkerKind::BlockQuote))
+                .count(),
+            1
+        );
+        assert_eq!(
+            lines[1]
+                .markers
+                .iter()
+                .filter(|m| matches!(m.kind, MarkerKind::BlockQuote))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn test_list_in_blockquote_lines() {
+        let buf: Buffer = "> - Item\n".parse().unwrap();
+        let lines = buf.lines();
+
+        assert!(
+            lines[0]
+                .markers
+                .iter()
+                .any(|m| matches!(m.kind, MarkerKind::BlockQuote))
+        );
+        assert!(
+            lines[0]
+                .markers
+                .iter()
+                .any(|m| matches!(m.kind, MarkerKind::ListItem { .. }))
+        );
+    }
+
+    #[test]
+    fn test_code_block_fence_lines() {
+        let buf: Buffer = "```rust\nlet x = 1;\n```\n".parse().unwrap();
+        let lines = buf.lines();
+
+        assert!(lines[0].is_fence());
+        assert!(!lines[1].is_fence());
+        assert!(lines[2].is_fence());
+    }
+
+    #[test]
+    fn test_thematic_break_lines() {
+        let buf: Buffer = "---\n".parse().unwrap();
+        let lines = buf.lines();
+
+        assert!(
+            lines[0]
+                .markers
+                .iter()
+                .any(|m| matches!(m.kind, MarkerKind::ThematicBreak))
+        );
+    }
+
+    #[test]
+    fn test_nested_list_continuation() {
+        let buf: Buffer = "- Item 1\n  - Nested\n".parse().unwrap();
+        let text = buf.text();
+        let lines = buf.lines();
+
+        let continuation = lines[1].continuation(&text);
+        assert!(continuation.contains("- "));
+    }
+
+    #[test]
+    fn test_substitution() {
+        let buf: Buffer = "- Item\n".parse().unwrap();
+        let text = buf.text();
+        let lines = buf.lines();
+
+        let sub = lines[0].substitution(&text);
+        assert!(sub.contains('•') || sub.contains('-'));
+    }
+
+    #[test]
+    fn test_list_in_blockquote_continuation() {
+        let buf: Buffer = "> - Item\n".parse().unwrap();
+        let text = buf.text();
+        let lines = buf.lines();
+
+        let continuation = lines[0].continuation(&text);
+        assert_eq!(continuation, "> - ");
+    }
+
+    #[test]
+    fn test_multiline_blockquote_with_list_continuation() {
+        let buf: Buffer = "> hey\n>\n> - foo\n".parse().unwrap();
+        let text = buf.text();
+        let lines = buf.lines();
+
+        let continuation = lines[2].continuation(&text);
+        assert_eq!(continuation, "> - ");
+    }
+
+    #[test]
+    fn test_code_block_in_blockquote() {
+        let buf: Buffer = "> ```rust\n> fn main() {}\n> ```\n".parse().unwrap();
+        let lines = buf.lines();
+
+        assert!(lines[0].is_fence());
+        assert!(lines[0].has_border());
     }
 }

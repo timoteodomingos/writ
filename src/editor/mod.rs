@@ -17,8 +17,8 @@ use crate::title_bar::FileInfo;
 
 use crate::buffer::Buffer;
 use crate::cursor::{Cursor, Selection};
+use crate::line::extract_inline_styles;
 use crate::line::{CheckboxCallback, ClickCallback, DragCallback, HoverCallback, Line, LineTheme};
-use crate::lines::extract_inline_styles;
 use crate::marker::{LineMarkers, MarkerKind};
 
 type CodeBlockRange = (usize, Option<usize>);

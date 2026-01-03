@@ -3,6 +3,7 @@
 //! This module provides types for representing markers (blockquotes, lists,
 //! headings, etc.) and functions for extracting them from the parse tree.
 
+use ropey::Rope;
 use std::ops::Range;
 use tree_sitter::Node;
 
@@ -219,6 +220,16 @@ fn find_node_index(nodes: &[Node], target_byte: usize) -> usize {
         .unwrap_or_else(|idx| idx)
 }
 
+/// Get a byte slice from a Rope, borrowing if possible.
+/// Returns a Cow that borrows if the slice fits in one chunk, allocates otherwise.
+fn rope_slice_cow(rope: &Rope, start: usize, end: usize) -> std::borrow::Cow<'_, str> {
+    let slice = rope.byte_slice(start..end);
+    match slice.as_str() {
+        Some(s) => std::borrow::Cow::Borrowed(s),
+        None => std::borrow::Cow::Owned(slice.to_string()),
+    }
+}
+
 /// Find the nearest container to the left of cursor position.
 /// Returns the marker width needed to nest into that container.
 /// Uses cached LineMarkers for O(log n) lookup instead of traversing nodes.
@@ -283,7 +294,7 @@ pub fn collect_nodes<'a>(root: &Node<'a>) -> Vec<Node<'a>> {
 /// Find all markers for a line by scanning nodes that start within the line.
 /// Returns markers innermost to outermost (reverse document order).
 /// Takes a pre-computed nodes vec from `collect_nodes()` for efficiency.
-pub fn markers_at(nodes: &[Node], text: &str, line_start: usize, line_end: usize) -> Vec<Marker> {
+pub fn markers_at(nodes: &[Node], rope: &Rope, line_start: usize, line_end: usize) -> Vec<Marker> {
     let mut markers = Vec::new();
 
     // Binary search to find first node past line_end - we iterate backwards from here
@@ -308,7 +319,7 @@ pub fn markers_at(nodes: &[Node], text: &str, line_start: usize, line_end: usize
                 {
                     continue;
                 }
-                let content = &text[start..end];
+                let content = rope_slice_cow(rope, start, end);
                 if content.contains('>') {
                     markers.push(Marker {
                         kind: MarkerKind::BlockQuote,
@@ -335,7 +346,7 @@ pub fn markers_at(nodes: &[Node], text: &str, line_start: usize, line_end: usize
             }
             "task_list_marker_unchecked" => {
                 // Include trailing space after ] if present
-                let range_end = if text.as_bytes().get(end) == Some(&b' ') {
+                let range_end = if rope.get_byte(end) == Some(b' ') {
                     end + 1
                 } else {
                     end
@@ -347,7 +358,7 @@ pub fn markers_at(nodes: &[Node], text: &str, line_start: usize, line_end: usize
             }
             "task_list_marker_checked" => {
                 // Include trailing space after ] if present
-                let range_end = if text.as_bytes().get(end) == Some(&b' ') {
+                let range_end = if rope.get_byte(end) == Some(b' ') {
                     end + 1
                 } else {
                     end
@@ -368,7 +379,7 @@ pub fn markers_at(nodes: &[Node], text: &str, line_start: usize, line_end: usize
                     _ => 6,
                 };
                 // Include trailing space after # if present
-                let range_end = if text.as_bytes().get(end) == Some(&b' ') {
+                let range_end = if rope.get_byte(end) == Some(b' ') {
                     end + 1
                 } else {
                     end
@@ -401,7 +412,8 @@ pub fn markers_at(nodes: &[Node], text: &str, line_start: usize, line_end: usize
                 });
             }
             "info_string" => {
-                let lang = text[start..end].trim();
+                let lang = rope_slice_cow(rope, start, end);
+                let lang = lang.trim();
                 let language = if lang.is_empty() {
                     None
                 } else {
@@ -425,7 +437,6 @@ pub fn markers_at(nodes: &[Node], text: &str, line_start: usize, line_end: usize
 mod tests {
     use super::*;
     use crate::buffer::Buffer;
-    use crate::lines::extract_lines;
 
     fn kinds(markers: &[Marker]) -> Vec<&MarkerKind> {
         markers.iter().map(|m| &m.kind).collect()
@@ -535,7 +546,7 @@ mod tests {
     #[test]
     fn test_simple_list() {
         let buf: Buffer = "- Item\n".parse().unwrap();
-        let lines = extract_lines(&buf);
+        let lines = buf.lines();
         assert_eq!(
             kinds(&lines[0].markers),
             vec![&MarkerKind::ListItem { ordered: false }]
@@ -545,7 +556,7 @@ mod tests {
     #[test]
     fn test_multiline_blockquote() {
         let buf: Buffer = "> Line 1\n> Line 2\n".parse().unwrap();
-        let lines = extract_lines(&buf);
+        let lines = buf.lines();
 
         println!("Line 0 markers: {:?}", lines[0].markers);
         println!("Line 1 markers: {:?}", lines[1].markers);
@@ -566,7 +577,7 @@ mod tests {
         print_tree(&root, &text, 0);
         print_nodes_by_position(&root, &text);
 
-        let lines = extract_lines(&buf);
+        let lines = buf.lines();
         println!("Line 0 markers: {:?}", lines[0].markers);
         println!("Line 1 markers: {:?}", lines[1].markers);
 
@@ -580,7 +591,7 @@ mod tests {
     #[test]
     fn test_list_in_blockquote() {
         let buf: Buffer = "> - Item\n".parse().unwrap();
-        let lines = extract_lines(&buf);
+        let lines = buf.lines();
         assert_eq!(
             kinds(&lines[0].markers),
             vec![
@@ -593,7 +604,7 @@ mod tests {
     #[test]
     fn test_ordered_list() {
         let buf: Buffer = "1. First\n".parse().unwrap();
-        let lines = extract_lines(&buf);
+        let lines = buf.lines();
         assert_eq!(
             kinds(&lines[0].markers),
             vec![&MarkerKind::ListItem { ordered: true }]
@@ -603,7 +614,7 @@ mod tests {
     #[test]
     fn test_task_list() {
         let buf: Buffer = "- [ ] Todo\n- [x] Done\n".parse().unwrap();
-        let lines = extract_lines(&buf);
+        let lines = buf.lines();
 
         assert_eq!(
             kinds(&lines[0].markers),
@@ -624,14 +635,14 @@ mod tests {
     #[test]
     fn test_heading() {
         let buf: Buffer = "## Heading\n".parse().unwrap();
-        let lines = extract_lines(&buf);
+        let lines = buf.lines();
         assert_eq!(kinds(&lines[0].markers), vec![&MarkerKind::Heading(2)]);
     }
 
     #[test]
     fn test_fenced_code_block() {
         let buf: Buffer = "```rust\nlet x = 1;\n```\n".parse().unwrap();
-        let lines = extract_lines(&buf);
+        let lines = buf.lines();
 
         // Opening fence with language
         assert_eq!(
@@ -654,7 +665,7 @@ mod tests {
         let buf: Buffer = "```rust\nfn main() {\n    println!(\"hello\");\n}\n```\n"
             .parse()
             .unwrap();
-        let lines = extract_lines(&buf);
+        let lines = buf.lines();
 
         assert_eq!(
             kinds(&lines[0].markers),
@@ -682,7 +693,7 @@ mod tests {
         let root = tree.block_tree().root_node();
         print_nodes_by_position(&root, &text);
 
-        let lines = extract_lines(&buf);
+        let lines = buf.lines();
         println!("Line 0: {:?}", lines[0].markers);
         println!("Line 1: {:?}", lines[1].markers);
 
@@ -699,7 +710,7 @@ mod tests {
         let root = tree.block_tree().root_node();
         print_nodes_by_position(&root, &text);
 
-        let lines = extract_lines(&buf);
+        let lines = buf.lines();
         println!("Line 0: {:?}", lines[0].markers);
 
         // Should have the blockquote marker even though content is indented code
@@ -709,7 +720,7 @@ mod tests {
     #[test]
     fn test_thematic_break() {
         let buf: Buffer = "---\n".parse().unwrap();
-        let lines = extract_lines(&buf);
+        let lines = buf.lines();
         assert_eq!(kinds(&lines[0].markers), vec![&MarkerKind::ThematicBreak]);
     }
 
@@ -724,7 +735,7 @@ mod tests {
         println!("Text: {:?}", text);
         print_tree(&root, &text, 0);
 
-        let lines = extract_lines(&buf);
+        let lines = buf.lines();
         println!("Line 0 markers: {:?}", lines[0].markers);
         println!("Line 1 markers: {:?}", lines[1].markers);
 
@@ -739,7 +750,7 @@ mod tests {
     #[test]
     fn test_multi_paragraph_list_item() {
         let buf: Buffer = "- First line\n\n  Second paragraph\n".parse().unwrap();
-        let lines = extract_lines(&buf);
+        let lines = buf.lines();
 
         assert_eq!(
             kinds(&lines[0].markers),
@@ -989,7 +1000,7 @@ mod tests {
 
         print_nodes_by_position(&root, &text);
 
-        let lines = extract_lines(&buf);
+        let lines = buf.lines();
         println!("Line 0: {:?}", lines[0].markers);
         println!("Line 1: {:?}", lines[1].markers);
 
@@ -1018,7 +1029,7 @@ mod tests {
         print_tree(&root, &text, 0);
         print_nodes_by_position(&root, &text);
 
-        let lines = extract_lines(&buf);
+        let lines = buf.lines();
         for (i, line) in lines.iter().enumerate() {
             let line_text = &text[line.range.clone()];
             let leading = line.leading_whitespace(&text);
@@ -1037,7 +1048,7 @@ mod tests {
     #[test]
     fn test_marker_width_unordered() {
         let buf: Buffer = "- item\n".parse().unwrap();
-        let lines = extract_lines(&buf);
+        let lines = buf.lines();
         // "- " is 2 chars
         assert_eq!(lines[0].marker_width(), 2);
     }
@@ -1045,7 +1056,7 @@ mod tests {
     #[test]
     fn test_marker_width_ordered_single_digit() {
         let buf: Buffer = "1. item\n".parse().unwrap();
-        let lines = extract_lines(&buf);
+        let lines = buf.lines();
         // "1. " is 3 chars
         assert_eq!(lines[0].marker_width(), 3);
     }
@@ -1056,7 +1067,7 @@ mod tests {
         let buf: Buffer = "1. a\n2. b\n3. c\n4. d\n5. e\n6. f\n7. g\n8. h\n9. i\n10. j\n"
             .parse()
             .unwrap();
-        let lines = extract_lines(&buf);
+        let lines = buf.lines();
         // Line 9 (0-indexed) is "10. j" - marker is "10. " = 4 chars
         assert_eq!(lines[9].marker_width(), 4);
     }
@@ -1064,7 +1075,7 @@ mod tests {
     #[test]
     fn test_marker_width_no_marker() {
         let buf: Buffer = "just text\n".parse().unwrap();
-        let lines = extract_lines(&buf);
+        let lines = buf.lines();
         assert_eq!(lines[0].marker_width(), 0);
     }
 
@@ -1072,7 +1083,7 @@ mod tests {
     fn test_nesting_threshold_unordered() {
         // "- " is 2 chars, so 2 spaces should nest
         let buf: Buffer = "- top\n  - nested\n".parse().unwrap();
-        let lines = extract_lines(&buf);
+        let lines = buf.lines();
 
         // Line 1 should have an Indent marker (it's nested)
         assert!(
@@ -1093,7 +1104,7 @@ mod tests {
 
         print_tree(&root, &text, 0);
 
-        let lines = extract_lines(&buf);
+        let lines = buf.lines();
         println!("Line 0: {:?}", lines[0].markers);
         println!("Line 1: {:?}", lines[1].markers);
 
@@ -1116,7 +1127,7 @@ mod tests {
 
         print_tree(&root, &text, 0);
 
-        let lines = extract_lines(&buf);
+        let lines = buf.lines();
         println!("Line 0: {:?}", lines[0].markers);
         println!("Line 1: {:?}", lines[1].markers);
 
@@ -1139,7 +1150,7 @@ mod tests {
 
         print_tree(&root, &text, 0);
 
-        let lines = extract_lines(&buf);
+        let lines = buf.lines();
         println!("Line 0: {:?}", lines[0].markers);
         println!("Line 1: {:?}", lines[1].markers);
 
@@ -1162,7 +1173,7 @@ mod tests {
 
         print_tree(&root, &text, 0);
 
-        let lines = extract_lines(&buf);
+        let lines = buf.lines();
         println!("Line 0: {:?}", lines[0].markers);
         println!("Line 1: {:?}", lines[1].markers);
 
@@ -1182,7 +1193,7 @@ mod tests {
     #[test]
     fn test_blockquote_with_space() {
         let buf: Buffer = "> text\n".parse().unwrap();
-        let lines = extract_lines(&buf);
+        let lines = buf.lines();
         assert_eq!(kinds(&lines[0].markers), vec![&MarkerKind::BlockQuote]);
     }
 
@@ -1195,7 +1206,7 @@ mod tests {
         let root = tree.block_tree().root_node();
         print_tree(&root, &text, 0);
 
-        let lines = extract_lines(&buf);
+        let lines = buf.lines();
         println!("Markers for '>text': {:?}", lines[0].markers);
         // Result: YES, blockquote is recognized without space
         assert_eq!(kinds(&lines[0].markers), vec![&MarkerKind::BlockQuote]);
@@ -1204,7 +1215,7 @@ mod tests {
     #[test]
     fn test_unordered_list_minus_with_space() {
         let buf: Buffer = "- text\n".parse().unwrap();
-        let lines = extract_lines(&buf);
+        let lines = buf.lines();
         assert_eq!(
             kinds(&lines[0].markers),
             vec![&MarkerKind::ListItem { ordered: false }]
@@ -1220,7 +1231,7 @@ mod tests {
         let root = tree.block_tree().root_node();
         print_tree(&root, &text, 0);
 
-        let lines = extract_lines(&buf);
+        let lines = buf.lines();
         println!("Markers for '-text': {:?}", lines[0].markers);
         // Result: NO, list is NOT recognized without space
         assert_eq!(kinds(&lines[0].markers), vec![] as Vec<&MarkerKind>);
@@ -1229,7 +1240,7 @@ mod tests {
     #[test]
     fn test_unordered_list_star_with_space() {
         let buf: Buffer = "* text\n".parse().unwrap();
-        let lines = extract_lines(&buf);
+        let lines = buf.lines();
         assert_eq!(
             kinds(&lines[0].markers),
             vec![&MarkerKind::ListItem { ordered: false }]
@@ -1245,7 +1256,7 @@ mod tests {
         let root = tree.block_tree().root_node();
         print_tree(&root, &text, 0);
 
-        let lines = extract_lines(&buf);
+        let lines = buf.lines();
         println!("Markers for '*text': {:?}", lines[0].markers);
         // Result: NO, list is NOT recognized without space (parsed as emphasis)
         assert_eq!(kinds(&lines[0].markers), vec![] as Vec<&MarkerKind>);
@@ -1254,7 +1265,7 @@ mod tests {
     #[test]
     fn test_unordered_list_plus_with_space() {
         let buf: Buffer = "+ text\n".parse().unwrap();
-        let lines = extract_lines(&buf);
+        let lines = buf.lines();
         assert_eq!(
             kinds(&lines[0].markers),
             vec![&MarkerKind::ListItem { ordered: false }]
@@ -1270,7 +1281,7 @@ mod tests {
         let root = tree.block_tree().root_node();
         print_tree(&root, &text, 0);
 
-        let lines = extract_lines(&buf);
+        let lines = buf.lines();
         println!("Markers for '+text': {:?}", lines[0].markers);
         // Result: NO, list is NOT recognized without space
         assert_eq!(kinds(&lines[0].markers), vec![] as Vec<&MarkerKind>);
@@ -1279,7 +1290,7 @@ mod tests {
     #[test]
     fn test_ordered_list_with_space() {
         let buf: Buffer = "1. text\n".parse().unwrap();
-        let lines = extract_lines(&buf);
+        let lines = buf.lines();
         assert_eq!(
             kinds(&lines[0].markers),
             vec![&MarkerKind::ListItem { ordered: true }]
@@ -1295,7 +1306,7 @@ mod tests {
         let root = tree.block_tree().root_node();
         print_tree(&root, &text, 0);
 
-        let lines = extract_lines(&buf);
+        let lines = buf.lines();
         println!("Markers for '1.text': {:?}", lines[0].markers);
         // Result: NO, list is NOT recognized without space
         assert_eq!(kinds(&lines[0].markers), vec![] as Vec<&MarkerKind>);
@@ -1304,7 +1315,7 @@ mod tests {
     #[test]
     fn test_heading_with_space() {
         let buf: Buffer = "# text\n".parse().unwrap();
-        let lines = extract_lines(&buf);
+        let lines = buf.lines();
         assert_eq!(kinds(&lines[0].markers), vec![&MarkerKind::Heading(1)]);
     }
 
@@ -1317,7 +1328,7 @@ mod tests {
         let root = tree.block_tree().root_node();
         print_tree(&root, &text, 0);
 
-        let lines = extract_lines(&buf);
+        let lines = buf.lines();
         println!("Markers for '#text': {:?}", lines[0].markers);
         // Result: NO, heading is NOT recognized without space
         assert_eq!(kinds(&lines[0].markers), vec![] as Vec<&MarkerKind>);
@@ -1332,7 +1343,7 @@ mod tests {
         let root = tree.block_tree().root_node();
         print_tree(&root, &text, 0);
 
-        let lines = extract_lines(&buf);
+        let lines = buf.lines();
         println!("Markers for '##text': {:?}", lines[0].markers);
         // Result: NO, heading is NOT recognized without space
         assert_eq!(kinds(&lines[0].markers), vec![] as Vec<&MarkerKind>);

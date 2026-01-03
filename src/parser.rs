@@ -271,8 +271,23 @@ impl MarkdownParser {
         })
     }
 
+    #[cfg(test)]
     pub fn parse(&mut self, text: &[u8], old_tree: Option<&MarkdownTree>) -> Option<MarkdownTree> {
         self.parse_with(&mut |byte, _| &text[byte..], old_tree)
+    }
+
+    pub fn parse_rope(
+        &mut self,
+        rope: &ropey::Rope,
+        old_tree: Option<&MarkdownTree>,
+    ) -> Option<MarkdownTree> {
+        self.parse_with(
+            &mut |byte, _| {
+                let (chunk, chunk_start, _, _) = rope.chunk_at_byte(byte);
+                &chunk.as_bytes()[byte - chunk_start..]
+            },
+            old_tree,
+        )
     }
 }
 
@@ -382,5 +397,43 @@ mod tests {
         assert_eq!(cursor.node().kind(), "pipe_table_cell");
         assert!(cursor.goto_first_child());
         assert_eq!(cursor.node().kind(), "emphasis");
+    }
+
+    #[test]
+    fn changed_ranges_blockquote() {
+        // Test: what does changed_ranges report when we remove a blockquote marker?
+        let code1 = "> line one\n> line two\n> line three\n";
+        let mut parser = MarkdownParser::default();
+        let tree1 = parser.parse(code1.as_bytes(), None).unwrap();
+
+        // Remove the `> ` from line one, making it a plain paragraph
+        let code2 = "line one\n> line two\n> line three\n";
+        let mut tree1_edited = parser.parse(code1.as_bytes(), None).unwrap();
+        tree1_edited.edit(&InputEdit {
+            start_byte: 0,
+            old_end_byte: 2,
+            new_end_byte: 0,
+            start_position: Point { row: 0, column: 0 },
+            old_end_position: Point { row: 0, column: 2 },
+            new_end_position: Point { row: 0, column: 0 },
+        });
+        let tree2 = parser.parse(code2.as_bytes(), Some(&tree1_edited)).unwrap();
+
+        let ranges: Vec<_> = tree2
+            .block_tree()
+            .changed_ranges(&tree1.block_tree())
+            .collect();
+        eprintln!("Changed ranges after removing first blockquote marker:");
+        for range in &ranges {
+            eprintln!(
+                "  bytes {}..{} (rows {}..{})",
+                range.start_byte, range.end_byte, range.start_point.row, range.end_point.row
+            );
+        }
+
+        // We expect it to report at least line 0 changed.
+        // The question is: does it also report lines 1-2 changed since they're
+        // now a separate blockquote?
+        assert!(!ranges.is_empty());
     }
 }

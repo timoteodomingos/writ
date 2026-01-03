@@ -46,7 +46,6 @@ pub mod editor;
 pub mod highlight;
 pub mod http;
 pub mod line;
-pub mod lines;
 pub mod marker;
 pub mod parser;
 pub mod title_bar;
