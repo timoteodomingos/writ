@@ -566,9 +566,24 @@ impl EditorState {
             self.insert_at(self.cursor().offset, "\n");
         } else {
             // Line has content (or is empty but not exiting) - create paragraph break
-            let empty_line = ctx.line.continuation_without_list();
-            let continuation = ctx.line.continuation_rope(self.buffer.rope());
-            self.insert_text(&format!("\n{}\n{}", empty_line.trim_end(), continuation));
+            let has_list_marker = ctx.line.markers.iter().any(|m| {
+                matches!(
+                    m.kind,
+                    MarkerKind::ListItem { .. } | MarkerKind::TaskList { .. }
+                )
+            });
+
+            if !allow_exit && has_list_marker {
+                // Shift+Enter on list item: create nested paragraph (indent without list marker)
+                let empty_line = ctx.line.continuation_without_list();
+                let indent = ctx.line.nested_paragraph_indent(self.buffer.rope());
+                self.insert_text(&format!("\n{}\n{}", empty_line.trim_end(), indent));
+            } else {
+                // Regular Enter: create new list item
+                let empty_line = ctx.line.continuation_without_list();
+                let continuation = ctx.line.continuation_rope(self.buffer.rope());
+                self.insert_text(&format!("\n{}\n{}", empty_line.trim_end(), continuation));
+            }
         }
     }
 
@@ -589,11 +604,7 @@ impl EditorState {
             let delete_start = ctx.line.range.start;
             self.delete_and_adjust(delete_start..delete_start + 2);
         } else {
-            // At root level - don't remove if it would leave a completely empty line
-            // (but allow removing if there are outer markers that will remain)
-            if ctx.is_empty && ctx.line_idx > 0 && ctx.line.markers.len() == 1 {
-                return;
-            }
+            // At root level - remove the outermost marker
             self.delete_and_adjust(ctx.line.markers[0].range.clone());
         }
     }
@@ -630,8 +641,6 @@ impl EditorState {
             if let Some((delete_range, is_indent_marker)) =
                 self.smart_backspace_range_with_type(cursor_pos)
             {
-                // Check if we're on an empty container line with an empty previous line
-                // e.g., "> hey\n>\n> |" should delete both empty lines
                 let line_idx = self.buffer.byte_to_line(cursor_pos);
                 let lines = self.buffer.lines();
                 let current_line = &lines[line_idx];
@@ -649,22 +658,42 @@ impl EditorState {
                         .trim()
                         .is_empty();
 
-                // Check if previous line is also an empty continuation
-                // (but not if it's a fence line - fences count as content)
-                let prev_empty_start = if current_is_empty && line_idx > 0 {
-                    let prev = &lines[line_idx - 1];
-                    let prev_content_start = prev
+                // If current line is empty, find the last non-empty line before it
+                // and delete everything from end of that line's content to cursor
+                let join_to = if current_is_empty && line_idx > 0 {
+                    let mut target_idx = line_idx - 1;
+                    while target_idx > 0 {
+                        let line = &lines[target_idx];
+                        let line_content_start = line
+                            .marker_range()
+                            .map(|r| r.end)
+                            .unwrap_or(line.range.start);
+                        let is_empty = !line.is_fence()
+                            && self
+                                .buffer
+                                .slice_cow(line_content_start..line.range.end)
+                                .trim()
+                                .is_empty();
+                        if !is_empty {
+                            break;
+                        }
+                        target_idx -= 1;
+                    }
+                    // target_idx is now the line with content (or 0)
+                    let target_line = &lines[target_idx];
+                    let target_content_start = target_line
                         .marker_range()
                         .map(|r| r.end)
-                        .unwrap_or(prev.range.start);
-                    let prev_is_empty = !prev.is_fence()
+                        .unwrap_or(target_line.range.start);
+                    let target_is_empty = !target_line.is_fence()
                         && self
                             .buffer
-                            .slice_cow(prev_content_start..prev.range.end)
+                            .slice_cow(target_content_start..target_line.range.end)
                             .trim()
                             .is_empty();
-                    if prev_is_empty && !prev.markers.is_empty() {
-                        Some(prev.range.start)
+                    if !target_is_empty {
+                        // Join to end of content (before trailing newline)
+                        Some(target_line.range.end)
                     } else {
                         None
                     }
@@ -672,28 +701,17 @@ impl EditorState {
                     None
                 };
 
-                if let Some(start) = prev_empty_start {
-                    // Delete from start of previous empty line to end of current marker
-                    let delete_end = delete_range.end;
-                    self.buffer.delete(start..delete_end, cursor_pos);
-                    self.selection = Selection::new(start, start);
-                    // Also delete the newline before to join to content
-                    if start > 0 && self.buffer.byte_at(start - 1) == Some(b'\n') {
-                        self.buffer.delete(start - 1..start, start);
-                        self.selection = Selection::new(start - 1, start - 1);
-                    }
+                if let Some(join_pos) = join_to {
+                    // Delete from end of content line to end of current marker
+                    self.buffer.delete(join_pos..delete_range.end, cursor_pos);
+                    self.selection = Selection::new(join_pos, join_pos);
                 } else {
                     let new_pos = delete_range.start;
                     self.buffer.delete(delete_range, cursor_pos);
 
                     // Also delete preceding newline to join lines (but not for Indent markers)
                     if new_pos > 0 && !is_indent_marker {
-                        let char_before = if new_pos > 0 {
-                            self.buffer.byte_at(new_pos - 1).map(|b| b as char)
-                        } else {
-                            None
-                        };
-                        if char_before == Some('\n') {
+                        if self.buffer.byte_at(new_pos - 1) == Some(b'\n') {
                             self.buffer.delete(new_pos - 1..new_pos, new_pos);
                             self.selection = Selection::new(new_pos - 1, new_pos - 1);
                         } else {
@@ -1737,19 +1755,21 @@ hello world
         }
 
         #[test]
-        fn shift_enter_on_empty_list_item_creates_paragraph_break() {
-            // Shift+Enter always maintains continuation, unlike Enter which exits
+        fn shift_enter_on_empty_list_item_creates_nested_paragraph() {
+            // Shift+Enter on empty list item creates nested paragraph
             let mut state = editor_with_cursor(
                 r#"
 - item one
 - |"#,
             );
             state.shift_enter();
-            assert_editor_eq(&state, "- item one\n- \n\n- |");
+            assert_editor_eq(&state, "- item one\n- \n\n  |");
         }
 
         #[test]
-        fn shift_enter_on_list_item_with_content_creates_paragraph_break() {
+        fn shift_enter_on_list_item_creates_nested_paragraph() {
+            // Shift+Enter on list item creates nested paragraph (indented continuation)
+            // rather than a new list item
             let mut state = editor_with_cursor(
                 r#"
 - item one|"#,
@@ -1760,7 +1780,24 @@ hello world
                 r#"
 - item one
 
-- |"#,
+  |"#,
+            );
+        }
+
+        #[test]
+        fn shift_enter_on_list_in_blockquote_creates_nested_paragraph() {
+            // Shift+Enter on list item in blockquote: nested paragraph with blockquote continuation
+            let mut state = editor_with_cursor(
+                r#"
+> - item one|"#,
+            );
+            state.shift_enter();
+            assert_editor_eq(
+                &state,
+                r#"
+> - item one
+>
+>   |"#,
             );
         }
 
@@ -2321,8 +2358,8 @@ item|"#,
         }
 
         #[test]
-        fn shift_tab_on_empty_list_item_does_nothing() {
-            // Would create invalid state (empty line after list item)
+        fn shift_tab_on_empty_list_item_removes_marker() {
+            // Empty list item: shift-tab removes the marker, leaving empty line
             let mut state = editor_with_cursor(
                 r#"
 - item
@@ -2333,7 +2370,7 @@ item|"#,
                 &state,
                 r#"
 - item
-- |"#,
+|"#,
             );
         }
 
@@ -2470,8 +2507,8 @@ plain text|"#,
 
         #[test]
         fn backspace_after_enter_on_list_item_joins_to_content() {
-            // Scenario: "- item one|" -> Enter -> "- item one\n\n- |" -> Backspace x2
-            // Should go back to "- item one|"
+            // Scenario: "- item one|" -> Enter -> "- item one\n\n- |" -> Backspace
+            // Should go directly back to "- item one|"
             let mut state = editor_with_cursor(
                 r#"
 - item one|"#,
@@ -2484,15 +2521,7 @@ plain text|"#,
 
 - |"#,
             );
-            // First backspace removes the list marker and joins to blank line
-            state.delete_backward();
-            assert_editor_eq(
-                &state,
-                r#"
-- item one
-|"#,
-            );
-            // Second backspace joins to content
+            // Backspace removes the list marker and blank line, joining to content
             state.delete_backward();
             assert_editor_eq(
                 &state,

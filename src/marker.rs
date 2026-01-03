@@ -246,6 +246,33 @@ impl LineMarkers {
             .map(|m| m.kind.continuation())
             .collect()
     }
+
+    /// Returns the indentation string for a nested paragraph under the current markers.
+    /// List markers are converted to equivalent whitespace indentation.
+    /// E.g., "- item" -> "  " (2 spaces), "> - item" -> ">   " (blockquote + 2 spaces)
+    pub fn nested_paragraph_indent(&self, rope: &Rope) -> String {
+        let mut result = String::new();
+        for m in self.markers.iter().rev() {
+            match &m.kind {
+                MarkerKind::BlockQuote => {
+                    result.push_str("> ");
+                }
+                MarkerKind::ListItem { .. } | MarkerKind::TaskList { .. } => {
+                    // Convert list marker to equivalent whitespace
+                    let marker_width = m.range.end - m.range.start;
+                    for _ in 0..marker_width {
+                        result.push(' ');
+                    }
+                }
+                MarkerKind::Indent => {
+                    // Preserve actual indent from buffer
+                    result.push_str(&rope_slice_cow(rope, m.range.start, m.range.end));
+                }
+                _ => {}
+            }
+        }
+        result
+    }
 }
 
 impl MarkerKind {
