@@ -1154,7 +1154,7 @@ mod tests {
             lines[0]
                 .markers
                 .iter()
-                .any(|m| matches!(m.kind, MarkerKind::ListItem { ordered: false }))
+                .any(|m| matches!(m.kind, MarkerKind::ListItem { ordered: false, .. }))
         );
         assert_eq!(lines[0].marker_range(), Some(0..2));
     }
@@ -1168,7 +1168,7 @@ mod tests {
             lines[0]
                 .markers
                 .iter()
-                .any(|m| matches!(m.kind, MarkerKind::ListItem { ordered: true }))
+                .any(|m| matches!(m.kind, MarkerKind::ListItem { ordered: true, .. }))
         );
     }
 

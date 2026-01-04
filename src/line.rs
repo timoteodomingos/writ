@@ -184,7 +184,7 @@ impl<'a> Line<'a> {
                 .line
                 .markers
                 .iter()
-                .any(|m| matches!(m.kind, MarkerKind::ListItem { ordered: true }))
+                .any(|m| matches!(m.kind, MarkerKind::ListItem { ordered: true, .. }))
             {
                 range.clone()
             } else if let Some(fence_marker) = self

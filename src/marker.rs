@@ -7,16 +7,28 @@ use ropey::Rope;
 use std::ops::Range;
 use tree_sitter::Node;
 
+/// The unordered list marker character.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum UnorderedMarker {
+    Minus, // -
+    Star,  // *
+    Plus,  // +
+}
+
 /// The type of marker on a line.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MarkerKind {
     BlockQuote,
     ListItem {
         ordered: bool,
+        #[allow(dead_code)]
+        unordered_marker: Option<UnorderedMarker>,
     },
     /// A task list item: `- [ ]` or `- [x]` (combines list marker + checkbox)
     TaskList {
         checked: bool,
+        #[allow(dead_code)]
+        unordered_marker: Option<UnorderedMarker>,
     },
     Heading(u8),
     /// A code block fence (``` or ~~~).
@@ -167,7 +179,7 @@ impl LineMarkers {
     /// Returns the checkbox state if this line has a task list marker.
     pub fn checkbox(&self) -> Option<bool> {
         for m in &self.markers {
-            if let MarkerKind::TaskList { checked } = m.kind {
+            if let MarkerKind::TaskList { checked, .. } = m.kind {
                 return Some(checked);
             }
         }
@@ -291,13 +303,13 @@ impl LineMarkers {
                 MarkerKind::BlockQuote => {
                     result.push_str("> ");
                 }
-                MarkerKind::ListItem { ordered: false } | MarkerKind::TaskList { .. } => {
+                MarkerKind::ListItem { ordered: false, .. } | MarkerKind::TaskList { .. } => {
                     // Use 2-space indent for unordered lists and task lists.
                     // We can't use the full marker width (e.g., 6 for "- [ ] ")
                     // because 4+ spaces beyond minimum triggers indented code block.
                     result.push_str("  ");
                 }
-                MarkerKind::ListItem { ordered: true } => {
+                MarkerKind::ListItem { ordered: true, .. } => {
                     // Ordered lists need marker-width indent to stay nested.
                     // 2-space breaks out of the list. Use the actual marker range.
                     let indent_len = m.range.end - m.range.start;
@@ -316,15 +328,45 @@ impl LineMarkers {
     }
 }
 
+impl UnorderedMarker {
+    /// Visual bullet for this marker type.
+    pub fn bullet(&self) -> &'static str {
+        match self {
+            UnorderedMarker::Minus => "• ", // filled circle
+            UnorderedMarker::Star => "◦ ",  // white bullet (small hollow)
+            UnorderedMarker::Plus => "‣ ",  // triangular bullet
+        }
+    }
+}
+
 impl MarkerKind {
     /// Visual substitution text for this marker kind.
     pub fn substitution(&self) -> &'static str {
         match self {
             MarkerKind::BlockQuote => "  ", // Replace "> " with spaces, border shows visually
-            MarkerKind::ListItem { ordered: false } => "• ",
-            MarkerKind::ListItem { ordered: true } => "",
-            MarkerKind::TaskList { checked: false } => "• [ ] ",
-            MarkerKind::TaskList { checked: true } => "• [x] ",
+            MarkerKind::ListItem {
+                ordered: false,
+                unordered_marker,
+            } => unordered_marker.map_or("• ", |m| m.bullet()),
+            MarkerKind::ListItem { ordered: true, .. } => "",
+            MarkerKind::TaskList {
+                checked: false,
+                unordered_marker,
+            } => match unordered_marker {
+                Some(UnorderedMarker::Minus) => "• [ ] ",
+                Some(UnorderedMarker::Star) => "◦ [ ] ",
+                Some(UnorderedMarker::Plus) => "‣ [ ] ",
+                None => "• [ ] ",
+            },
+            MarkerKind::TaskList {
+                checked: true,
+                unordered_marker,
+            } => match unordered_marker {
+                Some(UnorderedMarker::Minus) => "• [x] ",
+                Some(UnorderedMarker::Star) => "◦ [x] ",
+                Some(UnorderedMarker::Plus) => "‣ [x] ",
+                None => "• [x] ",
+            },
             MarkerKind::Heading(_) => "",
             MarkerKind::CodeBlockFence { .. } => "",
             MarkerKind::CodeBlockContent => "",
@@ -337,8 +379,8 @@ impl MarkerKind {
     pub fn continuation(&self) -> &'static str {
         match self {
             MarkerKind::BlockQuote => "> ",
-            MarkerKind::ListItem { ordered: false } => "- ",
-            MarkerKind::ListItem { ordered: true } => "1. ",
+            MarkerKind::ListItem { ordered: false, .. } => "- ",
+            MarkerKind::ListItem { ordered: true, .. } => "1. ",
             MarkerKind::TaskList { .. } => "- [ ] ",
             MarkerKind::Heading(_) => "",
             MarkerKind::CodeBlockFence { .. } => "",
@@ -481,16 +523,29 @@ pub fn markers_at(nodes: &[Node], rope: &Rope, line_start: usize, line_end: usiz
                         range: start..marker_start,
                     });
                 }
+                // Determine which unordered marker type
+                let unordered_marker = Some(match kind {
+                    "list_marker_minus" => UnorderedMarker::Minus,
+                    "list_marker_star" => UnorderedMarker::Star,
+                    "list_marker_plus" => UnorderedMarker::Plus,
+                    _ => unreachable!(),
+                });
                 // Check if this list marker has a pending task checkbox
                 if let Some((checked, checkbox_end)) = pending_task.take() {
                     // Combine into a single TaskList marker spanning list marker to checkbox end
                     markers.push(Marker {
-                        kind: MarkerKind::TaskList { checked },
+                        kind: MarkerKind::TaskList {
+                            checked,
+                            unordered_marker,
+                        },
                         range: marker_start..checkbox_end,
                     });
                 } else {
                     markers.push(Marker {
-                        kind: MarkerKind::ListItem { ordered: false },
+                        kind: MarkerKind::ListItem {
+                            ordered: false,
+                            unordered_marker,
+                        },
                         range: marker_start..end,
                     });
                 }
@@ -518,7 +573,10 @@ pub fn markers_at(nodes: &[Node], rope: &Rope, line_start: usize, line_end: usiz
                     });
                 }
                 markers.push(Marker {
-                    kind: MarkerKind::ListItem { ordered: true },
+                    kind: MarkerKind::ListItem {
+                        ordered: true,
+                        unordered_marker: None,
+                    },
                     range: marker_start..end,
                 });
             }
@@ -668,6 +726,26 @@ mod tests {
         markers.iter().map(|m| &m.kind).collect()
     }
 
+    // Helper to check if marker is an unordered list item
+    fn is_unordered_list(kind: &MarkerKind) -> bool {
+        matches!(kind, MarkerKind::ListItem { ordered: false, .. })
+    }
+
+    // Helper to check if marker is an ordered list item
+    fn is_ordered_list(kind: &MarkerKind) -> bool {
+        matches!(kind, MarkerKind::ListItem { ordered: true, .. })
+    }
+
+    // Helper to check if marker is an unchecked task
+    fn is_task_unchecked(kind: &MarkerKind) -> bool {
+        matches!(kind, MarkerKind::TaskList { checked: false, .. })
+    }
+
+    // Helper to check if marker is a checked task
+    fn is_task_checked(kind: &MarkerKind) -> bool {
+        matches!(kind, MarkerKind::TaskList { checked: true, .. })
+    }
+
     fn print_tree(node: &tree_sitter::Node, text: &str, indent: usize) {
         let spacing = "  ".repeat(indent);
         let preview: String = text[node.byte_range()]
@@ -773,10 +851,10 @@ mod tests {
     fn test_simple_list() {
         let buf: Buffer = "- Item\n".parse().unwrap();
         let lines = buf.lines();
-        assert_eq!(
-            kinds(&lines[0].markers),
-            vec![&MarkerKind::ListItem { ordered: false }]
-        );
+        assert!(matches!(
+            lines[0].markers.first().map(|m| &m.kind),
+            Some(MarkerKind::ListItem { ordered: false, .. })
+        ));
     }
 
     #[test]
@@ -784,10 +862,10 @@ mod tests {
         // "- " with no content - should still be recognized as a list item
         let buf: Buffer = "- \n".parse().unwrap();
         let lines = buf.lines();
-        assert_eq!(
-            kinds(&lines[0].markers),
-            vec![&MarkerKind::ListItem { ordered: false }]
-        );
+        assert!(matches!(
+            lines[0].markers.first().map(|m| &m.kind),
+            Some(MarkerKind::ListItem { ordered: false, .. })
+        ));
     }
 
     #[test]
@@ -797,19 +875,15 @@ mod tests {
         let lines = buf.lines();
 
         // Line 0: first list item
-        assert_eq!(
-            kinds(&lines[0].markers),
-            vec![&MarkerKind::ListItem { ordered: false }]
-        );
+        assert_eq!(lines[0].markers.len(), 1);
+        assert!(is_unordered_list(&lines[0].markers[0].kind));
 
         // Line 1: blank line
         assert!(lines[1].markers.is_empty());
 
         // Line 2: second list item (empty)
-        assert_eq!(
-            kinds(&lines[2].markers),
-            vec![&MarkerKind::ListItem { ordered: false }]
-        );
+        assert_eq!(lines[2].markers.len(), 1);
+        assert!(is_unordered_list(&lines[2].markers[0].kind));
     }
 
     #[test]
@@ -820,10 +894,8 @@ mod tests {
         let lines = buf.lines();
 
         // Line 0: task list item
-        assert_eq!(
-            kinds(&lines[0].markers),
-            vec![&MarkerKind::TaskList { checked: false }]
-        );
+        assert_eq!(lines[0].markers.len(), 1);
+        assert!(is_task_unchecked(&lines[0].markers[0].kind));
 
         // Line 1: blank
         assert!(lines[1].markers.is_empty());
@@ -902,23 +974,17 @@ mod tests {
     fn test_list_in_blockquote() {
         let buf: Buffer = "> - Item\n".parse().unwrap();
         let lines = buf.lines();
-        assert_eq!(
-            kinds(&lines[0].markers),
-            vec![
-                &MarkerKind::ListItem { ordered: false },
-                &MarkerKind::BlockQuote
-            ]
-        );
+        assert_eq!(lines[0].markers.len(), 2);
+        assert!(is_unordered_list(&lines[0].markers[0].kind));
+        assert!(matches!(lines[0].markers[1].kind, MarkerKind::BlockQuote));
     }
 
     #[test]
     fn test_ordered_list() {
         let buf: Buffer = "1. First\n".parse().unwrap();
         let lines = buf.lines();
-        assert_eq!(
-            kinds(&lines[0].markers),
-            vec![&MarkerKind::ListItem { ordered: true }]
-        );
+        assert_eq!(lines[0].markers.len(), 1);
+        assert!(is_ordered_list(&lines[0].markers[0].kind));
     }
 
     #[test]
@@ -927,14 +993,10 @@ mod tests {
         let lines = buf.lines();
 
         // TaskList is a single combined marker for "- [ ] " or "- [x] "
-        assert_eq!(
-            kinds(&lines[0].markers),
-            vec![&MarkerKind::TaskList { checked: false }]
-        );
-        assert_eq!(
-            kinds(&lines[1].markers),
-            vec![&MarkerKind::TaskList { checked: true }]
-        );
+        assert_eq!(lines[0].markers.len(), 1);
+        assert!(is_task_unchecked(&lines[0].markers[0].kind));
+        assert_eq!(lines[1].markers.len(), 1);
+        assert!(is_task_checked(&lines[1].markers[0].kind));
     }
 
     #[test]
@@ -1078,10 +1140,8 @@ mod tests {
         println!("Line 0 markers: {:?}", lines[0].markers);
         println!("Line 1 markers: {:?}", lines[1].markers);
 
-        assert_eq!(
-            kinds(&lines[0].markers),
-            vec![&MarkerKind::ListItem { ordered: false }]
-        );
+        assert_eq!(lines[0].markers.len(), 1);
+        assert!(is_unordered_list(&lines[0].markers[0].kind));
         // Line 2: continuation has Indent marker for the "  " prefix
         assert_eq!(kinds(&lines[1].markers), vec![&MarkerKind::Indent]);
     }
@@ -1091,10 +1151,8 @@ mod tests {
         let buf: Buffer = "- First line\n\n  Second paragraph\n".parse().unwrap();
         let lines = buf.lines();
 
-        assert_eq!(
-            kinds(&lines[0].markers),
-            vec![&MarkerKind::ListItem { ordered: false }]
-        );
+        assert_eq!(lines[0].markers.len(), 1);
+        assert!(is_unordered_list(&lines[0].markers[0].kind));
         // Line 2: empty line - no markers
         assert_eq!(kinds(&lines[1].markers), vec![] as Vec<&MarkerKind>);
         // Line 3: second paragraph with indent
@@ -1107,10 +1165,8 @@ mod tests {
         let lines = buf.lines();
 
         // Line 0: ordered list item
-        assert_eq!(
-            kinds(&lines[0].markers),
-            vec![&MarkerKind::ListItem { ordered: true }]
-        );
+        assert_eq!(lines[0].markers.len(), 1);
+        assert!(is_ordered_list(&lines[0].markers[0].kind));
         // Line 1: empty line - no markers
         assert_eq!(kinds(&lines[1].markers), vec![] as Vec<&MarkerKind>);
         // Line 2: blockquote inside list's nested paragraph - has BlockQuote + Indent
@@ -1156,7 +1212,10 @@ mod tests {
         let line = make_line(
             0..10,
             vec![Marker {
-                kind: MarkerKind::ListItem { ordered: false },
+                kind: MarkerKind::ListItem {
+                    ordered: false,
+                    unordered_marker: Some(UnorderedMarker::Minus),
+                },
                 range: 0..2,
             }],
         );
@@ -1170,7 +1229,10 @@ mod tests {
             0..15,
             vec![
                 Marker {
-                    kind: MarkerKind::ListItem { ordered: false },
+                    kind: MarkerKind::ListItem {
+                        ordered: false,
+                        unordered_marker: Some(UnorderedMarker::Minus),
+                    },
                     range: 2..4,
                 },
                 Marker {
@@ -1195,6 +1257,45 @@ mod tests {
         let buf: Buffer = "- [ ] Task item\n".parse().unwrap();
         let lines = buf.lines();
         assert_eq!(lines[0].substitution_rope(buf.rope()), "• [ ] ");
+    }
+
+    #[test]
+    fn test_line_substitution_different_markers() {
+        // Each unordered list marker should have a distinct bullet
+        let buf_minus: Buffer = "- item\n".parse().unwrap();
+        let buf_star: Buffer = "* item\n".parse().unwrap();
+        let buf_plus: Buffer = "+ item\n".parse().unwrap();
+
+        // - uses filled circle
+        assert_eq!(
+            buf_minus.lines()[0].substitution_rope(buf_minus.rope()),
+            "• "
+        );
+        // * uses white bullet (small hollow)
+        assert_eq!(buf_star.lines()[0].substitution_rope(buf_star.rope()), "◦ ");
+        // + uses triangular bullet
+        assert_eq!(buf_plus.lines()[0].substitution_rope(buf_plus.rope()), "‣ ");
+    }
+
+    #[test]
+    fn test_task_list_substitution_different_markers() {
+        // Task lists with different markers should have distinct bullets
+        let buf_minus: Buffer = "- [ ] task\n".parse().unwrap();
+        let buf_star: Buffer = "* [ ] task\n".parse().unwrap();
+        let buf_plus: Buffer = "+ [ ] task\n".parse().unwrap();
+
+        assert_eq!(
+            buf_minus.lines()[0].substitution_rope(buf_minus.rope()),
+            "• [ ] "
+        );
+        assert_eq!(
+            buf_star.lines()[0].substitution_rope(buf_star.rope()),
+            "◦ [ ] "
+        );
+        assert_eq!(
+            buf_plus.lines()[0].substitution_rope(buf_plus.rope()),
+            "‣ [ ] "
+        );
     }
 
     #[test]
@@ -1236,7 +1337,10 @@ mod tests {
         let line_with_list = make_line(
             0..10,
             vec![Marker {
-                kind: MarkerKind::ListItem { ordered: false },
+                kind: MarkerKind::ListItem {
+                    ordered: false,
+                    unordered_marker: Some(UnorderedMarker::Minus),
+                },
                 range: 0..2,
             }],
         );
@@ -1248,7 +1352,10 @@ mod tests {
         let line_unchecked = make_line(
             0..15,
             vec![Marker {
-                kind: MarkerKind::TaskList { checked: false },
+                kind: MarkerKind::TaskList {
+                    checked: false,
+                    unordered_marker: Some(UnorderedMarker::Minus),
+                },
                 range: 0..6,
             }],
         );
@@ -1257,7 +1364,10 @@ mod tests {
         let line_checked = make_line(
             0..15,
             vec![Marker {
-                kind: MarkerKind::TaskList { checked: true },
+                kind: MarkerKind::TaskList {
+                    checked: true,
+                    unordered_marker: Some(UnorderedMarker::Minus),
+                },
                 range: 0..6,
             }],
         );
@@ -1266,7 +1376,10 @@ mod tests {
         let line_no_checkbox = make_line(
             0..10,
             vec![Marker {
-                kind: MarkerKind::ListItem { ordered: false },
+                kind: MarkerKind::ListItem {
+                    ordered: false,
+                    unordered_marker: Some(UnorderedMarker::Minus),
+                },
                 range: 0..2,
             }],
         );
@@ -1279,7 +1392,10 @@ mod tests {
         let line = make_line(
             0..8,
             vec![Marker {
-                kind: MarkerKind::ListItem { ordered: false },
+                kind: MarkerKind::ListItem {
+                    ordered: false,
+                    unordered_marker: Some(UnorderedMarker::Minus),
+                },
                 range: 2..4,
             }],
         );
@@ -1292,7 +1408,10 @@ mod tests {
         let line = make_line(
             0..6,
             vec![Marker {
-                kind: MarkerKind::ListItem { ordered: false },
+                kind: MarkerKind::ListItem {
+                    ordered: false,
+                    unordered_marker: Some(UnorderedMarker::Minus),
+                },
                 range: 0..2,
             }],
         );
@@ -1318,14 +1437,10 @@ mod tests {
         //   - Indent [10-12] for the leading "  "
         //   - ListItem [12-14] for "- "
         // This gives us non-overlapping markers where spacers and markers are 1:1
-        assert_eq!(
-            kinds(&lines[1].markers),
-            vec![
-                &MarkerKind::Indent,
-                &MarkerKind::ListItem { ordered: false },
-                &MarkerKind::Indent
-            ]
-        );
+        assert_eq!(lines[1].markers.len(), 3);
+        assert!(matches!(lines[1].markers[0].kind, MarkerKind::Indent));
+        assert!(is_unordered_list(&lines[1].markers[1].kind));
+        assert!(matches!(lines[1].markers[2].kind, MarkerKind::Indent));
         assert_eq!(&text[lines[1].markers[0].range.clone()], "  "); // from list_marker
         assert_eq!(&text[lines[1].markers[1].range.clone()], "- "); // actual marker
         assert_eq!(&text[lines[1].markers[2].range.clone()], "  "); // from block_continuation
@@ -1532,10 +1647,8 @@ mod tests {
     fn test_unordered_list_minus_with_space() {
         let buf: Buffer = "- text\n".parse().unwrap();
         let lines = buf.lines();
-        assert_eq!(
-            kinds(&lines[0].markers),
-            vec![&MarkerKind::ListItem { ordered: false }]
-        );
+        assert_eq!(lines[0].markers.len(), 1);
+        assert!(is_unordered_list(&lines[0].markers[0].kind));
     }
 
     #[test]
@@ -1557,10 +1670,8 @@ mod tests {
     fn test_unordered_list_star_with_space() {
         let buf: Buffer = "* text\n".parse().unwrap();
         let lines = buf.lines();
-        assert_eq!(
-            kinds(&lines[0].markers),
-            vec![&MarkerKind::ListItem { ordered: false }]
-        );
+        assert_eq!(lines[0].markers.len(), 1);
+        assert!(is_unordered_list(&lines[0].markers[0].kind));
     }
 
     #[test]
@@ -1582,10 +1693,8 @@ mod tests {
     fn test_unordered_list_plus_with_space() {
         let buf: Buffer = "+ text\n".parse().unwrap();
         let lines = buf.lines();
-        assert_eq!(
-            kinds(&lines[0].markers),
-            vec![&MarkerKind::ListItem { ordered: false }]
-        );
+        assert_eq!(lines[0].markers.len(), 1);
+        assert!(is_unordered_list(&lines[0].markers[0].kind));
     }
 
     #[test]
@@ -1607,10 +1716,8 @@ mod tests {
     fn test_ordered_list_with_space() {
         let buf: Buffer = "1. text\n".parse().unwrap();
         let lines = buf.lines();
-        assert_eq!(
-            kinds(&lines[0].markers),
-            vec![&MarkerKind::ListItem { ordered: true }]
-        );
+        assert_eq!(lines[0].markers.len(), 1);
+        assert!(is_ordered_list(&lines[0].markers[0].kind));
     }
 
     #[test]
@@ -1663,5 +1770,48 @@ mod tests {
         println!("Markers for '##text': {:?}", lines[0].markers);
         // Result: NO, heading is NOT recognized without space
         assert_eq!(kinds(&lines[0].markers), vec![] as Vec<&MarkerKind>);
+    }
+
+    #[test]
+    fn test_mixed_list_markers_tree_structure() {
+        // Test whether tree-sitter treats different unordered list markers as separate lists
+        // Per CommonMark spec, different markers should create separate lists
+        let buf: Buffer = "- a\n* b\n+ c".parse().unwrap();
+        let text = buf.text();
+        let tree = buf.tree().unwrap();
+        let root = tree.block_tree().root_node();
+
+        println!("\n=== Mixed list markers ===");
+        println!("Text: {:?}", text);
+        print_tree(&root, &text, 0);
+
+        // Count how many 'list' nodes are direct children of the section/document
+        let mut list_count = 0;
+        let mut cursor = root.walk();
+        for child in root.children(&mut cursor) {
+            if child.kind() == "section" {
+                let mut section_cursor = child.walk();
+                for section_child in child.children(&mut section_cursor) {
+                    if section_child.kind() == "list" {
+                        list_count += 1;
+                        println!("Found list: {:?}", &text[section_child.byte_range()]);
+                    }
+                }
+            } else if child.kind() == "list" {
+                list_count += 1;
+                println!("Found list: {:?}", &text[child.byte_range()]);
+            }
+        }
+
+        println!("Total list count: {}", list_count);
+
+        // If tree-sitter creates 3 separate lists (one for each marker type),
+        // we should normalize markers. If it creates 1 list, no need.
+        // This test documents the actual behavior.
+        assert!(
+            list_count == 1 || list_count == 3,
+            "Expected either 1 unified list or 3 separate lists, got {}",
+            list_count
+        );
     }
 }
