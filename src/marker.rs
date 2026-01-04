@@ -90,10 +90,20 @@ impl LineMarkers {
             return String::new();
         }
 
-        // Find leading whitespace by scanning bytes from line start
-        // This avoids slicing the entire line content
-        let mut leading_ws_end = self.range.start;
-        for byte_idx in self.range.start..self.range.end {
+        // Find where spacer-handled markers end (Indent and BlockQuote)
+        // We only include leading whitespace that's NOT covered by these markers
+        let spacer_end = self
+            .markers
+            .iter()
+            .filter(|m| matches!(m.kind, MarkerKind::Indent | MarkerKind::BlockQuote))
+            .map(|m| m.range.end)
+            .max()
+            .unwrap_or(self.range.start);
+
+        // Find leading whitespace AFTER spacer markers
+        let ws_scan_start = spacer_end;
+        let mut leading_ws_end = ws_scan_start;
+        for byte_idx in ws_scan_start..self.range.end {
             if let Some(b) = rope.get_byte(byte_idx) {
                 if b == b' ' || b == b'\t' {
                     leading_ws_end = byte_idx + 1;
@@ -106,14 +116,14 @@ impl LineMarkers {
         }
 
         // Get just the leading whitespace (small slice)
-        let leading_ws = if leading_ws_end > self.range.start {
-            rope_slice_cow(rope, self.range.start, leading_ws_end)
+        let leading_ws = if leading_ws_end > ws_scan_start {
+            rope_slice_cow(rope, ws_scan_start, leading_ws_end)
         } else {
             std::borrow::Cow::Borrowed("")
         };
 
         // Build substitution: leading whitespace + marker substitutions
-        // Skip Indent and BlockQuote - their padding is handled by rendering
+        // Skip Indent and BlockQuote - their padding is handled by rendering (spacers)
         let mut result = leading_ws.into_owned();
         for m in self.markers.iter().rev() {
             if !matches!(m.kind, MarkerKind::Indent | MarkerKind::BlockQuote) {
@@ -124,9 +134,7 @@ impl LineMarkers {
     }
 
     /// Returns the continuation text to insert on Enter.
-    /// E.g., "> " for blockquote, "- " for list.
-    /// For Indent and ListItem markers, extracts the actual text from the range
-    /// (which includes leading whitespace for nested lists).
+    /// E.g., "> " for blockquote, "- " for list, "  " for indent.
     /// Markers are stored innermost to outermost, but continuation should be
     /// in text order (outermost to innermost), so we reverse.
     pub fn continuation_rope(&self, rope: &Rope) -> String {
@@ -134,8 +142,7 @@ impl LineMarkers {
             .iter()
             .rev()
             .map(|m| match &m.kind {
-                // For these markers, extract the actual text from the rope
-                // to preserve leading whitespace (e.g., "   > " for indented blockquote)
+                // Extract actual text from rope to preserve exact formatting
                 MarkerKind::Indent
                 | MarkerKind::ListItem { .. }
                 | MarkerKind::BlockQuote
@@ -452,24 +459,67 @@ pub fn markers_at(nodes: &[Node], rope: &Rope, line_start: usize, line_end: usiz
                 }
             }
             "list_marker_minus" | "list_marker_plus" | "list_marker_star" => {
+                // Tree-sitter includes leading whitespace in list markers for nested lists.
+                // Strip it so ListItem markers only contain the actual marker (e.g., "- ").
+                // The Indent marker already handles the leading whitespace separately.
+                let mut marker_start = start;
+                while marker_start < end {
+                    if let Some(b) = rope.get_byte(marker_start) {
+                        if b == b' ' || b == b'\t' {
+                            marker_start += 1;
+                        } else {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                // Add Indent marker for the leading whitespace if present
+                if marker_start > start {
+                    markers.push(Marker {
+                        kind: MarkerKind::Indent,
+                        range: start..marker_start,
+                    });
+                }
                 // Check if this list marker has a pending task checkbox
                 if let Some((checked, checkbox_end)) = pending_task.take() {
                     // Combine into a single TaskList marker spanning list marker to checkbox end
                     markers.push(Marker {
                         kind: MarkerKind::TaskList { checked },
-                        range: start..checkbox_end,
+                        range: marker_start..checkbox_end,
                     });
                 } else {
                     markers.push(Marker {
                         kind: MarkerKind::ListItem { ordered: false },
-                        range: start..end,
+                        range: marker_start..end,
                     });
                 }
             }
             "list_marker_dot" | "list_marker_parenthesis" => {
+                // Tree-sitter includes leading whitespace in list markers for nested lists.
+                // Strip it so ListItem markers only contain the actual marker (e.g., "1. ").
+                let mut marker_start = start;
+                while marker_start < end {
+                    if let Some(b) = rope.get_byte(marker_start) {
+                        if b == b' ' || b == b'\t' {
+                            marker_start += 1;
+                        } else {
+                            break;
+                        }
+                    } else {
+                        break;
+                    }
+                }
+                // Add Indent marker for the leading whitespace if present
+                if marker_start > start {
+                    markers.push(Marker {
+                        kind: MarkerKind::Indent,
+                        range: start..marker_start,
+                    });
+                }
                 markers.push(Marker {
                     kind: MarkerKind::ListItem { ordered: true },
-                    range: start..end,
+                    range: marker_start..end,
                 });
             }
             "task_list_marker_unchecked" => {
@@ -1263,17 +1313,22 @@ mod tests {
         println!("Line 1: {:?}", lines[1].markers);
 
         // Line 1: "    - Nested" - nested list item
-        // block_continuation [8-10] has "  " and list_marker_minus [10-14] has "  - "
-        // Together they form "    - "
+        // block_continuation [8-10] creates Indent for "  "
+        // list_marker_minus [10-14] has "  - " but we strip leading whitespace:
+        //   - Indent [10-12] for the leading "  "
+        //   - ListItem [12-14] for "- "
+        // This gives us non-overlapping markers where spacers and markers are 1:1
         assert_eq!(
             kinds(&lines[1].markers),
             vec![
+                &MarkerKind::Indent,
                 &MarkerKind::ListItem { ordered: false },
                 &MarkerKind::Indent
             ]
         );
-        assert_eq!(&text[lines[1].markers[0].range.clone()], "  - ");
-        assert_eq!(&text[lines[1].markers[1].range.clone()], "  ");
+        assert_eq!(&text[lines[1].markers[0].range.clone()], "  "); // from list_marker
+        assert_eq!(&text[lines[1].markers[1].range.clone()], "- "); // actual marker
+        assert_eq!(&text[lines[1].markers[2].range.clone()], "  "); // from block_continuation
     }
 
     #[test]
