@@ -241,6 +241,18 @@ fn extract_link_region(node: &Node, rope: &Rope) -> Option<StyledRegion> {
     let full_start = node.start_byte();
     let full_end = node.end_byte();
 
+    // Skip task list checkbox patterns like [ ] or [x] or [X]
+    // These get misdetected as shortcut_links when tree-sitter doesn't
+    // recognize the task list (e.g., when there's no content after the checkbox)
+    if node.kind() == "shortcut_link" {
+        let start = rope.byte_to_char(full_start);
+        let end = rope.byte_to_char(full_end);
+        let text = rope.slice(start..end).to_string();
+        if text == "[ ]" || text == "[x]" || text == "[X]" {
+            return None;
+        }
+    }
+
     let mut content_start = full_start;
     let mut content_end = full_end;
     let mut url: Option<String> = None;
