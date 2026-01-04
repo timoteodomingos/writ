@@ -134,7 +134,12 @@ impl LineMarkers {
             .iter()
             .rev()
             .map(|m| match &m.kind {
-                MarkerKind::Indent | MarkerKind::ListItem { .. } => {
+                // For these markers, extract the actual text from the rope
+                // to preserve leading whitespace (e.g., "   > " for indented blockquote)
+                MarkerKind::Indent
+                | MarkerKind::ListItem { .. }
+                | MarkerKind::BlockQuote
+                | MarkerKind::TaskList { .. } => {
                     rope_slice_cow(rope, m.range.start, m.range.end).into_owned()
                 }
                 _ => m.kind.continuation().to_string(),
@@ -232,7 +237,29 @@ impl LineMarkers {
     /// Returns continuation text excluding list markers.
     /// Used for paragraph breaks within lists to preserve outer container markers (e.g., blockquotes)
     /// without repeating the list marker on the empty line.
-    /// Note: Uses static continuation strings, not actual buffer text.
+    /// Extracts actual text from rope to preserve leading whitespace.
+    pub fn continuation_without_list_rope(&self, rope: &Rope) -> String {
+        self.markers
+            .iter()
+            .rev()
+            .filter(|m| {
+                !matches!(
+                    m.kind,
+                    MarkerKind::ListItem { .. } | MarkerKind::TaskList { .. }
+                )
+            })
+            .map(|m| match &m.kind {
+                // Extract actual text to preserve leading whitespace
+                MarkerKind::Indent | MarkerKind::BlockQuote => {
+                    rope_slice_cow(rope, m.range.start, m.range.end).into_owned()
+                }
+                _ => m.kind.continuation().to_string(),
+            })
+            .collect()
+    }
+
+    /// Returns continuation text excluding list markers (static strings, no rope).
+    /// Used when rope is not available.
     pub fn continuation_without_list(&self) -> String {
         self.markers
             .iter()
@@ -1022,6 +1049,38 @@ mod tests {
         assert_eq!(kinds(&lines[1].markers), vec![] as Vec<&MarkerKind>);
         // Line 3: second paragraph with indent
         assert_eq!(kinds(&lines[2].markers), vec![&MarkerKind::Indent]);
+    }
+
+    #[test]
+    fn test_blockquote_inside_list_paragraph() {
+        let buf: Buffer = "1. item\n\n   > quote\n".parse().unwrap();
+        let lines = buf.lines();
+
+        // Line 0: ordered list item
+        assert_eq!(
+            kinds(&lines[0].markers),
+            vec![&MarkerKind::ListItem { ordered: true }]
+        );
+        // Line 1: empty line - no markers
+        assert_eq!(kinds(&lines[1].markers), vec![] as Vec<&MarkerKind>);
+        // Line 2: blockquote inside list's nested paragraph - has BlockQuote + Indent
+        assert_eq!(
+            kinds(&lines[2].markers),
+            vec![&MarkerKind::BlockQuote, &MarkerKind::Indent]
+        );
+        // Check ranges: BlockQuote should be at byte 9 ("> "), Indent at byte 9
+        // "1. item\n\n   > quote\n"
+        //  0123456 7 8901234567
+        // Line 2 starts at byte 9 ("   > quote\n")
+        // BlockQuote marker is "> " at positions 12-14
+        // Indent marker is "   " at positions 9-12
+        let bq_marker = &lines[2].markers[0];
+        let indent_marker = &lines[2].markers[1];
+        assert_eq!(bq_marker.range, 12..14); // "> "
+        assert_eq!(indent_marker.range, 9..12); // "   "
+
+        // Continuation should include both: "   > "
+        assert_eq!(lines[2].continuation_rope(buf.rope()), "   > ");
     }
 
     // ========================================================================

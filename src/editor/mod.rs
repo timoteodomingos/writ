@@ -622,12 +622,12 @@ impl EditorState {
 
             if !allow_exit && has_list_marker {
                 // Shift+Enter on list item: create nested paragraph (indent without list marker)
-                let empty_line = ctx.line.continuation_without_list();
+                let empty_line = ctx.line.continuation_without_list_rope(self.buffer.rope());
                 let indent = ctx.line.nested_paragraph_indent(self.buffer.rope());
                 self.insert_text(&format!("\n{}\n{}", empty_line.trim_end(), indent));
             } else {
                 // Regular Enter: create new list item
-                let empty_line = ctx.line.continuation_without_list();
+                let empty_line = ctx.line.continuation_without_list_rope(self.buffer.rope());
                 let continuation = ctx.line.continuation_rope(self.buffer.rope());
                 self.insert_text(&format!("\n{}\n{}", empty_line.trim_end(), continuation));
             }
@@ -1723,6 +1723,57 @@ mod tests {
         }
 
         #[test]
+        fn enter_on_list_inside_nested_blockquote() {
+            let mut state = editor_with_cursor("> > - item|");
+            state.smart_enter();
+            assert_editor_eq(&state, "> > - item\n> >\n> > - |");
+        }
+
+        #[test]
+        fn enter_on_task_list_inside_nested_blockquote() {
+            let mut state = editor_with_cursor("> > - [ ] task|");
+            state.smart_enter();
+            assert_editor_eq(&state, "> > - [ ] task\n> >\n> > - [ ] |");
+        }
+
+        #[test]
+        fn double_enter_on_list_inside_nested_blockquote_exits_all() {
+            let mut state = editor_with_cursor("> > - item|");
+            state.smart_enter();
+            state.smart_enter();
+            assert_editor_eq(&state, "> > - item\n\n|");
+        }
+
+        #[test]
+        fn enter_on_blockquote_inside_list_nested_paragraph() {
+            let mut state = editor_with_cursor("1. item\n\n   > quote|");
+            state.smart_enter();
+            assert_editor_eq(&state, "1. item\n\n   > quote\n   >\n   > |");
+        }
+
+        #[test]
+        fn double_enter_on_blockquote_inside_list_nested_paragraph_exits_all() {
+            let mut state = editor_with_cursor("1. item\n\n   > quote|");
+            state.smart_enter();
+            state.smart_enter();
+            assert_editor_eq(&state, "1. item\n\n   > quote\n\n|");
+        }
+
+        #[test]
+        fn enter_on_list_inside_blockquote_inside_list_nested_paragraph() {
+            let mut state = editor_with_cursor("1. item\n\n   > - nested list|");
+            state.smart_enter();
+            assert_editor_eq(&state, "1. item\n\n   > - nested list\n   >\n   > - |");
+        }
+
+        #[test]
+        fn shift_enter_on_list_inside_blockquote_inside_list_creates_nested_paragraph() {
+            let mut state = editor_with_cursor("1. item\n\n   > - nested list|");
+            state.shift_enter();
+            assert_editor_eq(&state, "1. item\n\n   > - nested list\n   >\n   >   |");
+        }
+
+        #[test]
         fn enter_on_empty_nested_blockquote_exits_all() {
             let mut state = editor_with_cursor("> > text\n> >\n> > |");
             state.smart_enter();
@@ -1948,6 +1999,13 @@ hello world
 >
 >   |"#,
             );
+        }
+
+        #[test]
+        fn shift_enter_on_list_inside_nested_blockquote_creates_nested_paragraph() {
+            let mut state = editor_with_cursor("> > - item|");
+            state.shift_enter();
+            assert_editor_eq(&state, "> > - item\n> >\n> >   |");
         }
 
         #[test]
@@ -2672,6 +2730,21 @@ item|"#,
         }
 
         #[test]
+        fn shift_tab_on_list_inside_nested_blockquote_removes_list() {
+            let mut state = editor_with_cursor("> > - item|");
+            state.smart_shift_tab();
+            assert_editor_eq(&state, "> > item|");
+        }
+
+        #[test]
+        fn double_shift_tab_on_list_inside_nested_blockquote() {
+            let mut state = editor_with_cursor("> > - item|");
+            state.smart_shift_tab();
+            state.smart_shift_tab();
+            assert_editor_eq(&state, "> item|");
+        }
+
+        #[test]
         fn shift_tab_on_empty_list_item_removes_marker() {
             // Empty list item: shift-tab removes the marker, leaving empty line
             let mut state = editor_with_cursor(
@@ -3019,6 +3092,13 @@ plain text|"#,
             let mut state = editor_with_cursor("> > text\n> >\n> > |");
             state.delete_backward();
             assert_editor_eq(&state, "> > text|");
+        }
+
+        #[test]
+        fn backspace_on_empty_list_inside_nested_blockquote_joins_to_content() {
+            let mut state = editor_with_cursor("> > - item\n> >\n> > - |");
+            state.delete_backward();
+            assert_editor_eq(&state, "> > - item|");
         }
 
         #[test]
