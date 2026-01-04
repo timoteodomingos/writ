@@ -458,8 +458,9 @@ impl EditorState {
 
                 if is_after_blank {
                     // After blank line - indent as nested block.
-                    // Use 2-space indent because 4+ spaces triggers indented code block detection.
-                    self.insert_at(line_start, "  ");
+                    // Use nested_paragraph_indent which handles ordered vs unordered lists.
+                    let indent = container.nested_paragraph_indent(self.buffer.rope());
+                    self.insert_at(line_start, &indent);
                 } else {
                     // Adjacent to container - add list marker
                     let continuation = container.continuation_rope(self.buffer.rope());

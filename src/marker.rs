@@ -257,11 +257,19 @@ impl LineMarkers {
                 MarkerKind::BlockQuote => {
                     result.push_str("> ");
                 }
-                MarkerKind::ListItem { .. } | MarkerKind::TaskList { .. } => {
-                    // Use 2-space indent for nested paragraphs under list items.
+                MarkerKind::ListItem { ordered: false } | MarkerKind::TaskList { .. } => {
+                    // Use 2-space indent for unordered lists and task lists.
                     // We can't use the full marker width (e.g., 6 for "- [ ] ")
-                    // because 4+ spaces triggers indented code block detection.
+                    // because 4+ spaces beyond minimum triggers indented code block.
                     result.push_str("  ");
+                }
+                MarkerKind::ListItem { ordered: true } => {
+                    // Ordered lists need marker-width indent to stay nested.
+                    // 2-space breaks out of the list. Use the actual marker range.
+                    let indent_len = m.range.end - m.range.start;
+                    for _ in 0..indent_len {
+                        result.push(' ');
+                    }
                 }
                 MarkerKind::Indent => {
                     // Preserve actual indent from buffer
@@ -746,6 +754,36 @@ mod tests {
         // Line 2: nested paragraph with 2-space indent
         assert_eq!(kinds(&lines[2].markers), vec![&MarkerKind::Indent]);
         assert_eq!(lines[2].markers[0].range.len(), 2);
+    }
+
+    #[test]
+    fn test_nested_paragraph_indent_ordered_list() {
+        // Ordered lists need marker-width indent (3 for "1. ", 4 for "10. ")
+        // 2-space indent breaks out of the list.
+        let buf: Buffer = "1. item\n".parse().unwrap();
+        let lines = buf.lines();
+        // Should produce 3-space indent to match "1. "
+        assert_eq!(lines[0].nested_paragraph_indent(buf.rope()), "   ");
+    }
+
+    #[test]
+    fn test_nested_paragraph_indent_double_digit_ordered_list() {
+        // Need 10 items to get a double-digit marker (Buffer normalizes "10. " to "1. ")
+        let buf: Buffer = "1. a\n2. b\n3. c\n4. d\n5. e\n6. f\n7. g\n8. h\n9. i\n10. j\n"
+            .parse()
+            .unwrap();
+        let lines = buf.lines();
+        // Line 9 (0-indexed) is "10. j" - should produce 4-space indent
+        assert_eq!(lines[9].nested_paragraph_indent(buf.rope()), "    ");
+    }
+
+    #[test]
+    fn test_nested_paragraph_indent_unordered_list() {
+        // Unordered lists use 2-space indent (not marker width)
+        // to avoid triggering indented code block detection
+        let buf: Buffer = "- item\n".parse().unwrap();
+        let lines = buf.lines();
+        assert_eq!(lines[0].nested_paragraph_indent(buf.rope()), "  ");
     }
 
     #[test]
