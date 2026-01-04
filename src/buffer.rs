@@ -279,12 +279,7 @@ impl BufferContent {
             return false;
         }
 
-        let content_start = line
-            .marker_range()
-            .map(|r| r.end)
-            .unwrap_or(line.range.start);
-
-        self.slice_cow(content_start..line.range.end)
+        self.slice_cow(line.content_start()..line.range.end)
             .trim()
             .is_empty()
     }
@@ -1250,6 +1245,24 @@ mod tests {
         assert!(!buf.is_line_empty(0)); // "> hey" has content
         assert!(buf.is_line_empty(1)); // "> " is empty (marker only)
         assert!(!buf.is_line_empty(2)); // "> > hey" has content
+    }
+
+    #[test]
+    fn test_marker_range_includes_trailing_space() {
+        // "> hey" - marker should be "> " (bytes 0..2)
+        let buf: Buffer = "> hey".parse().unwrap();
+        let lines = buf.lines();
+        assert_eq!(lines[0].marker_range(), Some(0..2)); // "> " includes the space
+
+        // "- item" - marker should be "- " (bytes 0..2)
+        let buf: Buffer = "- item".parse().unwrap();
+        let lines = buf.lines();
+        assert_eq!(lines[0].marker_range(), Some(0..2)); // "- " includes the space
+
+        // "> > hey" - marker should be "> > " (bytes 0..4)
+        let buf: Buffer = "> > hey".parse().unwrap();
+        let lines = buf.lines();
+        assert_eq!(lines[0].marker_range(), Some(0..4)); // "> > " includes both spaces
     }
 
     #[test]

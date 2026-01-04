@@ -3202,7 +3202,16 @@ plain text|"#,
             // moving right should skip to the next content line
             let mut state = editor_with_cursor("> hey\n>| \n> > hey");
             state.move_right();
-            assert_editor_eq(&state, "> hey\n> \n|> > hey");
+            assert_editor_eq(&state, "> hey\n> \n> > |hey");
+        }
+
+        #[test]
+        fn move_right_across_empty_blockquote_line() {
+            // Moving right from end of line 1 should skip the empty line 2
+            // and land at the start of content on line 3
+            let mut state = editor_with_cursor("> hey|\n> \n> > hey");
+            state.move_right();
+            assert_editor_eq(&state, "> hey\n> \n> > |hey");
         }
 
         #[test]

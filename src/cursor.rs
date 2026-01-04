@@ -143,7 +143,7 @@ impl Cursor {
         *self
     }
 
-    /// Helper: skip forwards to find the next content line and position at its start.
+    /// Helper: skip forwards to find the next content line and position after its marker.
     fn skip_to_next_content_line(&self, buffer: &Buffer, start_line: usize) -> Self {
         let line_count = buffer.line_count();
         let mut target_line = start_line;
@@ -152,10 +152,11 @@ impl Cursor {
         }
 
         if !buffer.is_line_empty(target_line) {
-            let target_range = buffer.line_byte_range(target_line);
-            return Self {
-                offset: target_range.start,
-            };
+            if let Some(line) = buffer.lines().get(target_line) {
+                return Self {
+                    offset: line.content_start(),
+                };
+            }
         }
 
         // All lines are empty, stay put

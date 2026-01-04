@@ -79,6 +79,13 @@ impl LineMarkers {
         Some(start..end)
     }
 
+    /// Returns the byte offset where content starts (after all markers).
+    pub fn content_start(&self) -> usize {
+        self.marker_range()
+            .map(|r| r.end)
+            .unwrap_or(self.range.start)
+    }
+
     /// Returns the width of the marker (including trailing space) relative to line start.
     /// This is the number of spaces needed to nest under this line.
     /// E.g., "- " = 2, "1. " = 3, "10. " = 4
