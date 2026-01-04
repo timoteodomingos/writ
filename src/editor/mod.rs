@@ -1779,6 +1779,27 @@ hello world
         }
 
         #[test]
+        fn enter_on_nested_paragraph_under_ordered_list_keeps_indent() {
+            // Nested paragraph under ordered list: Enter creates paragraph break with marker-width indent
+            let mut state = editor_with_cursor(
+                r#"
+1. item
+
+   paragraph|"#,
+            );
+            state.smart_enter();
+            assert_editor_eq(
+                &state,
+                r#"
+1. item
+
+   paragraph
+
+   |"#,
+            );
+        }
+
+        #[test]
         fn enter_on_empty_nested_paragraph_exits_indent() {
             // Empty nested paragraph line: Enter removes indent and exits
             let mut state = editor_with_cursor(
@@ -1796,6 +1817,29 @@ hello world
 - item
 
   paragraph
+
+|"#,
+            );
+        }
+
+        #[test]
+        fn enter_on_empty_nested_paragraph_under_ordered_list_exits_indent() {
+            // Empty nested paragraph line under ordered list: Enter removes indent and exits
+            let mut state = editor_with_cursor(
+                r#"
+1. item
+
+   paragraph
+
+   |"#,
+            );
+            state.smart_enter();
+            assert_editor_eq(
+                &state,
+                r#"
+1. item
+
+   paragraph
 
 |"#,
             );
@@ -1849,6 +1893,42 @@ hello world
         }
 
         #[test]
+        fn shift_enter_on_ordered_list_in_blockquote_creates_nested_paragraph() {
+            // Shift+Enter on ordered list in blockquote: nested paragraph with blockquote
+            // continuation and marker-width indent (3 spaces for "1. ")
+            let mut state = editor_with_cursor(
+                r#"
+> 1. item|"#,
+            );
+            state.shift_enter();
+            assert_editor_eq(
+                &state,
+                r#"
+> 1. item
+>
+>    |"#,
+            );
+        }
+
+        #[test]
+        fn shift_enter_on_task_list_in_blockquote_creates_nested_paragraph() {
+            // Shift+Enter on task list in blockquote: nested paragraph with blockquote
+            // continuation and 2-space indent (not 6, to avoid code block)
+            let mut state = editor_with_cursor(
+                r#"
+> - [ ] task|"#,
+            );
+            state.shift_enter();
+            assert_editor_eq(
+                &state,
+                r#"
+> - [ ] task
+>
+>   |"#,
+            );
+        }
+
+        #[test]
         fn shift_enter_on_task_list_creates_nested_paragraph() {
             // Shift+Enter on task list: nested paragraph with 2-space indent
             // (not 6-space, because 4+ spaces triggers indented code block)
@@ -1863,6 +1943,60 @@ hello world
 - [ ] task one
 
   |"#,
+            );
+        }
+
+        #[test]
+        fn shift_enter_on_ordered_list_creates_nested_paragraph() {
+            // Shift+Enter on ordered list: nested paragraph with marker-width indent
+            // (3 spaces for "1. ") to stay nested in the list
+            let mut state = editor_with_cursor(
+                r#"
+1. item one|"#,
+            );
+            state.shift_enter();
+            assert_editor_eq(
+                &state,
+                r#"
+1. item one
+
+   |"#,
+            );
+        }
+
+        #[test]
+        fn shift_enter_on_double_digit_ordered_list_creates_nested_paragraph() {
+            // Shift+Enter on double-digit ordered list: nested paragraph with marker-width indent
+            // (4 spaces for "10. ") to stay nested in the list
+            let mut state = editor_with_cursor(
+                r#"
+1. one
+2. two
+3. three
+4. four
+5. five
+6. six
+7. seven
+8. eight
+9. nine
+10. ten|"#,
+            );
+            state.shift_enter();
+            assert_editor_eq(
+                &state,
+                r#"
+1. one
+2. two
+3. three
+4. four
+5. five
+6. six
+7. seven
+8. eight
+9. nine
+10. ten
+
+    |"#,
             );
         }
 
@@ -1952,6 +2086,16 @@ hello world
             assert_editor_eq(&state, "- hey\n\n- |");
             state.smart_enter();
             assert_editor_eq(&state, "- hey\n\n|");
+        }
+
+        #[test]
+        fn double_enter_on_list_in_blockquote_exits_all() {
+            // First enter creates new list item, second enter exits all containers
+            let mut state = editor_with_cursor("> - item|");
+            state.smart_enter();
+            assert_editor_eq(&state, "> - item\n>\n> - |");
+            state.smart_enter();
+            assert_editor_eq(&state, "> - item\n\n|");
         }
 
         #[test]
@@ -2317,6 +2461,26 @@ text|"#,
 - [ ] task
 
   |"#,
+            );
+        }
+
+        #[test]
+        fn tab_after_blank_line_under_ordered_list_indents_as_block() {
+            // After blank line under ordered list, tab should indent by marker width
+            // (3 spaces for "1. ") to stay nested in the list
+            let mut state = editor_with_cursor(
+                r#"
+1. item
+
+|"#,
+            );
+            state.smart_tab();
+            assert_editor_eq(
+                &state,
+                r#"
+1. item
+
+   |"#,
             );
         }
 
@@ -2709,6 +2873,27 @@ plain text|"#,
         }
 
         #[test]
+        fn backspace_on_empty_nested_paragraph_under_ordered_list_joins_to_content() {
+            // Backspace on empty indented line under ordered list joins to previous content
+            let mut state = editor_with_cursor(
+                r#"
+1. item
+
+   paragraph
+
+   |"#,
+            );
+            state.delete_backward();
+            assert_editor_eq(
+                &state,
+                r#"
+1. item
+
+   paragraph|"#,
+            );
+        }
+
+        #[test]
         fn backspace_on_blank_line_before_nested_paragraph() {
             // Backspace on blank line between list and paragraph should
             // only delete one newline
@@ -2811,6 +2996,24 @@ plain text|"#,
 > ```
 > code
 > ```|"#,
+            );
+        }
+
+        #[test]
+        fn backspace_after_exiting_list_in_blockquote() {
+            // After double-enter exits list in blockquote: "> - item\n\n|"
+            // Backspace should join back to the list item content
+            let mut state = editor_with_cursor(
+                r#"
+> - item
+
+|"#,
+            );
+            state.delete_backward();
+            assert_editor_eq(
+                &state,
+                r#"
+> - item|"#,
             );
         }
     }
