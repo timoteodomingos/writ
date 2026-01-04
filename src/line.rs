@@ -746,6 +746,15 @@ impl IntoElement for Line<'_> {
         // Collect spacers for blockquotes and indent markers
         let mut spacers: Vec<gpui::Div> = Vec::new();
 
+        // Check if line has a list marker - if so, skip Indent spacers since
+        // the list substitution text already includes leading whitespace
+        let has_list_marker = self.line.markers.iter().any(|m| {
+            matches!(
+                m.kind,
+                MarkerKind::ListItem { .. } | MarkerKind::TaskList { .. }
+            )
+        });
+
         for marker in &self.line.markers {
             match &marker.kind {
                 MarkerKind::Heading(level) => {
@@ -830,10 +839,14 @@ impl IntoElement for Line<'_> {
                 }
                 MarkerKind::Indent => {
                     // Create a spacer for indent (nested paragraph under list item)
-                    let indent_chars = marker.range.len();
-                    let spacer_width = self.theme.monospace_char_width * indent_chars as f32;
-                    let spacer = div().w(spacer_width).h_full();
-                    spacers.push(spacer);
+                    // But skip if there's a list marker - the list's substitution already
+                    // includes leading whitespace
+                    if !has_list_marker {
+                        let indent_chars = marker.range.len();
+                        let spacer_width = self.theme.monospace_char_width * indent_chars as f32;
+                        let spacer = div().w(spacer_width).min_h_full();
+                        spacers.push(spacer);
+                    }
                 }
                 MarkerKind::ListItem { .. } | MarkerKind::TaskList { .. } => {}
             }
