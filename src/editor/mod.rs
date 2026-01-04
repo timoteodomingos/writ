@@ -1708,6 +1708,28 @@ mod tests {
         }
 
         #[test]
+        fn enter_on_nested_blockquote_continues_at_same_level() {
+            let mut state = editor_with_cursor("> > text|");
+            state.smart_enter();
+            assert_editor_eq(&state, "> > text\n> >\n> > |");
+        }
+
+        #[test]
+        fn enter_on_triple_nested_blockquote_continues_at_same_level() {
+            // Verify arbitrary nesting works - code iterates through all markers
+            let mut state = editor_with_cursor("> > > text|");
+            state.smart_enter();
+            assert_editor_eq(&state, "> > > text\n> > >\n> > > |");
+        }
+
+        #[test]
+        fn enter_on_empty_nested_blockquote_exits_all() {
+            let mut state = editor_with_cursor("> > text\n> >\n> > |");
+            state.smart_enter();
+            assert_editor_eq(&state, "> > text\n\n|");
+        }
+
+        #[test]
         fn enter_on_nested_list_in_blockquote() {
             let mut state = editor_with_cursor(
                 r#"
@@ -2636,6 +2658,20 @@ item|"#,
         }
 
         #[test]
+        fn shift_tab_on_nested_blockquote_removes_one_level() {
+            let mut state = editor_with_cursor("> > text|");
+            state.smart_shift_tab();
+            assert_editor_eq(&state, "> text|");
+        }
+
+        #[test]
+        fn shift_tab_on_nested_blockquote_cursor_at_start() {
+            let mut state = editor_with_cursor("> > |text");
+            state.smart_shift_tab();
+            assert_editor_eq(&state, "> |text");
+        }
+
+        #[test]
         fn shift_tab_on_empty_list_item_removes_marker() {
             // Empty list item: shift-tab removes the marker, leaving empty line
             let mut state = editor_with_cursor(
@@ -2976,6 +3012,13 @@ plain text|"#,
                 r#"
 > paraga|"#,
             );
+        }
+
+        #[test]
+        fn backspace_on_empty_nested_blockquote_joins_to_content() {
+            let mut state = editor_with_cursor("> > text\n> >\n> > |");
+            state.delete_backward();
+            assert_editor_eq(&state, "> > text|");
         }
 
         #[test]
