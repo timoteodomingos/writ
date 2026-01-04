@@ -504,6 +504,239 @@ impl BufferContent {
         }
         None
     }
+
+    /// Normalize blockquote spacing - ensure space after `>`.
+    /// `>text` → `> text`
+    pub fn normalize_blockquote_spacing(&mut self) -> bool {
+        let mut any_changed = false;
+
+        loop {
+            let Some(tree) = &self.tree else {
+                return any_changed;
+            };
+
+            // Find all blockquote markers missing a trailing space
+            let mut insertions: Vec<usize> = Vec::new();
+            self.find_blockquote_missing_space(&tree.block_tree().root_node(), &mut insertions);
+
+            if insertions.is_empty() {
+                return any_changed;
+            }
+
+            any_changed = true;
+
+            // Apply insertions in reverse order to maintain byte offsets
+            for pos in insertions.into_iter().rev() {
+                let char_pos = self.text.byte_to_char(pos);
+                self.text.insert_char(char_pos, ' ');
+            }
+
+            // Re-parse and continue - tree structure may have changed
+            self.tree = self.parser.parse_rope(&self.text, None);
+        }
+    }
+
+    fn find_blockquote_missing_space(&self, node: &tree_sitter::Node, insertions: &mut Vec<usize>) {
+        // Check both block_quote_marker (first line) and block_continuation (subsequent lines)
+        if node.kind() == "block_quote_marker" || node.kind() == "block_continuation" {
+            let start = node.start_byte();
+            let end = node.end_byte();
+
+            // Get the content to check if it contains '>' (block_continuation might be indent)
+            let char_start = self.text.byte_to_char(start);
+            let char_end = self.text.byte_to_char(end);
+            let content: String = self.text.slice(char_start..char_end).chars().collect();
+
+            // Only process if this is a blockquote marker (contains >)
+            if content.contains('>') {
+                // Check if the marker itself ends with a space
+                let last_byte = if end > start {
+                    self.text.get_byte(end - 1)
+                } else {
+                    None
+                };
+
+                if last_byte != Some(b' ') {
+                    // No trailing space in marker - insert one after it
+                    insertions.push(end);
+                }
+            }
+        }
+
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i as u32) {
+                self.find_blockquote_missing_space(&child, insertions);
+            }
+        }
+    }
+
+    /// Normalize task list checkmarks to lowercase x.
+    /// `- [X] task` → `- [x] task`
+    pub fn normalize_task_checkmarks(&mut self) -> bool {
+        let Some(tree) = &self.tree else {
+            return false;
+        };
+
+        // Find all task_list_marker_checked nodes with uppercase X
+        let mut corrections: Vec<Range<usize>> = Vec::new();
+        self.find_uppercase_checkmarks(&tree.block_tree().root_node(), &mut corrections);
+
+        if corrections.is_empty() {
+            return false;
+        }
+
+        // Apply corrections in reverse order to maintain byte offsets
+        for range in corrections.into_iter().rev() {
+            let char_start = self.text.byte_to_char(range.start);
+            let char_end = self.text.byte_to_char(range.end);
+            self.text.remove(char_start..char_end);
+            self.text.insert(char_start, "[x]");
+        }
+
+        self.tree = self.parser.parse_rope(&self.text, None);
+        true
+    }
+
+    fn find_uppercase_checkmarks(
+        &self,
+        node: &tree_sitter::Node,
+        corrections: &mut Vec<Range<usize>>,
+    ) {
+        if node.kind() == "task_list_marker_checked" {
+            let start = node.start_byte();
+            let end = node.end_byte();
+            let char_start = self.text.byte_to_char(start);
+            let char_end = self.text.byte_to_char(end);
+            let text: String = self.text.slice(char_start..char_end).chars().collect();
+
+            // Check if it contains uppercase X
+            if text.contains('X') {
+                corrections.push(start..end);
+            }
+        }
+
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i as u32) {
+                self.find_uppercase_checkmarks(&child, corrections);
+            }
+        }
+    }
+
+    /// Remove trailing newlines from the document.
+    /// The file should end with actual content, not newlines.
+    pub fn normalize_trailing_newline(&mut self) -> bool {
+        let len = self.text.len_bytes();
+        if len == 0 {
+            return false;
+        }
+
+        // Find where trailing newlines start
+        let mut trim_from = len;
+        while trim_from > 0 && self.text.get_byte(trim_from - 1) == Some(b'\n') {
+            trim_from -= 1;
+        }
+
+        if trim_from == len {
+            return false; // No trailing newlines
+        }
+
+        // Remove trailing newlines
+        let char_start = self.text.byte_to_char(trim_from);
+        let char_end = self.text.len_chars();
+        self.text.remove(char_start..char_end);
+        true
+    }
+
+    /// Remove soft-wrapped continuation lines by joining them to the previous line.
+    /// `- item\n  continuation` → `- item continuation`
+    /// A soft-wrap continuation is a line with ONLY Indent marker(s) and no container markers.
+    pub fn normalize_soft_wraps(&mut self) -> bool {
+        let mut any_changed = false;
+
+        loop {
+            // Update lines cache from current tree
+            self.update_lines_cache();
+
+            // Find the first soft-wrap continuation line (iterating from end)
+            let mut join_info: Option<(usize, usize)> = None; // (newline_pos, indent_end)
+
+            for i in (1..self.lines.len()).rev() {
+                let line = &self.lines[i];
+
+                // Skip empty lines (blank lines are intentional paragraph breaks)
+                if line.range.start == line.range.end {
+                    continue;
+                }
+
+                // Check if previous line is empty - if so, this is an intentional
+                // nested paragraph, not a soft-wrap continuation
+                let prev_line = &self.lines[i - 1];
+                if prev_line.range.start == prev_line.range.end {
+                    continue;
+                }
+
+                // A soft-wrap continuation has ONLY Indent markers (no containers)
+                let has_only_indent = !line.markers.is_empty()
+                    && line
+                        .markers
+                        .iter()
+                        .all(|m| matches!(m.kind, MarkerKind::Indent));
+
+                if has_only_indent {
+                    // This is a soft-wrap continuation - join it to the previous line
+                    // The newline is at previous_line.range.end (or line.range.start - 1)
+                    let newline_pos = line.range.start - 1;
+                    // The indent ends at the end of the last Indent marker
+                    let indent_end = line
+                        .markers
+                        .iter()
+                        .filter(|m| matches!(m.kind, MarkerKind::Indent))
+                        .map(|m| m.range.end)
+                        .max()
+                        .unwrap_or(line.range.start);
+
+                    join_info = Some((newline_pos, indent_end));
+                    break;
+                }
+            }
+
+            let Some((newline_pos, indent_end)) = join_info else {
+                return any_changed;
+            };
+
+            any_changed = true;
+
+            // Replace "\n" + indent with a single space
+            let char_start = self.text.byte_to_char(newline_pos);
+            let char_end = self.text.byte_to_char(indent_end);
+            self.text.remove(char_start..char_end);
+            self.text.insert_char(char_start, ' ');
+
+            // Re-parse
+            self.tree = self.parser.parse_rope(&self.text, None);
+        }
+    }
+
+    /// Run all normalization passes on the document.
+    /// This ensures the document conforms to the editor's canonical markdown format.
+    /// Returns true if any changes were made.
+    pub fn normalize_document(&mut self) -> bool {
+        let mut changed = false;
+
+        // Order matters: soft wraps first (may affect line structure),
+        // then blockquote spacing, task checkmarks, and trailing newlines
+        changed |= self.normalize_soft_wraps();
+        changed |= self.normalize_blockquote_spacing();
+        changed |= self.normalize_task_checkmarks();
+        changed |= self.normalize_trailing_newline();
+
+        if changed {
+            // Re-parse to ensure tree is up to date
+            self.tree = self.parser.parse_rope(&self.text, None);
+        }
+
+        changed
+    }
 }
 
 impl Default for BufferContent {
@@ -599,6 +832,33 @@ impl Buffer {
 
     pub fn can_redo(&self) -> bool {
         self.history.can_redo()
+    }
+
+    /// Load a file, normalize its content, and save it back.
+    /// Returns the buffer and whether any normalization changes were made.
+    /// If the file doesn't exist or can't be read, returns a buffer with empty content.
+    pub fn from_file(path: &std::path::Path) -> std::io::Result<(Self, bool)> {
+        let content = std::fs::read_to_string(path).unwrap_or_default();
+
+        // Parse without normalization first
+        let mut buffer: Buffer = content.parse().expect("Buffer parsing is infallible");
+
+        // Run normalization
+        let changed = buffer.content.normalize_document();
+
+        // If changes were made, re-parse and update caches
+        if changed {
+            buffer.content.tree = buffer.content.parser.parse_rope(&buffer.content.text, None);
+            buffer.content.update_lines_cache();
+
+            // Save the normalized content back to the file
+            std::fs::write(path, buffer.content.text())?;
+        }
+
+        // Mark as clean since we just saved (or no changes were needed)
+        buffer.history.set_saved();
+
+        Ok((buffer, changed))
     }
 }
 
@@ -1043,5 +1303,190 @@ mod tests {
 
         assert!(lines[0].is_fence());
         assert!(lines[0].has_border());
+    }
+
+    // ========================================================================
+    // Normalization tests
+    // ========================================================================
+
+    #[test]
+    fn test_normalize_removes_single_trailing_newline() {
+        let mut buf: Buffer = "content\n".parse().unwrap();
+        let changed = buf.normalize_trailing_newline();
+        assert!(changed);
+        assert_eq!(buf.text(), "content");
+    }
+
+    #[test]
+    fn test_normalize_removes_multiple_trailing_newlines() {
+        let mut buf: Buffer = "content\n\n\n".parse().unwrap();
+        let changed = buf.normalize_trailing_newline();
+        assert!(changed);
+        assert_eq!(buf.text(), "content");
+    }
+
+    #[test]
+    fn test_normalize_no_trailing_newline_unchanged() {
+        let mut buf: Buffer = "content".parse().unwrap();
+        let changed = buf.normalize_trailing_newline();
+        assert!(!changed);
+        assert_eq!(buf.text(), "content");
+    }
+
+    #[test]
+    fn test_normalize_empty_file() {
+        let mut buf: Buffer = "".parse().unwrap();
+        let changed = buf.normalize_trailing_newline();
+        assert!(!changed);
+        assert_eq!(buf.text(), "");
+    }
+
+    #[test]
+    fn test_normalize_only_newlines() {
+        let mut buf: Buffer = "\n\n\n".parse().unwrap();
+        let changed = buf.normalize_trailing_newline();
+        assert!(changed);
+        assert_eq!(buf.text(), "");
+    }
+
+    #[test]
+    fn test_normalize_uppercase_x() {
+        let mut buf: Buffer = "- [X] task".parse().unwrap();
+        let changed = buf.normalize_task_checkmarks();
+        assert!(changed);
+        assert_eq!(buf.text(), "- [x] task");
+    }
+
+    #[test]
+    fn test_normalize_preserves_lowercase_x() {
+        let mut buf: Buffer = "- [x] task".parse().unwrap();
+        let changed = buf.normalize_task_checkmarks();
+        assert!(!changed);
+        assert_eq!(buf.text(), "- [x] task");
+    }
+
+    #[test]
+    fn test_normalize_preserves_unchecked() {
+        let mut buf: Buffer = "- [ ] task".parse().unwrap();
+        let changed = buf.normalize_task_checkmarks();
+        assert!(!changed);
+        assert_eq!(buf.text(), "- [ ] task");
+    }
+
+    #[test]
+    fn test_normalize_multiple_uppercase_x() {
+        let mut buf: Buffer = "- [X] task1\n- [X] task2\n- [x] task3".parse().unwrap();
+        let changed = buf.normalize_task_checkmarks();
+        assert!(changed);
+        assert_eq!(buf.text(), "- [x] task1\n- [x] task2\n- [x] task3");
+    }
+
+    #[test]
+    fn test_normalize_blockquote_adds_space() {
+        let mut buf: Buffer = ">text".parse().unwrap();
+        let changed = buf.normalize_blockquote_spacing();
+        assert!(changed);
+        assert_eq!(buf.text(), "> text");
+    }
+
+    #[test]
+    fn test_normalize_blockquote_preserves_existing_space() {
+        let mut buf: Buffer = "> text".parse().unwrap();
+        let changed = buf.normalize_blockquote_spacing();
+        assert!(!changed);
+        assert_eq!(buf.text(), "> text");
+    }
+
+    #[test]
+    fn test_normalize_nested_blockquote_spacing() {
+        let mut buf: Buffer = "> >text".parse().unwrap();
+        let changed = buf.normalize_blockquote_spacing();
+        assert!(changed);
+        assert_eq!(buf.text(), "> > text");
+    }
+
+    #[test]
+    fn test_normalize_blockquote_multiple_lines() {
+        let mut buf: Buffer = ">line1\n>line2".parse().unwrap();
+        let changed = buf.normalize_blockquote_spacing();
+        assert!(changed);
+        assert_eq!(buf.text(), "> line1\n> line2");
+    }
+
+    #[test]
+    fn test_normalize_soft_wrap_in_list() {
+        // "- First line\n  continuation" → "- First line continuation"
+        let mut buf: Buffer = "- First line\n  continuation".parse().unwrap();
+        let changed = buf.normalize_soft_wraps();
+        assert!(changed);
+        assert_eq!(buf.text(), "- First line continuation");
+    }
+
+    #[test]
+    fn test_normalize_soft_wrap_preserves_nested_paragraph() {
+        // Blank line before indent means intentional nested paragraph - preserve it
+        let mut buf: Buffer = "- item\n\n  paragraph".parse().unwrap();
+        let changed = buf.normalize_soft_wraps();
+        assert!(!changed);
+        assert_eq!(buf.text(), "- item\n\n  paragraph");
+    }
+
+    #[test]
+    fn test_normalize_soft_wrap_multiple_continuations() {
+        // Multiple continuation lines should all be joined
+        let mut buf: Buffer = "- line1\n  line2\n  line3".parse().unwrap();
+        let changed = buf.normalize_soft_wraps();
+        assert!(changed);
+        assert_eq!(buf.text(), "- line1 line2 line3");
+    }
+
+    #[test]
+    fn test_normalize_soft_wrap_nested_list_preserved() {
+        // Nested list items should NOT be joined (they have ListItem marker, not just Indent)
+        let mut buf: Buffer = "- outer\n  - inner".parse().unwrap();
+        let changed = buf.normalize_soft_wraps();
+        assert!(!changed);
+        assert_eq!(buf.text(), "- outer\n  - inner");
+    }
+
+    #[test]
+    fn test_normalize_soft_wrap_no_continuation() {
+        // Regular list without continuation - unchanged
+        let mut buf: Buffer = "- item1\n- item2".parse().unwrap();
+        let changed = buf.normalize_soft_wraps();
+        assert!(!changed);
+        assert_eq!(buf.text(), "- item1\n- item2");
+    }
+
+    #[test]
+    fn test_normalize_soft_wrap_blockquote_preserved() {
+        // Blockquote lines should NOT be joined (they have BlockQuote marker)
+        let mut buf: Buffer = "> line1\n> line2".parse().unwrap();
+        let changed = buf.normalize_soft_wraps();
+        assert!(!changed);
+        assert_eq!(buf.text(), "> line1\n> line2");
+    }
+
+    #[test]
+    fn test_normalize_document_full_pipeline() {
+        // Test that normalize_document applies all normalization rules
+        let mut buf: Buffer = ">text\n- [X] item\n  continuation\n\n".parse().unwrap();
+        let changed = buf.normalize_document();
+        assert!(changed);
+        // Should have:
+        // - Added space after > (blockquote spacing)
+        // - Lowercased [X] to [x] (task checkmarks)
+        // - Joined continuation line (soft wraps)
+        // - Removed trailing newlines
+        assert_eq!(buf.text(), "> text\n- [x] item continuation");
+    }
+
+    #[test]
+    fn test_normalize_document_no_changes_needed() {
+        // Test that normalize_document returns false when no changes needed
+        let mut buf: Buffer = "> text\n- [x] item".parse().unwrap();
+        let changed = buf.normalize_document();
+        assert!(!changed);
+        assert_eq!(buf.text(), "> text\n- [x] item");
     }
 }

@@ -7,6 +7,7 @@ use gpui::{
     Window, WindowBounds, WindowDecorations, WindowOptions, div, prelude::*,
 };
 use writ::{
+    buffer::Buffer,
     config::Config,
     demo::{DemoStep, DemoTiming, demo_script},
     editor::{Editor, EditorAction, EditorConfig, EditorTheme},
@@ -15,8 +16,14 @@ use writ::{
     window::{CloseWindow, Quit, window_shadow},
 };
 
-fn load_file(file: &std::path::Path) -> String {
-    std::fs::read_to_string(file).unwrap_or_default()
+/// Load a file, normalize its content, and save it back.
+/// Returns the normalized content.
+fn load_and_normalize_file(file: &std::path::Path) -> String {
+    let result: Result<(Buffer, bool), std::io::Error> = Buffer::from_file(file);
+    match result {
+        Ok((buffer, _changed)) => buffer.text(),
+        Err(_) => String::new(),
+    }
 }
 
 fn run_demo(editor: Entity<Editor>, cx: &mut gpui::App) {
@@ -112,7 +119,7 @@ fn main() {
     let content = if demo_mode {
         String::new()
     } else {
-        load_file(&file_path)
+        load_and_normalize_file(&file_path)
     };
 
     let app = Application::new().with_http_client(http::Client::new());
