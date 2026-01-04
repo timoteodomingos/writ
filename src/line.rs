@@ -839,7 +839,11 @@ impl IntoElement for Line<'_> {
             }
         }
 
-        let mut text_container = div().relative().flex_1().child(styled_text);
+        let mut text_container = div()
+            .relative()
+            .flex_1()
+            .min_w_0() // Allow flex item to shrink below content size for text wrapping
+            .child(styled_text);
 
         if let Some(cursor_pos) = visual_cursor_pos {
             text_container =
