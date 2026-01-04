@@ -104,7 +104,7 @@ pub fn demo_script() -> Vec<DemoStep> {
         Type("Embed images:".into()),
         Action(A::Enter),
         Type("![Hello, World!](https://upload.wikimedia.org/wikipedia/commons/9/97/The_Earth_seen_from_Apollo_17.jpg)".into()),
-        Wait(500),
+        Wait(1000),
         Action(A::Enter),
         Wait(1000),
         // Finish
