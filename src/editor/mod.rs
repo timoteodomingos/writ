@@ -593,10 +593,13 @@ impl EditorState {
             };
 
             // Track if previous line was blank (for lists) - we won't add another newline
-            let prev_was_blank = ctx.prev_line.map_or(false, |prev| {
-                prev.markers.is_empty()
-                    && self.buffer.slice_cow(prev.range.clone()).trim().is_empty()
-            });
+            let prev_was_blank = ctx.prev_line.map_or_else(
+                || false,
+                |prev| {
+                    prev.markers.is_empty()
+                        && self.buffer.slice_cow(prev.range.clone()).trim().is_empty()
+                },
+            );
 
             if let Some(start) = delete_start {
                 self.delete_and_adjust(start..marker_range.end);
