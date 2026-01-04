@@ -741,7 +741,10 @@ impl IntoElement for Line<'_> {
         let styled_text = StyledText::new(shared_text).with_runs(runs);
         let text_layout = styled_text.layout().clone();
 
-        let mut line_div = line_base(line_number).relative();
+        let mut line_div = line_base(line_number).relative().flex().flex_row();
+
+        // Collect spacers for blockquotes and indent markers
+        let mut spacers: Vec<gpui::Div> = Vec::new();
 
         for marker in &self.line.markers {
             match &marker.kind {
@@ -757,13 +760,15 @@ impl IntoElement for Line<'_> {
                     };
                 }
                 MarkerKind::BlockQuote => {
-                    // Use marker width for padding so wrapped lines align with content
+                    // Create a spacer with left border for each blockquote level
                     let marker_chars = marker.range.len();
-                    let padding = self.theme.monospace_char_width * marker_chars as f32;
-                    line_div = line_div
-                        .pl(padding)
+                    let spacer_width = self.theme.monospace_char_width * marker_chars as f32;
+                    let spacer = div()
+                        .w(spacer_width)
+                        .min_h_full()
                         .border_l_2()
                         .border_color(self.theme.border_color);
+                    spacers.push(spacer);
                 }
                 MarkerKind::CodeBlockFence { .. } | MarkerKind::CodeBlockContent => {
                     line_div = line_div.text_size(rems(0.9));
@@ -823,30 +828,29 @@ impl IntoElement for Line<'_> {
                         return hr_div;
                     }
                 }
-                MarkerKind::ListItem { .. } | MarkerKind::TaskList { .. } | MarkerKind::Indent => {}
+                MarkerKind::Indent => {
+                    // Create a spacer for indent (nested paragraph under list item)
+                    let indent_chars = marker.range.len();
+                    let spacer_width = self.theme.monospace_char_width * indent_chars as f32;
+                    let spacer = div().w(spacer_width).h_full();
+                    spacers.push(spacer);
+                }
+                MarkerKind::ListItem { .. } | MarkerKind::TaskList { .. } => {}
             }
         }
 
-        // If the only marker is Indent (nested block like paragraph under list item),
-        // add left padding so wrapped lines align properly.
-        let needs_indent_padding =
-            self.line.markers.len() == 1 && matches!(self.line.markers[0].kind, MarkerKind::Indent);
-
-        let mut text_container = div().relative().child(styled_text);
+        let mut text_container = div().relative().flex_1().child(styled_text);
 
         if let Some(cursor_pos) = visual_cursor_pos {
             text_container =
                 text_container.child(self.render_cursor(cursor_pos, text_layout.clone()));
         }
 
-        if needs_indent_padding {
-            // Use the actual indent marker length (varies: "- " = 2, "1. " = 3, "10. " = 4, etc.)
-            let indent_chars = self.line.markers[0].range.len();
-            let indent_width = self.theme.monospace_char_width * indent_chars as f32;
-            line_div = line_div.pl(indent_width).child(text_container);
-        } else {
-            line_div = line_div.child(text_container);
+        // Add all spacers first, then the text container
+        for spacer in spacers {
+            line_div = line_div.child(spacer);
         }
+        line_div = line_div.child(text_container);
 
         if let Some(ref on_click) = self.on_click {
             let on_click = on_click.clone();
