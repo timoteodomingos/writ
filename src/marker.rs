@@ -258,11 +258,10 @@ impl LineMarkers {
                     result.push_str("> ");
                 }
                 MarkerKind::ListItem { .. } | MarkerKind::TaskList { .. } => {
-                    // Convert list marker to equivalent whitespace
-                    let marker_width = m.range.end - m.range.start;
-                    for _ in 0..marker_width {
-                        result.push(' ');
-                    }
+                    // Use 2-space indent for nested paragraphs under list items.
+                    // We can't use the full marker width (e.g., 6 for "- [ ] ")
+                    // because 4+ spaces triggers indented code block detection.
+                    result.push_str("  ");
                 }
                 MarkerKind::Indent => {
                     // Preserve actual indent from buffer
@@ -693,6 +692,60 @@ mod tests {
             kinds(&lines[0].markers),
             vec![&MarkerKind::ListItem { ordered: false }]
         );
+    }
+
+    #[test]
+    fn test_empty_list_item() {
+        // "- " with no content - should still be recognized as a list item
+        let buf: Buffer = "- \n".parse().unwrap();
+        let lines = buf.lines();
+        assert_eq!(
+            kinds(&lines[0].markers),
+            vec![&MarkerKind::ListItem { ordered: false }]
+        );
+    }
+
+    #[test]
+    fn test_list_items_with_paragraph_break() {
+        // Two list items with a blank line between them
+        let buf: Buffer = "- hey\n\n- \n".parse().unwrap();
+        let lines = buf.lines();
+
+        // Line 0: first list item
+        assert_eq!(
+            kinds(&lines[0].markers),
+            vec![&MarkerKind::ListItem { ordered: false }]
+        );
+
+        // Line 1: blank line
+        assert!(lines[1].markers.is_empty());
+
+        // Line 2: second list item (empty)
+        assert_eq!(
+            kinds(&lines[2].markers),
+            vec![&MarkerKind::ListItem { ordered: false }]
+        );
+    }
+
+    #[test]
+    fn test_nested_paragraph_under_task_list() {
+        // Task list with nested paragraph - uses 2-space indent (not 6)
+        // because 4+ spaces triggers indented code block detection
+        let buf: Buffer = "- [ ] task\n\n  nested\n".parse().unwrap();
+        let lines = buf.lines();
+
+        // Line 0: task list item
+        assert_eq!(
+            kinds(&lines[0].markers),
+            vec![&MarkerKind::TaskList { checked: false }]
+        );
+
+        // Line 1: blank
+        assert!(lines[1].markers.is_empty());
+
+        // Line 2: nested paragraph with 2-space indent
+        assert_eq!(kinds(&lines[2].markers), vec![&MarkerKind::Indent]);
+        assert_eq!(lines[2].markers[0].range.len(), 2);
     }
 
     #[test]

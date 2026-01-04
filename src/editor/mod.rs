@@ -218,6 +218,41 @@ impl EditorState {
         self.selection = Selection::new(new_pos, new_pos);
     }
 
+    /// Check if a line has content after its markers.
+    /// Lines with code fences are always considered to have content.
+    fn line_has_content(&self, line: &LineMarkers) -> bool {
+        if line.is_fence() {
+            return true;
+        }
+        let content_start = line
+            .marker_range()
+            .map(|r| r.end)
+            .unwrap_or(line.range.start);
+        !self
+            .buffer
+            .slice_cow(content_start..line.range.end)
+            .trim()
+            .is_empty()
+    }
+
+    /// Find the previous line with content, looking back up to `max_lines` lines.
+    /// Skips over empty lines (lines with only markers or whitespace).
+    /// Returns None if no content line is found within the limit.
+    fn prev_content_line(&self, line_idx: usize, max_lines: usize) -> Option<&LineMarkers> {
+        if line_idx == 0 {
+            return None;
+        }
+        let lines = self.buffer.lines();
+        let start = line_idx.saturating_sub(max_lines);
+        for i in (start..line_idx).rev() {
+            let line = &lines[i];
+            if self.line_has_content(line) {
+                return Some(line);
+            }
+        }
+        None
+    }
+
     /// Get context about the line at the cursor.
     /// Returns None if the cursor is not on a valid line.
     fn line_context(&self) -> Option<LineContext<'_>> {
@@ -226,18 +261,7 @@ impl EditorState {
         let lines = self.buffer.lines();
         let line = lines.get(line_idx)?;
 
-        let content_start = line
-            .marker_range()
-            .map(|r| r.end)
-            .unwrap_or(line.range.start);
-
-        // Lines with code fences are never considered empty (the fence is content)
-        let is_empty = !line.is_fence()
-            && self
-                .buffer
-                .slice_cow(content_start..line.range.end)
-                .trim()
-                .is_empty();
+        let is_empty = !self.line_has_content(line);
 
         let prev_line = if line_idx > 0 {
             lines.get(line_idx - 1)
@@ -401,8 +425,9 @@ impl EditorState {
         let line_start = ctx.line.range.start;
 
         if !ctx.line.markers.is_empty() {
-            // Check if we can nest deeper (only one level beyond previous line)
-            if let Some(prev) = ctx.prev_line
+            // Check if we can nest deeper (only one level beyond previous content line)
+            // Look back up to 2 lines to skip over empty continuation lines
+            if let Some(prev) = self.prev_content_line(ctx.line_idx, 2)
                 && ctx.line.marker_width() >= prev.marker_width() + 2
             {
                 return;
@@ -432,9 +457,9 @@ impl EditorState {
                     .is_empty();
 
                 if is_after_blank {
-                    // After blank line - indent as nested block
-                    let indent = " ".repeat(container.marker_width());
-                    self.insert_at(line_start, &indent);
+                    // After blank line - indent as nested block.
+                    // Use 2-space indent because 4+ spaces triggers indented code block detection.
+                    self.insert_at(line_start, "  ");
                 } else {
                     // Adjacent to container - add list marker
                     let continuation = container.continuation_rope(self.buffer.rope());
@@ -1802,6 +1827,24 @@ hello world
         }
 
         #[test]
+        fn shift_enter_on_task_list_creates_nested_paragraph() {
+            // Shift+Enter on task list: nested paragraph with 2-space indent
+            // (not 6-space, because 4+ spaces triggers indented code block)
+            let mut state = editor_with_cursor(
+                r#"
+- [ ] task one|"#,
+            );
+            state.shift_enter();
+            assert_editor_eq(
+                &state,
+                r#"
+- [ ] task one
+
+  |"#,
+            );
+        }
+
+        #[test]
         fn enter_on_pending_marker_completes_it() {
             // `*|` should become `* \n* |`
             let mut state = editor_with_cursor(
@@ -2188,6 +2231,25 @@ text|"#,
         }
 
         #[test]
+        fn tab_on_sibling_with_paragraph_break_can_nest() {
+            // Sibling with paragraph break between can still nest
+            let mut state = editor_with_cursor(
+                r#"
+- item
+
+- sibling|"#,
+            );
+            state.smart_tab();
+            assert_editor_eq(
+                &state,
+                r#"
+- item
+
+  - sibling|"#,
+            );
+        }
+
+        #[test]
         fn tab_after_blank_line_indents_as_block() {
             // After blank line, tab should indent as nested block, not add marker
             let mut state = editor_with_cursor(
@@ -2201,6 +2263,26 @@ text|"#,
                 &state,
                 r#"
 - item
+
+  |"#,
+            );
+        }
+
+        #[test]
+        fn tab_after_blank_line_under_task_list_indents_as_block() {
+            // After blank line under task list, tab should indent 2 spaces
+            // (not 6, because 4+ spaces triggers indented code block)
+            let mut state = editor_with_cursor(
+                r#"
+- [ ] task
+
+|"#,
+            );
+            state.smart_tab();
+            assert_editor_eq(
+                &state,
+                r#"
+- [ ] task
 
   |"#,
             );
