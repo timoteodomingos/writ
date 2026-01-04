@@ -564,9 +564,10 @@ impl EditorState {
             // Empty container line - exit ALL markers
             let marker_range = ctx.line.marker_range().unwrap_or(ctx.line.range.clone());
 
-            // Check if previous line is an empty continuation (e.g., just ">")
-            // This handles: "> hey\n>\n> |" -> Enter -> "> hey\n\n|"
-            let prev_empty_range = ctx.prev_line.and_then(|prev| {
+            // Check if previous line(s) should be cleaned up when exiting container.
+            // For blockquotes: "> hey\n>\n> |" -> Enter -> "> hey\n\n|" (remove empty ">")
+            // For lists: "- hey\n\n- |" -> Enter -> "- hey\n\n|" (remove empty "- " and keep one blank)
+            let delete_start = if let Some(prev) = ctx.prev_line {
                 let prev_content_start = prev
                     .marker_range()
                     .map(|r| r.end)
@@ -576,20 +577,37 @@ impl EditorState {
                     .slice_cow(prev_content_start..prev.range.end)
                     .trim()
                     .is_empty();
+
                 if prev_is_empty && !prev.markers.is_empty() {
-                    Some(prev.range.start..marker_range.end)
+                    // Previous line is empty container (e.g., just ">") - delete it too
+                    Some(prev.range.start)
+                } else if prev_is_empty && prev.markers.is_empty() {
+                    // Previous line is blank - for lists this is the paragraph break
+                    // Keep the blank line, just delete current marker
+                    None
                 } else {
                     None
                 }
+            } else {
+                None
+            };
+
+            // Track if previous line was blank (for lists) - we won't add another newline
+            let prev_was_blank = ctx.prev_line.map_or(false, |prev| {
+                prev.markers.is_empty()
+                    && self.buffer.slice_cow(prev.range.clone()).trim().is_empty()
             });
 
-            if let Some(delete_range) = prev_empty_range {
-                self.delete_and_adjust(delete_range);
+            if let Some(start) = delete_start {
+                self.delete_and_adjust(start..marker_range.end);
             } else {
                 self.delete_and_adjust(marker_range);
             }
 
-            self.insert_at(self.cursor().offset, "\n");
+            // Only add newline if previous line wasn't already blank
+            if !prev_was_blank {
+                self.insert_at(self.cursor().offset, "\n");
+            }
         } else {
             // Line has content (or is empty but not exiting) - create paragraph break
             let has_list_marker = ctx.line.markers.iter().any(|m| {
@@ -1921,6 +1939,16 @@ hello world
             assert_editor_eq(&state, "> hey\n>\n> |");
             state.smart_enter();
             assert_editor_eq(&state, "> hey\n\n|");
+        }
+
+        #[test]
+        fn double_enter_on_list_exits_and_cleans_up() {
+            // First enter creates new list item, second enter exits and removes empty item
+            let mut state = editor_with_cursor("- hey|");
+            state.smart_enter();
+            assert_editor_eq(&state, "- hey\n\n- |");
+            state.smart_enter();
+            assert_editor_eq(&state, "- hey\n\n|");
         }
 
         #[test]
