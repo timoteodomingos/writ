@@ -395,7 +395,7 @@ impl EditorState {
         }
     }
 
-    fn compute_smart_enter_text(&self, cursor_pos: usize) -> String {
+    fn compute_enter_text(&self, cursor_pos: usize) -> String {
         let lines = self.buffer.lines();
         let cursor_line_idx = self.buffer.byte_to_line(cursor_pos);
 
@@ -412,7 +412,7 @@ impl EditorState {
     }
 
     /// Smart tab: adds structure based on context.
-    pub fn smart_tab(&mut self) {
+    pub fn tab(&mut self) {
         let Some(ctx) = self.line_context() else {
             return;
         };
@@ -473,7 +473,7 @@ impl EditorState {
     }
 
     /// Smart enter: creates paragraph break or exits container on empty line.
-    pub fn smart_enter(&mut self) {
+    pub fn enter(&mut self) {
         self.do_enter(true);
     }
 
@@ -482,7 +482,7 @@ impl EditorState {
     fn do_enter(&mut self, allow_exit: bool) {
         if self.is_pending_marker(self.cursor().offset) {
             self.complete_pending_marker();
-            let text = self.compute_smart_enter_text(self.cursor().offset);
+            let text = self.compute_enter_text(self.cursor().offset);
             self.insert_text(&text);
             return;
         }
@@ -635,7 +635,7 @@ impl EditorState {
     }
 
     /// Smart shift-tab: removes one level of structure.
-    pub fn smart_shift_tab(&mut self) {
+    pub fn shift_tab(&mut self) {
         let Some(ctx) = self.line_context() else {
             return;
         };
@@ -662,7 +662,7 @@ impl EditorState {
         self.do_enter(false);
     }
 
-    fn smart_backspace_range_with_type(
+    fn backspace_range_with_type(
         &self,
         cursor_pos: usize,
     ) -> Option<(std::ops::Range<usize>, bool)> {
@@ -686,7 +686,7 @@ impl EditorState {
             let cursor_pos = self.cursor().offset;
 
             if let Some((delete_range, is_indent_marker)) =
-                self.smart_backspace_range_with_type(cursor_pos)
+                self.backspace_range_with_type(cursor_pos)
             {
                 let line_idx = self.buffer.byte_to_line(cursor_pos);
                 let lines = self.buffer.lines();
@@ -780,6 +780,14 @@ impl EditorState {
                     let lines = self.buffer.lines();
                     if let Some(current_line) = lines.get(line_idx) {
                         let line_text = self.buffer.slice_cow(current_line.range.clone());
+
+                        // Check if we're at the start of the line content (after any markers)
+                        let content_start = current_line
+                            .marker_range()
+                            .map(|r| r.end)
+                            .unwrap_or(current_line.range.start);
+                        let at_content_start = cursor_pos == content_start;
+
                         if line_text.trim().is_empty() {
                             let has_content_after = lines.get(line_idx + 1).is_some_and(|next| {
                                 !self.buffer.slice_cow(next.range.clone()).trim().is_empty()
@@ -802,6 +810,32 @@ impl EditorState {
                             self.selection = Selection::new(delete_start, delete_start);
                             return;
                         }
+
+                        // At start of a line with content - check if previous line is empty
+                        // If so, find the last content line and join to it
+                        if at_content_start && line_idx > 0 {
+                            let prev_line_idx = line_idx - 1;
+                            if self.buffer.is_line_empty(prev_line_idx) {
+                                // Find the last non-empty line before us
+                                let mut target_idx = prev_line_idx;
+                                while target_idx > 0 && self.buffer.is_line_empty(target_idx) {
+                                    target_idx -= 1;
+                                }
+
+                                // If we found a content line, join to it
+                                if !self.buffer.is_line_empty(target_idx) {
+                                    let target_line = &lines[target_idx];
+                                    // Find end of content on target line (before trailing newline/whitespace)
+                                    let target_text =
+                                        self.buffer.slice_cow(target_line.range.clone());
+                                    let trimmed_len = target_text.trim_end().len();
+                                    let join_pos = target_line.range.start + trimmed_len;
+                                    self.buffer.delete(join_pos..cursor_pos, cursor_pos);
+                                    self.selection = Selection::new(join_pos, join_pos);
+                                    return;
+                                }
+                            }
+                        }
                     }
                 }
 
@@ -819,6 +853,18 @@ impl EditorState {
         let cursor_before = self.cursor().offset;
         self.buffer.delete(range.clone(), cursor_before);
         self.selection = Selection::new(range.start, range.start);
+    }
+
+    /// Delete the character after the cursor, or the selection if active.
+    pub fn delete_forward(&mut self) {
+        if !self.selection.is_collapsed() {
+            self.delete_selection();
+        } else if self.cursor().offset < self.buffer.len_bytes() {
+            let cursor_before = self.cursor().offset;
+            let next = self.cursor().move_right(&self.buffer);
+            self.buffer
+                .delete(cursor_before..next.offset, cursor_before);
+        }
     }
 }
 
@@ -922,11 +968,6 @@ impl Editor {
         }
     }
 
-    fn find_line_at(&self, byte_pos: usize) -> Option<(usize, &LineMarkers)> {
-        let idx = self.state.buffer.byte_to_line(byte_pos);
-        self.state.buffer.lines().get(idx).map(|line| (idx, line))
-    }
-
     fn perform_pending_scroll(&mut self, margin: gpui::Pixels) {
         if !self.scroll_to_cursor_pending {
             return;
@@ -969,12 +1010,12 @@ impl Editor {
         self.scroll_to_cursor_pending = true;
     }
 
-    fn smart_tab(&mut self) {
-        self.state.smart_tab();
+    fn tab(&mut self) {
+        self.state.tab();
     }
 
-    fn smart_shift_tab(&mut self) {
-        self.state.smart_shift_tab();
+    fn shift_tab(&mut self) {
+        self.state.shift_tab();
     }
 
     fn toggle_checkbox(&mut self, line_number: usize, cx: &mut Context<Self>) {
@@ -1020,17 +1061,7 @@ impl Editor {
     }
 
     fn insert_text(&mut self, text: &str) {
-        let cursor_before = self.cursor().offset;
-        let insert_pos = if !self.state.selection.is_collapsed() {
-            let range = self.state.selection.range();
-            self.state.buffer.delete(range.clone(), cursor_before);
-            range.start
-        } else {
-            cursor_before
-        };
-        self.state.buffer.insert(insert_pos, text, insert_pos);
-        let new_pos = insert_pos + text.len();
-        self.state.selection = Selection::new(new_pos, new_pos);
+        self.state.insert_text(text);
     }
 
     fn delete_backward(&mut self) {
@@ -1038,74 +1069,17 @@ impl Editor {
     }
 
     fn delete_forward(&mut self) {
-        if !self.state.selection.is_collapsed() {
-            self.delete_selection();
-        } else if self.cursor().offset < self.state.buffer.len_bytes() {
-            let cursor_before = self.cursor().offset;
-            let next = self.cursor().move_right(&self.state.buffer);
-            self.state
-                .buffer
-                .delete(cursor_before..next.offset, cursor_before);
-        }
-    }
-
-    fn delete_selection(&mut self) {
-        let range = self.state.selection.range();
-        let cursor_before = self.cursor().offset;
-        self.state.buffer.delete(range.clone(), cursor_before);
-        self.state.selection = Selection::new(range.start, range.start);
+        self.state.delete_forward();
     }
 
     fn move_in_direction(&mut self, direction: Direction, extend: bool) {
         let new_cursor = match direction {
-            Direction::Left => self.smart_move_left(),
-            Direction::Right => self.smart_move_right(),
+            Direction::Left => self.cursor().move_left(&self.state.buffer),
+            Direction::Right => self.cursor().move_right(&self.state.buffer),
             Direction::Up => self.cursor().move_up(&self.state.buffer),
             Direction::Down => self.cursor().move_down(&self.state.buffer),
         };
         self.move_cursor(new_cursor, extend);
-    }
-
-    fn smart_move_left(&self) -> Cursor {
-        let cursor_pos = self.cursor().offset;
-        if cursor_pos == 0 {
-            return self.cursor();
-        }
-
-        if let Some((line_idx, line)) = self.find_line_at(cursor_pos)
-            && let Some(marker_range) = line.marker_range()
-            && cursor_pos <= marker_range.end
-        {
-            if line_idx > 0 {
-                let prev_line = &self.state.buffer.lines()[line_idx - 1];
-                return Cursor::new(prev_line.range.end);
-            } else {
-                return Cursor::new(marker_range.end);
-            }
-        }
-
-        self.cursor().move_left(&self.state.buffer)
-    }
-
-    fn smart_move_right(&self) -> Cursor {
-        let cursor_pos = self.cursor().offset;
-        let len = self.state.buffer.len_bytes();
-        if cursor_pos >= len {
-            return self.cursor();
-        }
-
-        if let Some((_, line)) = self.find_line_at(cursor_pos)
-            && let Some(marker_range) = line.marker_range()
-        {
-            if cursor_pos == line.range.start {
-                return Cursor::new(marker_range.end);
-            }
-            if cursor_pos > marker_range.start && cursor_pos < marker_range.end {
-                return Cursor::new(marker_range.end);
-            }
-        }
-
-        self.cursor().move_right(&self.state.buffer)
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -1165,7 +1139,7 @@ impl Editor {
                     self.state.shift_enter();
                 } else {
                     // Enter: create sibling or exit container if empty
-                    self.state.smart_enter();
+                    self.state.enter();
                 }
                 cx.notify();
             }
@@ -1173,9 +1147,9 @@ impl Editor {
                 if self.state.cursor_in_code_block() {
                     self.insert_text("    ");
                 } else if keystroke.modifiers.shift {
-                    self.smart_shift_tab();
+                    self.shift_tab();
                 } else {
-                    self.smart_tab();
+                    self.tab();
                 }
                 cx.notify();
             }
@@ -1195,7 +1169,7 @@ impl Editor {
                     let range = self.state.selection.range();
                     let text = self.state.buffer.slice_cow(range).into_owned();
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
-                    self.delete_selection();
+                    self.state.delete_selection();
                     cx.notify();
                 }
             }
@@ -1390,16 +1364,16 @@ impl Editor {
                 self.insert_text(&c.to_string());
             }
             EditorAction::Enter => {
-                self.state.smart_enter();
+                self.state.enter();
             }
             EditorAction::ShiftEnter => {
                 self.state.shift_enter();
             }
             EditorAction::Tab => {
-                self.smart_tab();
+                self.tab();
             }
             EditorAction::ShiftTab => {
-                self.smart_shift_tab();
+                self.shift_tab();
             }
             EditorAction::Backspace => {
                 self.delete_backward();
@@ -1656,7 +1630,7 @@ mod tests {
         assert_eq!(actual, expected);
     }
 
-    mod smart_enter_tests {
+    mod enter_tests {
         use super::*;
 
         #[test]
@@ -1665,7 +1639,7 @@ mod tests {
                 r#"
 - item one|"#,
             );
-            state.smart_enter();
+            state.enter();
             assert_editor_eq(
                 &state,
                 r#"
@@ -1681,7 +1655,7 @@ mod tests {
                 r#"
 - item o|ne"#,
             );
-            state.smart_enter();
+            state.enter();
             assert_editor_eq(
                 &state,
                 r#"
@@ -1697,7 +1671,7 @@ mod tests {
                 r#"
 > quote one|"#,
             );
-            state.smart_enter();
+            state.enter();
             assert_editor_eq(
                 &state,
                 r#"
@@ -1710,7 +1684,7 @@ mod tests {
         #[test]
         fn enter_on_nested_blockquote_continues_at_same_level() {
             let mut state = editor_with_cursor("> > text|");
-            state.smart_enter();
+            state.enter();
             assert_editor_eq(&state, "> > text\n> >\n> > |");
         }
 
@@ -1718,51 +1692,51 @@ mod tests {
         fn enter_on_triple_nested_blockquote_continues_at_same_level() {
             // Verify arbitrary nesting works - code iterates through all markers
             let mut state = editor_with_cursor("> > > text|");
-            state.smart_enter();
+            state.enter();
             assert_editor_eq(&state, "> > > text\n> > >\n> > > |");
         }
 
         #[test]
         fn enter_on_list_inside_nested_blockquote() {
             let mut state = editor_with_cursor("> > - item|");
-            state.smart_enter();
+            state.enter();
             assert_editor_eq(&state, "> > - item\n> >\n> > - |");
         }
 
         #[test]
         fn enter_on_task_list_inside_nested_blockquote() {
             let mut state = editor_with_cursor("> > - [ ] task|");
-            state.smart_enter();
+            state.enter();
             assert_editor_eq(&state, "> > - [ ] task\n> >\n> > - [ ] |");
         }
 
         #[test]
         fn double_enter_on_list_inside_nested_blockquote_exits_all() {
             let mut state = editor_with_cursor("> > - item|");
-            state.smart_enter();
-            state.smart_enter();
+            state.enter();
+            state.enter();
             assert_editor_eq(&state, "> > - item\n\n|");
         }
 
         #[test]
         fn enter_on_blockquote_inside_list_nested_paragraph() {
             let mut state = editor_with_cursor("1. item\n\n   > quote|");
-            state.smart_enter();
+            state.enter();
             assert_editor_eq(&state, "1. item\n\n   > quote\n   >\n   > |");
         }
 
         #[test]
         fn double_enter_on_blockquote_inside_list_nested_paragraph_exits_all() {
             let mut state = editor_with_cursor("1. item\n\n   > quote|");
-            state.smart_enter();
-            state.smart_enter();
+            state.enter();
+            state.enter();
             assert_editor_eq(&state, "1. item\n\n   > quote\n\n|");
         }
 
         #[test]
         fn enter_on_list_inside_blockquote_inside_list_nested_paragraph() {
             let mut state = editor_with_cursor("1. item\n\n   > - nested list|");
-            state.smart_enter();
+            state.enter();
             assert_editor_eq(&state, "1. item\n\n   > - nested list\n   >\n   > - |");
         }
 
@@ -1776,7 +1750,7 @@ mod tests {
         #[test]
         fn enter_on_empty_nested_blockquote_exits_all() {
             let mut state = editor_with_cursor("> > text\n> >\n> > |");
-            state.smart_enter();
+            state.enter();
             assert_editor_eq(&state, "> > text\n\n|");
         }
 
@@ -1786,7 +1760,7 @@ mod tests {
                 r#"
 > - item|"#,
             );
-            state.smart_enter();
+            state.enter();
             assert_editor_eq(
                 &state,
                 r#"
@@ -1803,7 +1777,7 @@ mod tests {
                 r#"
 hello world|"#,
             );
-            state.smart_enter();
+            state.enter();
             assert_editor_eq(
                 &state,
                 r#"
@@ -1820,7 +1794,7 @@ hello world
                 r#"
 # Hello|"#,
             );
-            state.smart_enter();
+            state.enter();
             assert_editor_eq(
                 &state,
                 r#"
@@ -1839,7 +1813,7 @@ hello world
 
   paragraph|"#,
             );
-            state.smart_enter();
+            state.enter();
             assert_editor_eq(
                 &state,
                 r#"
@@ -1860,7 +1834,7 @@ hello world
 
    paragraph|"#,
             );
-            state.smart_enter();
+            state.enter();
             assert_editor_eq(
                 &state,
                 r#"
@@ -1883,7 +1857,7 @@ hello world
 
   |"#,
             );
-            state.smart_enter();
+            state.enter();
             assert_editor_eq(
                 &state,
                 r#"
@@ -1906,7 +1880,7 @@ hello world
 
    |"#,
             );
-            state.smart_enter();
+            state.enter();
             assert_editor_eq(
                 &state,
                 r#"
@@ -2087,7 +2061,7 @@ hello world
                 r#"
 *|"#,
             );
-            state.smart_enter();
+            state.enter();
             assert_editor_eq(&state, "* \n* |");
         }
 
@@ -2098,7 +2072,7 @@ hello world
                 r#"
 1.|"#,
             );
-            state.smart_enter();
+            state.enter();
             assert_editor_eq(&state, "1. \n1. |");
         }
 
@@ -2109,7 +2083,7 @@ hello world
 - item
 - |"#,
             );
-            state.smart_enter();
+            state.enter();
             assert_editor_eq(
                 &state,
                 r#"
@@ -2127,7 +2101,7 @@ hello world
 > - item
 > - |"#,
             );
-            state.smart_enter();
+            state.enter();
             assert_editor_eq(&state, "> - item\n\n|");
         }
 
@@ -2138,7 +2112,7 @@ hello world
 > quote
 > |"#,
             );
-            state.smart_enter();
+            state.enter();
             assert_editor_eq(
                 &state,
                 r#"
@@ -2152,9 +2126,9 @@ hello world
         fn double_enter_on_blockquote_exits_and_cleans_up() {
             // First enter creates paragraph break, second enter exits and removes empty continuation
             let mut state = editor_with_cursor("> hey|");
-            state.smart_enter();
+            state.enter();
             assert_editor_eq(&state, "> hey\n>\n> |");
-            state.smart_enter();
+            state.enter();
             assert_editor_eq(&state, "> hey\n\n|");
         }
 
@@ -2162,9 +2136,9 @@ hello world
         fn double_enter_on_list_exits_and_cleans_up() {
             // First enter creates new list item, second enter exits and removes empty item
             let mut state = editor_with_cursor("- hey|");
-            state.smart_enter();
+            state.enter();
             assert_editor_eq(&state, "- hey\n\n- |");
-            state.smart_enter();
+            state.enter();
             assert_editor_eq(&state, "- hey\n\n|");
         }
 
@@ -2172,9 +2146,9 @@ hello world
         fn double_enter_on_list_in_blockquote_exits_all() {
             // First enter creates new list item, second enter exits all containers
             let mut state = editor_with_cursor("> - item|");
-            state.smart_enter();
+            state.enter();
             assert_editor_eq(&state, "> - item\n>\n> - |");
-            state.smart_enter();
+            state.enter();
             assert_editor_eq(&state, "> - item\n\n|");
         }
 
@@ -2185,7 +2159,7 @@ hello world
                 r#"
 ```rust|"#,
             );
-            state.smart_enter();
+            state.enter();
             assert_editor_eq(
                 &state,
                 r#"
@@ -2205,7 +2179,7 @@ code
 ```|
 after"#,
             );
-            state.smart_enter();
+            state.enter();
             assert_editor_eq(
                 &state,
                 r#"
@@ -2227,7 +2201,7 @@ after"#,
 code
 ```|"#,
             );
-            state.smart_enter();
+            state.enter();
             assert_editor_eq(
                 &state,
                 r#"
@@ -2246,7 +2220,7 @@ code
                 r#"
 > ```rust|"#,
             );
-            state.smart_enter();
+            state.enter();
             assert_editor_eq(
                 &state,
                 r#"
@@ -2264,7 +2238,7 @@ code
 > code
 > ```|"#,
             );
-            state.smart_enter();
+            state.enter();
             assert_editor_eq(
                 &state,
                 r#"
@@ -2287,7 +2261,7 @@ let x = 1;|
 ```
 "#,
             );
-            state.smart_enter();
+            state.enter();
             assert_editor_eq(
                 &state,
                 r#"
@@ -2313,7 +2287,7 @@ let x = 1;
             println!("Lines: {:?}", state.buffer.lines());
             println!("cursor_in_code_block: {}", state.cursor_in_code_block());
 
-            state.smart_enter();
+            state.enter();
             assert_editor_eq(
                 &state,
                 r#"
@@ -2329,7 +2303,7 @@ let x = 1;
         // See: enter_on_closing_fence_in_nested_list_in_blockquote
     }
 
-    mod smart_tab_tests {
+    mod tab_tests {
         use super::*;
 
         #[test]
@@ -2339,7 +2313,7 @@ let x = 1;
 - item
 |"#,
             );
-            state.smart_tab();
+            state.tab();
             assert_editor_eq(
                 &state,
                 r#"
@@ -2355,8 +2329,8 @@ let x = 1;
 - item
 |"#,
             );
-            state.smart_tab();
-            state.smart_tab();
+            state.tab();
+            state.tab();
             assert_editor_eq(
                 &state,
                 r#"
@@ -2371,7 +2345,7 @@ let x = 1;
                 r#"
 - item|"#,
             );
-            state.smart_tab();
+            state.tab();
             assert_editor_eq(
                 &state,
                 r#"
@@ -2386,7 +2360,7 @@ let x = 1;
 > quote
 |"#,
             );
-            state.smart_tab();
+            state.tab();
             assert_editor_eq(
                 &state,
                 r#"
@@ -2402,7 +2376,7 @@ let x = 1;
 > - item
 |"#,
             );
-            state.smart_tab();
+            state.tab();
             assert_editor_eq(
                 &state,
                 r#"
@@ -2418,7 +2392,7 @@ let x = 1;
 - item
 text|"#,
             );
-            state.smart_tab();
+            state.tab();
             assert_editor_eq(
                 &state,
                 r#"
@@ -2434,7 +2408,7 @@ text|"#,
 - item one
 - |"#,
             );
-            state.smart_tab();
+            state.tab();
             assert_editor_eq(
                 &state,
                 r#"
@@ -2451,7 +2425,7 @@ text|"#,
 - item
   - nested|"#,
             );
-            state.smart_tab();
+            state.tab();
             // Should not change - already at max nesting
             assert_editor_eq(
                 &state,
@@ -2469,7 +2443,7 @@ text|"#,
 - item
 - sibling|"#,
             );
-            state.smart_tab();
+            state.tab();
             assert_editor_eq(
                 &state,
                 r#"
@@ -2477,7 +2451,7 @@ text|"#,
   - sibling|"#,
             );
             // But not twice
-            state.smart_tab();
+            state.tab();
             assert_editor_eq(
                 &state,
                 r#"
@@ -2495,7 +2469,7 @@ text|"#,
 
 - sibling|"#,
             );
-            state.smart_tab();
+            state.tab();
             assert_editor_eq(
                 &state,
                 r#"
@@ -2514,7 +2488,7 @@ text|"#,
 
 |"#,
             );
-            state.smart_tab();
+            state.tab();
             assert_editor_eq(
                 &state,
                 r#"
@@ -2534,7 +2508,7 @@ text|"#,
 
 |"#,
             );
-            state.smart_tab();
+            state.tab();
             assert_editor_eq(
                 &state,
                 r#"
@@ -2554,7 +2528,7 @@ text|"#,
 
 |"#,
             );
-            state.smart_tab();
+            state.tab();
             assert_editor_eq(
                 &state,
                 r#"
@@ -2571,7 +2545,7 @@ text|"#,
                 r#"
 > |"#,
             );
-            state.smart_tab();
+            state.tab();
             assert_editor_eq(
                 &state, r#"
 > |"#,
@@ -2584,7 +2558,7 @@ text|"#,
                 r#"
 > some text|"#,
             );
-            state.smart_tab();
+            state.tab();
             assert_editor_eq(
                 &state,
                 r#"
@@ -2656,7 +2630,7 @@ hello |world"#,
         }
     }
 
-    mod smart_shift_tab_tests {
+    mod shift_tab_tests {
         use super::*;
 
         #[test]
@@ -2665,7 +2639,7 @@ hello |world"#,
                 r#"
   - nested item|"#,
             );
-            state.smart_shift_tab();
+            state.shift_tab();
             assert_editor_eq(
                 &state,
                 r#"
@@ -2679,7 +2653,7 @@ hello |world"#,
                 r#"
 - item|"#,
             );
-            state.smart_shift_tab();
+            state.shift_tab();
             assert_editor_eq(
                 &state,
                 r#"
@@ -2693,7 +2667,7 @@ item|"#,
                 r#"
 > - item|"#,
             );
-            state.smart_shift_tab();
+            state.shift_tab();
             assert_editor_eq(
                 &state,
                 r#"
@@ -2707,7 +2681,7 @@ item|"#,
                 r#"
 > item|"#,
             );
-            state.smart_shift_tab();
+            state.shift_tab();
             assert_editor_eq(
                 &state,
                 r#"
@@ -2718,29 +2692,29 @@ item|"#,
         #[test]
         fn shift_tab_on_nested_blockquote_removes_one_level() {
             let mut state = editor_with_cursor("> > text|");
-            state.smart_shift_tab();
+            state.shift_tab();
             assert_editor_eq(&state, "> text|");
         }
 
         #[test]
         fn shift_tab_on_nested_blockquote_cursor_at_start() {
             let mut state = editor_with_cursor("> > |text");
-            state.smart_shift_tab();
+            state.shift_tab();
             assert_editor_eq(&state, "> |text");
         }
 
         #[test]
         fn shift_tab_on_list_inside_nested_blockquote_removes_list() {
             let mut state = editor_with_cursor("> > - item|");
-            state.smart_shift_tab();
+            state.shift_tab();
             assert_editor_eq(&state, "> > item|");
         }
 
         #[test]
         fn double_shift_tab_on_list_inside_nested_blockquote() {
             let mut state = editor_with_cursor("> > - item|");
-            state.smart_shift_tab();
-            state.smart_shift_tab();
+            state.shift_tab();
+            state.shift_tab();
             assert_editor_eq(&state, "> item|");
         }
 
@@ -2752,7 +2726,7 @@ item|"#,
 - item
 - |"#,
             );
-            state.smart_shift_tab();
+            state.shift_tab();
             assert_editor_eq(
                 &state,
                 r#"
@@ -2768,7 +2742,7 @@ item|"#,
                 r#"
 > - |"#,
             );
-            state.smart_shift_tab();
+            state.shift_tab();
             assert_editor_eq(
                 &state, r#"
 > |"#,
@@ -2783,7 +2757,7 @@ item|"#,
 - item
   - |"#,
             );
-            state.smart_shift_tab();
+            state.shift_tab();
             assert_editor_eq(
                 &state,
                 r#"
@@ -2798,7 +2772,7 @@ item|"#,
                 r#"
 plain text|"#,
             );
-            state.smart_shift_tab();
+            state.shift_tab();
             assert_editor_eq(
                 &state,
                 r#"
@@ -2900,7 +2874,7 @@ plain text|"#,
                 r#"
 - item one|"#,
             );
-            state.smart_enter();
+            state.enter();
             assert_editor_eq(
                 &state,
                 r#"
@@ -2926,7 +2900,7 @@ plain text|"#,
 - item one
 - |"#,
             );
-            state.smart_enter();
+            state.enter();
             assert_editor_eq(
                 &state,
                 r#"
@@ -3139,6 +3113,39 @@ plain text|"#,
 > - item|"#,
             );
         }
+
+        #[test]
+        fn backspace_joins_content_across_empty_line() {
+            // "line 1\n\n|line 3" -> backspace -> "line 1|line 3"
+            let mut state = editor_with_cursor("line 1\n\n|line 3");
+            state.delete_backward();
+            assert_editor_eq(&state, "line 1|line 3");
+        }
+
+        #[test]
+        fn backspace_joins_content_across_multiple_empty_lines() {
+            // "content\n\n\n\n|more" -> backspace -> "content|more"
+            let mut state = editor_with_cursor("content\n\n\n\n|more");
+            state.delete_backward();
+            assert_editor_eq(&state, "content|more");
+        }
+
+        #[test]
+        fn backspace_strips_markers_when_joining_to_previous_content() {
+            // "> - item\n\n|hey" -> backspace -> "> - item|hey"
+            let mut state = editor_with_cursor(
+                r#"
+> - item
+
+|hey"#,
+            );
+            state.delete_backward();
+            assert_editor_eq(
+                &state,
+                r#"
+> - item|hey"#,
+            );
+        }
     }
 
     mod cursor_movement_tests {
@@ -3159,10 +3166,64 @@ plain text|"#,
         }
 
         #[test]
+        fn move_left_skips_empty_line() {
+            let mut state = editor_with_cursor("line 1\n\n|line 3");
+            state.move_left();
+            assert_editor_eq(&state, "line 1|\n\nline 3");
+        }
+
+        #[test]
+        fn move_left_skips_multiple_empty_lines() {
+            let mut state = editor_with_cursor("content\n\n\n\n|more");
+            state.move_left();
+            assert_editor_eq(&state, "content|\n\n\n\nmore");
+        }
+
+        #[test]
+        fn move_left_skips_empty_blockquote_line() {
+            // "> " is an empty line (marker only, no content)
+            let mut state = editor_with_cursor("> hey\n> \n|> > hey");
+            state.move_left();
+            assert_editor_eq(&state, "> hey|\n> \n> > hey");
+        }
+
+        #[test]
+        fn move_left_from_inside_empty_blockquote_line() {
+            // When cursor is inside an empty blockquote line (on the > or space),
+            // moving left should skip to the previous content line
+            let mut state = editor_with_cursor("> hey\n>| \n> > hey");
+            state.move_left();
+            assert_editor_eq(&state, "> hey|\n> \n> > hey");
+        }
+
+        #[test]
+        fn move_right_from_inside_empty_blockquote_line() {
+            // When cursor is inside an empty blockquote line,
+            // moving right should skip to the next content line
+            let mut state = editor_with_cursor("> hey\n>| \n> > hey");
+            state.move_right();
+            assert_editor_eq(&state, "> hey\n> \n|> > hey");
+        }
+
+        #[test]
         fn move_right() {
             let mut state = editor_with_cursor("he|llo");
             state.move_right();
             assert_editor_eq(&state, "hel|lo");
+        }
+
+        #[test]
+        fn move_right_skips_empty_line() {
+            let mut state = editor_with_cursor("line 1|\n\nline 3");
+            state.move_right();
+            assert_editor_eq(&state, "line 1\n\n|line 3");
+        }
+
+        #[test]
+        fn move_right_skips_multiple_empty_lines() {
+            let mut state = editor_with_cursor("content|\n\n\n\nmore");
+            state.move_right();
+            assert_editor_eq(&state, "content\n\n\n\n|more");
         }
 
         #[test]
@@ -3205,6 +3266,50 @@ plain text|"#,
             let mut state = editor_with_cursor("short\nlonger line|");
             state.move_up();
             assert_editor_eq(&state, "short|\nlonger line");
+        }
+
+        #[test]
+        fn move_up_skips_empty_line() {
+            let mut state = editor_with_cursor("line one\n\nline |three");
+            state.move_up();
+            assert_editor_eq(&state, "line |one\n\nline three");
+        }
+
+        #[test]
+        fn move_up_skips_multiple_empty_lines() {
+            let mut state = editor_with_cursor("line one\n\n\n\nline |five");
+            state.move_up();
+            assert_editor_eq(&state, "line |one\n\n\n\nline five");
+        }
+
+        #[test]
+        fn move_up_stays_when_only_empty_above() {
+            let mut state = editor_with_cursor("\n\nline |three");
+            state.move_up();
+            // Should stay on current line since lines above are all empty
+            assert_editor_eq(&state, "\n\nline |three");
+        }
+
+        #[test]
+        fn move_down_skips_empty_line() {
+            let mut state = editor_with_cursor("line |one\n\nline three");
+            state.move_down();
+            assert_editor_eq(&state, "line one\n\nline |three");
+        }
+
+        #[test]
+        fn move_down_skips_multiple_empty_lines() {
+            let mut state = editor_with_cursor("line |one\n\n\n\nline five");
+            state.move_down();
+            assert_editor_eq(&state, "line one\n\n\n\nline |five");
+        }
+
+        #[test]
+        fn move_down_stays_when_only_empty_below() {
+            let mut state = editor_with_cursor("line |one\n\n\n");
+            state.move_down();
+            // Should stay on current line since lines below are all empty
+            assert_editor_eq(&state, "line |one\n\n\n");
         }
 
         #[test]

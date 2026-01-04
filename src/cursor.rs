@@ -28,29 +28,84 @@ impl Cursor {
         }
     }
 
+    /// Move cursor left, skipping over markers and empty lines.
     pub fn move_left(&self, buffer: &Buffer) -> Self {
         if self.offset == 0 {
             return *self;
         }
 
-        // Convert byte offset to char index, move back one char, convert back to bytes
+        let current_line_idx = buffer.byte_to_line(self.offset);
+
+        // If we're on an empty line, skip to the previous content line
+        if buffer.is_line_empty(current_line_idx) {
+            return self.skip_to_prev_content_line(buffer, current_line_idx);
+        }
+
+        // Check if we're within a marker range - if so, skip to previous line
+        if let Some(line) = buffer.lines().get(current_line_idx) {
+            if let Some(marker_range) = line.marker_range() {
+                if self.offset <= marker_range.end {
+                    // We're in the marker area - skip to previous content line
+                    if current_line_idx > 0 {
+                        return self.skip_to_prev_content_line(buffer, current_line_idx - 1);
+                    } else {
+                        // On first line, stay at marker end
+                        return Self {
+                            offset: marker_range.end,
+                        };
+                    }
+                }
+            }
+        }
+
+        // Normal character movement
         let rope = buffer.rope();
         let char_idx = rope.byte_to_char(self.offset);
         if char_idx == 0 {
             return *self;
         }
         let new_offset = rope.char_to_byte(char_idx - 1);
+        let new_line_idx = buffer.byte_to_line(new_offset);
+
+        // If we crossed into an empty line, skip it
+        if buffer.is_line_empty(new_line_idx) {
+            return self.skip_to_prev_content_line(buffer, new_line_idx);
+        }
 
         Self { offset: new_offset }
     }
 
+    /// Move cursor right, skipping over markers and empty lines.
     pub fn move_right(&self, buffer: &Buffer) -> Self {
         let len = buffer.len_bytes();
         if self.offset >= len {
             return *self;
         }
 
-        // Convert byte offset to char index, move forward one char, convert back to bytes
+        let current_line_idx = buffer.byte_to_line(self.offset);
+
+        // If we're on an empty line, skip to the next content line
+        if buffer.is_line_empty(current_line_idx) {
+            return self.skip_to_next_content_line(buffer, current_line_idx);
+        }
+
+        // Check if we're at line start or within a marker - skip to end of marker
+        if let Some(line) = buffer.lines().get(current_line_idx) {
+            if let Some(marker_range) = line.marker_range() {
+                if self.offset == line.range.start {
+                    return Self {
+                        offset: marker_range.end,
+                    };
+                }
+                if self.offset > marker_range.start && self.offset < marker_range.end {
+                    return Self {
+                        offset: marker_range.end,
+                    };
+                }
+            }
+        }
+
+        // Normal character movement
         let rope = buffer.rope();
         let char_idx = rope.byte_to_char(self.offset);
         let char_count = rope.len_chars();
@@ -58,8 +113,53 @@ impl Cursor {
             return *self;
         }
         let new_offset = rope.char_to_byte(char_idx + 1);
+        let new_line_idx = buffer.byte_to_line(new_offset);
+
+        // If we crossed into an empty line, skip it
+        if buffer.is_line_empty(new_line_idx) {
+            return self.skip_to_next_content_line(buffer, new_line_idx);
+        }
 
         Self { offset: new_offset }
+    }
+
+    /// Helper: skip backwards to find the previous content line and position at its end.
+    fn skip_to_prev_content_line(&self, buffer: &Buffer, start_line: usize) -> Self {
+        let mut target_line = start_line;
+        while target_line > 0 && buffer.is_line_empty(target_line) {
+            target_line -= 1;
+        }
+
+        if !buffer.is_line_empty(target_line) {
+            let target_range = buffer.line_byte_range(target_line);
+            let line_text = buffer.slice_cow(target_range.clone());
+            let trimmed_len = line_text.trim_end().len();
+            return Self {
+                offset: target_range.start + trimmed_len,
+            };
+        }
+
+        // All lines are empty, stay put
+        *self
+    }
+
+    /// Helper: skip forwards to find the next content line and position at its start.
+    fn skip_to_next_content_line(&self, buffer: &Buffer, start_line: usize) -> Self {
+        let line_count = buffer.line_count();
+        let mut target_line = start_line;
+        while target_line < line_count - 1 && buffer.is_line_empty(target_line) {
+            target_line += 1;
+        }
+
+        if !buffer.is_line_empty(target_line) {
+            let target_range = buffer.line_byte_range(target_line);
+            return Self {
+                offset: target_range.start,
+            };
+        }
+
+        // All lines are empty, stay put
+        *self
     }
 
     pub fn move_up(&self, buffer: &Buffer) -> Self {
@@ -69,20 +169,30 @@ impl Cursor {
             return Self::start();
         }
 
+        // Find previous non-empty line
+        let mut target_line = current_line - 1;
+        while target_line > 0 && buffer.is_line_empty(target_line) {
+            target_line -= 1;
+        }
+
+        // If target is still empty (line 0 is empty), stay on current line
+        if buffer.is_line_empty(target_line) {
+            return self.clone();
+        }
+
         // Get column offset within current line
         let line_start = buffer.line_to_byte(current_line);
         let column = self.offset - line_start;
 
-        // Move to previous line, same column (or end of line if shorter)
-        let prev_line = current_line - 1;
-        let prev_line_range = buffer.line_byte_range(prev_line);
-        let prev_line_start = prev_line_range.start;
+        // Move to target line, same column (or end of line if shorter)
+        let target_line_range = buffer.line_byte_range(target_line);
+        let target_line_start = target_line_range.start;
         // Subtract 1 for newline if not the last line
-        let prev_line_len = prev_line_range.len().saturating_sub(1);
+        let target_line_len = target_line_range.len().saturating_sub(1);
 
-        let new_column = column.min(prev_line_len);
+        let new_column = column.min(target_line_len);
         Self {
-            offset: prev_line_start + new_column,
+            offset: target_line_start + new_column,
         }
     }
 
@@ -95,25 +205,35 @@ impl Cursor {
             return Self::end(buffer);
         }
 
+        // Find next non-empty line
+        let mut target_line = current_line + 1;
+        while target_line < line_count - 1 && buffer.is_line_empty(target_line) {
+            target_line += 1;
+        }
+
+        // If target is still empty (last line is empty), stay on current line
+        if buffer.is_line_empty(target_line) {
+            return self.clone();
+        }
+
         // Get column offset within current line
         let line_start = buffer.line_to_byte(current_line);
         let column = self.offset - line_start;
 
-        // Move to next line, same column (or end of line if shorter)
-        let next_line = current_line + 1;
-        let next_line_range = buffer.line_byte_range(next_line);
-        let next_line_start = next_line_range.start;
+        // Move to target line, same column (or end of line if shorter)
+        let target_line_range = buffer.line_byte_range(target_line);
+        let target_line_start = target_line_range.start;
         // Subtract 1 for newline if not the last line
-        let is_last_line = next_line + 1 >= buffer.line_count();
-        let next_line_len = if is_last_line {
-            next_line_range.len()
+        let is_last_line = target_line + 1 >= buffer.line_count();
+        let target_line_len = if is_last_line {
+            target_line_range.len()
         } else {
-            next_line_range.len().saturating_sub(1)
+            target_line_range.len().saturating_sub(1)
         };
 
-        let new_column = column.min(next_line_len);
+        let new_column = column.min(target_line_len);
         Self {
-            offset: next_line_start + new_column,
+            offset: target_line_start + new_column,
         }
     }
 

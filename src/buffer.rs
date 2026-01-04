@@ -266,6 +266,29 @@ impl BufferContent {
         self.text.len_lines()
     }
 
+    /// Returns true if the line has no content (only markers or whitespace).
+    /// Code fences are always considered content.
+    pub fn is_line_empty(&self, line_idx: usize) -> bool {
+        if line_idx >= self.lines.len() {
+            return true;
+        }
+        let line = &self.lines[line_idx];
+
+        // Code fences are always content
+        if line.is_fence() {
+            return false;
+        }
+
+        let content_start = line
+            .marker_range()
+            .map(|r| r.end)
+            .unwrap_or(line.range.start);
+
+        self.slice_cow(content_start..line.range.end)
+            .trim()
+            .is_empty()
+    }
+
     #[cfg(test)]
     pub fn line(&self, line_idx: usize) -> String {
         let line = self.text.line(line_idx);
@@ -1218,6 +1241,15 @@ mod tests {
                 .iter()
                 .any(|m| matches!(m.kind, MarkerKind::BlockQuote))
         );
+    }
+
+    #[test]
+    fn test_is_line_empty_blockquote_only() {
+        // A line with just "> " (blockquote marker, no content) should be empty
+        let buf: Buffer = "> hey\n> \n> > hey".parse().unwrap();
+        assert!(!buf.is_line_empty(0)); // "> hey" has content
+        assert!(buf.is_line_empty(1)); // "> " is empty (marker only)
+        assert!(!buf.is_line_empty(2)); // "> > hey" has content
     }
 
     #[test]
