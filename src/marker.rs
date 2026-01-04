@@ -15,6 +15,13 @@ pub enum UnorderedMarker {
     Plus,  // +
 }
 
+/// The ordered list marker style.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum OrderedMarker {
+    Dot,         // 1.
+    Parenthesis, // 1)
+}
+
 /// The type of marker on a line.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MarkerKind {
@@ -23,6 +30,8 @@ pub enum MarkerKind {
         ordered: bool,
         #[allow(dead_code)]
         unordered_marker: Option<UnorderedMarker>,
+        #[allow(dead_code)]
+        ordered_marker: Option<OrderedMarker>,
     },
     /// A task list item: `- [ ]` or `- [x]` (combines list marker + checkbox)
     TaskList {
@@ -347,6 +356,7 @@ impl MarkerKind {
             MarkerKind::ListItem {
                 ordered: false,
                 unordered_marker,
+                ..
             } => unordered_marker.map_or("• ", |m| m.bullet()),
             MarkerKind::ListItem { ordered: true, .. } => "",
             MarkerKind::TaskList {
@@ -545,6 +555,7 @@ pub fn markers_at(nodes: &[Node], rope: &Rope, line_start: usize, line_end: usiz
                         kind: MarkerKind::ListItem {
                             ordered: false,
                             unordered_marker,
+                            ordered_marker: None,
                         },
                         range: marker_start..end,
                     });
@@ -572,10 +583,17 @@ pub fn markers_at(nodes: &[Node], rope: &Rope, line_start: usize, line_end: usiz
                         range: start..marker_start,
                     });
                 }
+                // Determine which ordered marker style
+                let ordered_marker = Some(match kind {
+                    "list_marker_dot" => OrderedMarker::Dot,
+                    "list_marker_parenthesis" => OrderedMarker::Parenthesis,
+                    _ => unreachable!(),
+                });
                 markers.push(Marker {
                     kind: MarkerKind::ListItem {
                         ordered: true,
                         unordered_marker: None,
+                        ordered_marker,
                     },
                     range: marker_start..end,
                 });
@@ -1215,6 +1233,7 @@ mod tests {
                 kind: MarkerKind::ListItem {
                     ordered: false,
                     unordered_marker: Some(UnorderedMarker::Minus),
+                    ordered_marker: None,
                 },
                 range: 0..2,
             }],
@@ -1232,6 +1251,7 @@ mod tests {
                     kind: MarkerKind::ListItem {
                         ordered: false,
                         unordered_marker: Some(UnorderedMarker::Minus),
+                        ordered_marker: None,
                     },
                     range: 2..4,
                 },
@@ -1340,6 +1360,7 @@ mod tests {
                 kind: MarkerKind::ListItem {
                     ordered: false,
                     unordered_marker: Some(UnorderedMarker::Minus),
+                    ordered_marker: None,
                 },
                 range: 0..2,
             }],
@@ -1379,6 +1400,7 @@ mod tests {
                 kind: MarkerKind::ListItem {
                     ordered: false,
                     unordered_marker: Some(UnorderedMarker::Minus),
+                    ordered_marker: None,
                 },
                 range: 0..2,
             }],
@@ -1395,6 +1417,7 @@ mod tests {
                 kind: MarkerKind::ListItem {
                     ordered: false,
                     unordered_marker: Some(UnorderedMarker::Minus),
+                    ordered_marker: None,
                 },
                 range: 2..4,
             }],
@@ -1411,6 +1434,7 @@ mod tests {
                 kind: MarkerKind::ListItem {
                     ordered: false,
                     unordered_marker: Some(UnorderedMarker::Minus),
+                    ordered_marker: None,
                 },
                 range: 0..2,
             }],
@@ -1813,5 +1837,30 @@ mod tests {
             "Expected either 1 unified list or 3 separate lists, got {}",
             list_count
         );
+    }
+
+    #[test]
+    fn test_ordered_list_marker_styles() {
+        // Test whether tree-sitter distinguishes 1. vs 1) ordered list styles
+        let buf_dot: Buffer = "1. item\n".parse().unwrap();
+        let buf_paren: Buffer = "1) item\n".parse().unwrap();
+
+        let text_dot = buf_dot.text();
+        let tree_dot = buf_dot.tree().unwrap();
+        let root_dot = tree_dot.block_tree().root_node();
+
+        let text_paren = buf_paren.text();
+        let tree_paren = buf_paren.tree().unwrap();
+        let root_paren = tree_paren.block_tree().root_node();
+
+        println!("\n=== Ordered list with dot ===");
+        print_tree(&root_dot, &text_dot, 0);
+
+        println!("\n=== Ordered list with paren ===");
+        print_tree(&root_paren, &text_paren, 0);
+
+        // Check that both are recognized as ordered lists
+        assert!(is_ordered_list(&buf_dot.lines()[0].markers[0].kind));
+        assert!(is_ordered_list(&buf_paren.lines()[0].markers[0].kind));
     }
 }

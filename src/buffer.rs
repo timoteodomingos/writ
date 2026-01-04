@@ -406,8 +406,12 @@ impl BufferContent {
             return false;
         }
 
-        for (marker_range, correct_number) in corrections.into_iter().rev() {
-            let new_marker = format!("{}. ", correct_number);
+        for (marker_range, correct_number, is_parenthesis) in corrections.into_iter().rev() {
+            let new_marker = if is_parenthesis {
+                format!("{}) ", correct_number)
+            } else {
+                format!("{}. ", correct_number)
+            };
 
             let char_start = self.text.byte_to_char(marker_range.start);
             let char_end = self.text.byte_to_char(marker_range.end);
@@ -421,7 +425,11 @@ impl BufferContent {
         true
     }
 
-    fn find_ordered_list_corrections(&self, root: tree_sitter::Node) -> Vec<(Range<usize>, usize)> {
+    /// Returns corrections as (range, correct_number, is_parenthesis_style)
+    fn find_ordered_list_corrections(
+        &self,
+        root: tree_sitter::Node,
+    ) -> Vec<(Range<usize>, usize, bool)> {
         let mut corrections = Vec::new();
         self.collect_list_corrections(&root, &mut corrections);
         corrections
@@ -430,7 +438,7 @@ impl BufferContent {
     fn collect_list_corrections(
         &self,
         node: &tree_sitter::Node,
-        corrections: &mut Vec<(Range<usize>, usize)>,
+        corrections: &mut Vec<(Range<usize>, usize, bool)>,
     ) {
         if node.kind() == "list" {
             let is_ordered = self.is_ordered_list(node);
@@ -440,11 +448,11 @@ impl BufferContent {
                 for i in 0..node.child_count() {
                     if let Some(child) = node.child(i as u32)
                         && child.kind() == "list_item"
-                        && let Some((marker_range, current_number)) =
+                        && let Some((marker_range, current_number, is_parenthesis)) =
                             self.extract_ordered_marker(&child)
                     {
                         if current_number != item_number {
-                            corrections.push((marker_range, item_number));
+                            corrections.push((marker_range, item_number, is_parenthesis));
                         }
                         item_number += 1;
                     }
@@ -467,7 +475,8 @@ impl BufferContent {
                 for j in 0..child.child_count() {
                     if let Some(marker) = child.child(j as u32) {
                         return marker.kind().starts_with("list_marker_decimal")
-                            || marker.kind() == "list_marker_dot";
+                            || marker.kind() == "list_marker_dot"
+                            || marker.kind() == "list_marker_parenthesis";
                     }
                 }
             }
@@ -475,17 +484,20 @@ impl BufferContent {
         false
     }
 
+    /// Extract ordered list marker info: (range, current_number, is_parenthesis_style)
     fn extract_ordered_marker(
         &self,
         list_item: &tree_sitter::Node,
-    ) -> Option<(Range<usize>, usize)> {
+    ) -> Option<(Range<usize>, usize, bool)> {
         for i in 0..list_item.child_count() {
             if let Some(marker) = list_item.child(i as u32)
                 && (marker.kind().starts_with("list_marker_decimal")
-                    || marker.kind() == "list_marker_dot")
+                    || marker.kind() == "list_marker_dot"
+                    || marker.kind() == "list_marker_parenthesis")
             {
                 let start = marker.start_byte();
                 let end = marker.end_byte();
+                let is_parenthesis = marker.kind() == "list_marker_parenthesis";
 
                 // Extract digits from the marker using rope slice
                 let char_start = self.text.byte_to_char(start);
@@ -499,7 +511,7 @@ impl BufferContent {
                     .parse()
                     .unwrap_or(1);
 
-                return Some((start..end, number));
+                return Some((start..end, number, is_parenthesis));
             }
         }
         None
@@ -1082,6 +1094,19 @@ mod tests {
     fn test_ordered_list_correct_numbers_unchanged() {
         let buf: Buffer = "1. First\n2. Second\n3. Third\n".parse().unwrap();
         assert_eq!(buf.text(), "1. First\n2. Second\n3. Third\n");
+    }
+
+    #[test]
+    fn test_ordered_list_parenthesis_normalization() {
+        // Parenthesis style should be preserved when renumbering
+        let buf: Buffer = "1) First\n5) Second\n9) Third\n".parse().unwrap();
+        assert_eq!(buf.text(), "1) First\n2) Second\n3) Third\n");
+    }
+
+    #[test]
+    fn test_ordered_list_parenthesis_correct_numbers_unchanged() {
+        let buf: Buffer = "1) First\n2) Second\n3) Third\n".parse().unwrap();
+        assert_eq!(buf.text(), "1) First\n2) Second\n3) Third\n");
     }
 
     #[test]
