@@ -149,10 +149,7 @@ impl<'a> Line<'a> {
     }
 
     fn standalone_image_url(&self) -> Option<&str> {
-        if self.cursor_on_line() || self.selection_on_line() {
-            return None;
-        }
-
+        // Always show image, even when cursor is on line
         if !self.line.markers.is_empty() {
             return None;
         }
@@ -716,9 +713,32 @@ impl IntoElement for Line<'_> {
         let line_number = self.line.line_number;
         let line_range = self.line.range.clone();
 
-        if let Some(url) = self.standalone_image_url() {
+        // Check if this is a standalone image line (but cursor not on it)
+        let standalone_image = self.standalone_image_url().map(|url| {
             let source = self.resolve_image_source(url);
-            return line_base(line_number).child(img(source).max_w_full());
+            let on_click = self.on_click.clone();
+            let line_end = line_range.end;
+            (source, on_click, line_end)
+        });
+
+        // If standalone image and cursor is NOT on line, just show the image
+        if let Some((source, on_click, line_end)) = standalone_image.clone() {
+            if !self.cursor_on_line() && !self.selection_on_line() {
+                return line_base(line_number).child(img(source).max_w_full().on_mouse_down(
+                    MouseButton::Left,
+                    move |event: &MouseDownEvent, window, cx| {
+                        if let Some(ref on_click) = on_click {
+                            on_click(
+                                line_end,
+                                event.modifiers.shift,
+                                event.click_count,
+                                window,
+                                cx,
+                            );
+                        }
+                    },
+                ));
+            }
         }
 
         let (display_text, mut runs) = self.build_styled_content();
@@ -1045,6 +1065,17 @@ impl IntoElement for Line<'_> {
                     on_hover(hovering_checkbox, hovering_link_region, window, cx);
                 }
             });
+        }
+
+        // If cursor is on a standalone image line, show image below the text
+        if let Some((source, _, _)) = standalone_image {
+            return div()
+                .id(line_number)
+                .flex()
+                .flex_col()
+                .child(line_div)
+                .child(img(source).max_w_full())
+                .anchor_scroll(self.scroll_anchor);
         }
 
         line_div.anchor_scroll(self.scroll_anchor)
