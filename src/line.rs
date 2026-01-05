@@ -180,13 +180,16 @@ impl<'a> Line<'a> {
         let range = &self.line.range;
 
         if let Some(marker_range) = self.line.marker_range() {
-            if self
+            // For ordered lists, we want to show the number (e.g., "1. ") but still hide
+            // other markers like blockquotes. Find where the ordered list marker starts.
+            if let Some(ordered_marker) = self
                 .line
                 .markers
                 .iter()
-                .any(|m| matches!(m.kind, MarkerKind::ListItem { ordered: true, .. }))
+                .find(|m| matches!(m.kind, MarkerKind::ListItem { ordered: true, .. }))
             {
-                range.clone()
+                // Start from the ordered list marker, not the full line
+                ordered_marker.range.start..range.end
             } else if let Some(fence_marker) = self
                 .line
                 .markers
