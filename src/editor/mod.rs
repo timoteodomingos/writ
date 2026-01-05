@@ -969,7 +969,7 @@ impl Editor {
         }
     }
 
-    fn perform_pending_scroll(&mut self, margin: gpui::Pixels) {
+    fn perform_pending_scroll(&mut self) {
         if !self.scroll_to_cursor_pending {
             return;
         }
@@ -978,33 +978,9 @@ impl Editor {
             return;
         };
 
-        let Some(item_bounds) = self.scroll_handle.bounds_for_item(child_ix) else {
-            return;
-        };
-
+        // Use scroll_to_item which defers scrolling to prepaint when bounds are known
+        self.scroll_handle.scroll_to_item(child_ix);
         self.scroll_to_cursor_pending = false;
-
-        let viewport = self.scroll_handle.bounds();
-        let offset = self.scroll_handle.offset();
-
-        let item_top = item_bounds.origin.y + offset.y;
-        let item_bottom = item_top + item_bounds.size.height;
-
-        let visible_top = viewport.origin.y + margin;
-        let visible_bottom = viewport.origin.y + viewport.size.height - margin;
-
-        if item_top < visible_top {
-            let new_offset_y = viewport.origin.y - item_bounds.origin.y + margin;
-            self.scroll_handle
-                .set_offset(gpui::point(offset.x, new_offset_y));
-        } else if item_bottom > visible_bottom {
-            let new_offset_y = viewport.origin.y + viewport.size.height
-                - item_bounds.origin.y
-                - item_bounds.size.height
-                - margin;
-            self.scroll_handle
-                .set_offset(gpui::point(offset.x, new_offset_y));
-        }
     }
 
     fn request_scroll_to_cursor(&mut self) {
@@ -1603,8 +1579,7 @@ impl Render for Editor {
             self.request_scroll_to_cursor();
         }
 
-        let margin = self.config.padding_y.to_pixels(window.rem_size());
-        self.perform_pending_scroll(margin);
+        self.perform_pending_scroll();
 
         let top_spacer = div().h(self.config.padding_y);
         let bottom_spacer = div().h(self.config.padding_y);
