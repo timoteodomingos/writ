@@ -533,16 +533,29 @@ pub fn markers_at(nodes: &[Node], rope: &Rope, line_start: usize, line_end: usiz
                 }
                 let content = rope_slice_cow(rope, start, end);
                 if content.contains('>') {
-                    // Include trailing space after > if present
-                    let range_end = if rope.get_byte(end) == Some(b' ') {
-                        end + 1
-                    } else {
-                        end
-                    };
-                    markers.push(Marker {
-                        kind: MarkerKind::BlockQuote,
-                        range: start..range_end,
-                    });
+                    // Split nested blockquote continuations into separate markers
+                    // e.g., "> > " should become two BlockQuote markers
+                    // Markers must be in innermost-to-outermost order, so collect
+                    // and reverse before adding.
+                    let mut blockquote_markers = Vec::new();
+                    for (i, c) in content.char_indices() {
+                        if c == '>' {
+                            let gt_pos = start + i;
+                            // Check for trailing space after >
+                            let range_end = if rope.get_byte(gt_pos + 1) == Some(b' ') {
+                                gt_pos + 2
+                            } else {
+                                gt_pos + 1
+                            };
+                            blockquote_markers.push(Marker {
+                                kind: MarkerKind::BlockQuote,
+                                range: gt_pos..range_end,
+                            });
+                        }
+                    }
+                    // Reverse so innermost (last >) is first, outermost (first >) is last
+                    blockquote_markers.reverse();
+                    markers.extend(blockquote_markers);
                 } else if !content.is_empty() && content.chars().all(|c| c.is_whitespace()) {
                     markers.push(Marker {
                         kind: MarkerKind::Indent,
