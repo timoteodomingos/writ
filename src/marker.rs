@@ -192,6 +192,39 @@ impl LineMarkers {
         self.markers.iter().any(|m| m.kind.is_container())
     }
 
+    /// Returns true if this line has a list marker (ordered, unordered, or task list).
+    pub fn has_list_marker(&self) -> bool {
+        self.markers.iter().any(|m| {
+            matches!(
+                m.kind,
+                MarkerKind::ListItem { .. } | MarkerKind::TaskList { .. }
+            )
+        })
+    }
+
+    /// Returns the list marker kind if present (for comparing list types).
+    /// Returns a tuple of (is_ordered, is_task_list) to distinguish list types.
+    pub fn list_marker_kind(&self) -> Option<(bool, bool)> {
+        for m in &self.markers {
+            match &m.kind {
+                MarkerKind::ListItem { ordered, .. } => return Some((*ordered, false)),
+                MarkerKind::TaskList { .. } => return Some((false, true)),
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// Returns the container markers (blockquotes, indents) without the list marker.
+    /// Used for comparing if two list items are in the same container context.
+    pub fn container_signature(&self) -> Vec<&MarkerKind> {
+        self.markers
+            .iter()
+            .filter(|m| matches!(m.kind, MarkerKind::BlockQuote | MarkerKind::Indent))
+            .map(|m| &m.kind)
+            .collect()
+    }
+
     /// Returns the checkbox state if this line has a task list marker.
     pub fn checkbox(&self) -> Option<bool> {
         for m in &self.markers {

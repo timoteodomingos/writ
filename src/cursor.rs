@@ -153,7 +153,16 @@ impl Cursor {
             };
         }
 
-        // All lines are empty, stay put
+        // If we're on the last line (document tail), allow landing there
+        if target_line == line_count - 1
+            && let Some(line) = buffer.lines().get(target_line)
+        {
+            return Self {
+                offset: line.content_start(),
+            };
+        }
+
+        // All lines are empty and not at end, stay put
         *self
     }
 
@@ -206,9 +215,13 @@ impl Cursor {
             target_line += 1;
         }
 
-        // If target is still empty (last line is empty), stay on current line
+        // If target is still empty, check if it's the last line (document tail)
+        // The end of the document is always a valid place to land
         if buffer.is_line_empty(target_line) {
-            return *self;
+            let is_last_line = target_line == line_count - 1;
+            if !is_last_line {
+                return *self;
+            }
         }
 
         // Get column offset within current line

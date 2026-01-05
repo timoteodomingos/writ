@@ -284,6 +284,60 @@ impl BufferContent {
             .is_empty()
     }
 
+    /// Check if two lines are list items that are siblings in the same list container.
+    /// This traverses the parse tree to find if both lines belong to list_item nodes
+    /// that share the same parent list node.
+    pub fn are_sibling_list_items(&self, line1_idx: usize, line2_idx: usize) -> bool {
+        let Some(tree) = &self.tree else {
+            return false;
+        };
+
+        let lines = &self.lines;
+        if line1_idx >= lines.len() || line2_idx >= lines.len() {
+            return false;
+        }
+
+        // Use content_start to get position after markers (inside the list_item content)
+        let line1_pos = lines[line1_idx].content_start();
+        let line2_pos = lines[line2_idx].content_start();
+
+        let root = tree.block_tree().root_node();
+
+        // Find the list_item node containing each position
+        let list_item1 = Self::find_ancestor_of_kind(root, line1_pos, "list_item");
+        let list_item2 = Self::find_ancestor_of_kind(root, line2_pos, "list_item");
+
+        match (list_item1, list_item2) {
+            (Some(item1), Some(item2)) => {
+                // They must be different list items
+                if item1.id() == item2.id() {
+                    return false;
+                }
+                // Check if they have the same parent (the list node)
+                match (item1.parent(), item2.parent()) {
+                    (Some(parent1), Some(parent2)) => parent1.id() == parent2.id(),
+                    _ => false,
+                }
+            }
+            _ => false,
+        }
+    }
+
+    /// Find the nearest ancestor node of a given kind containing the byte position.
+    fn find_ancestor_of_kind<'a>(
+        root: tree_sitter::Node<'a>,
+        byte_pos: usize,
+        kind: &str,
+    ) -> Option<tree_sitter::Node<'a>> {
+        let mut node = root.descendant_for_byte_range(byte_pos, byte_pos)?;
+        loop {
+            if node.kind() == kind {
+                return Some(node);
+            }
+            node = node.parent()?;
+        }
+    }
+
     #[cfg(test)]
     pub fn line(&self, line_idx: usize) -> String {
         let line = self.text.line(line_idx);
@@ -1558,5 +1612,53 @@ mod tests {
         let changed = buf.normalize_document();
         assert!(!changed);
         assert_eq!(buf.text(), "> text\n- [x] item");
+    }
+}
+
+#[cfg(test)]
+mod sibling_tests {
+    use super::*;
+
+    #[test]
+    fn test_blockquote_list_siblings() {
+        // List items in blockquote with empty lines between them
+        let text = "> - hey\n>\n> - hey\n>\n> -";
+        let buffer: Buffer = text.parse().unwrap();
+
+        // Lines 0 and 2 are sibling list items
+        assert!(buffer.are_sibling_list_items(0, 2));
+        // Line 4 is not a list item (just `> -` without space)
+        assert!(!buffer.are_sibling_list_items(2, 4));
+    }
+
+    #[test]
+    fn test_simple_list_siblings() {
+        let text = "- item1\n\n- item2\n\n- item3";
+        let buffer: Buffer = text.parse().unwrap();
+
+        // All list items are siblings
+        assert!(buffer.are_sibling_list_items(0, 2));
+        assert!(buffer.are_sibling_list_items(2, 4));
+        assert!(buffer.are_sibling_list_items(0, 4));
+    }
+
+    #[test]
+    fn test_nested_list_not_siblings() {
+        let text = "- item1\n\n  - nested\n\n- item2";
+        let buffer: Buffer = text.parse().unwrap();
+
+        // item1 and nested are NOT siblings (nested is in a sublist)
+        assert!(!buffer.are_sibling_list_items(0, 2));
+        // item1 and item2 ARE siblings
+        assert!(buffer.are_sibling_list_items(0, 4));
+    }
+
+    #[test]
+    fn test_different_lists_not_siblings() {
+        let text = "- item1\n\nsome text\n\n- item2";
+        let buffer: Buffer = text.parse().unwrap();
+
+        // These are in different lists (separated by paragraph)
+        assert!(!buffer.are_sibling_list_items(0, 4));
     }
 }

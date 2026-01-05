@@ -1517,6 +1517,36 @@ impl Render for Editor {
         let cursor_line = self.state.buffer.byte_to_line(cursor_offset);
         let cursor_child_index = Some(cursor_line + 1);
 
+        // Determine which lines should be collapsed (hidden empty lines between list items)
+        let is_collapsed: Vec<bool> = lines
+            .iter()
+            .enumerate()
+            .map(|(idx, line)| {
+                // Never collapse if cursor is on this line or selection includes it
+                if idx == cursor_line {
+                    return false;
+                }
+                if let Some(ref range) = selection_range
+                    && line.range.start < range.end
+                    && line.range.end > range.start
+                {
+                    return false;
+                }
+                // Collapse single empty line between sibling list items
+                if !self.state.buffer.is_line_empty(idx) || idx == 0 || idx >= lines.len() - 1 {
+                    return false;
+                }
+                let prev = &lines[idx - 1];
+                let next = &lines[idx + 1];
+                // Both adjacent lines must have list markers
+                if !prev.has_list_marker() || !next.has_list_marker() {
+                    return false;
+                }
+                // They must be siblings in the same list container
+                self.state.buffer.are_sibling_list_items(idx - 1, idx + 1)
+            })
+            .collect();
+
         // Pre-compute inline styles and code highlights for each line
         let line_data: Vec<_> = lines
             .iter()
@@ -1538,7 +1568,9 @@ impl Render for Editor {
         let line_views: Vec<_> = lines
             .iter()
             .zip(line_data)
-            .map(|(line, (inline_styles, code_highlights))| {
+            .zip(is_collapsed.iter())
+            .filter(|&(_, &collapsed)| !collapsed)
+            .map(|((line, (inline_styles, code_highlights)), _)| {
                 Line::new(
                     line,
                     rope.clone(),
@@ -3248,6 +3280,15 @@ plain text|"#,
         }
 
         #[test]
+        fn move_right_lands_on_document_tail() {
+            // End of document is always a valid landing spot
+            let mut state = editor_with_cursor("hello|\n\n\n");
+            state.move_right();
+            // Should land on the last empty line (document tail)
+            assert_editor_eq(&state, "hello\n\n\n|");
+        }
+
+        #[test]
         fn move_up() {
             let mut state = editor_with_cursor("line one\nline |two\nline three");
             state.move_up();
@@ -3320,10 +3361,20 @@ plain text|"#,
 
         #[test]
         fn move_down_stays_when_only_empty_below() {
+            // Empty lines in the middle (not at document end) are invalid landing spots
+            let mut state = editor_with_cursor("line |one\n\n\nline four");
+            state.move_down();
+            // Should skip empty lines and land on line four
+            assert_editor_eq(&state, "line one\n\n\nline |four");
+        }
+
+        #[test]
+        fn move_down_lands_on_document_tail() {
+            // End of document is always a valid landing spot
             let mut state = editor_with_cursor("line |one\n\n\n");
             state.move_down();
-            // Should stay on current line since lines below are all empty
-            assert_editor_eq(&state, "line |one\n\n\n");
+            // Should land on the last empty line (document tail)
+            assert_editor_eq(&state, "line one\n\n\n|");
         }
 
         #[test]
