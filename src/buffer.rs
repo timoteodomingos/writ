@@ -323,6 +323,60 @@ impl BufferContent {
         }
     }
 
+    /// Check if two lines are related list items (siblings OR parent-child).
+    /// Used for collapsing empty lines between adjacent list items.
+    pub fn are_related_list_items(&self, line1_idx: usize, line2_idx: usize) -> bool {
+        let Some(tree) = &self.tree else {
+            return false;
+        };
+
+        let lines = &self.lines;
+        if line1_idx >= lines.len() || line2_idx >= lines.len() {
+            return false;
+        }
+
+        // Use content_start to get position after markers (inside the list_item content)
+        let line1_pos = lines[line1_idx].content_start();
+        let line2_pos = lines[line2_idx].content_start();
+
+        let root = tree.block_tree().root_node();
+
+        // Find the list_item node containing each position
+        let list_item1 = Self::find_ancestor_of_kind(root, line1_pos, "list_item");
+        let list_item2 = Self::find_ancestor_of_kind(root, line2_pos, "list_item");
+
+        match (list_item1, list_item2) {
+            (Some(item1), Some(item2)) => {
+                // They must be different list items
+                if item1.id() == item2.id() {
+                    return false;
+                }
+
+                // Check if siblings (same parent)
+                if let (Some(parent1), Some(parent2)) = (item1.parent(), item2.parent())
+                    && parent1.id() == parent2.id()
+                {
+                    return true;
+                }
+
+                // Check if one is ancestor of the other (parent-child relationship)
+                // item2 is inside item1 (item1 is parent)
+                if item2.start_byte() >= item1.start_byte() && item2.end_byte() <= item1.end_byte()
+                {
+                    return true;
+                }
+                // item1 is inside item2 (item2 is parent)
+                if item1.start_byte() >= item2.start_byte() && item1.end_byte() <= item2.end_byte()
+                {
+                    return true;
+                }
+
+                false
+            }
+            _ => false,
+        }
+    }
+
     /// Find the nearest ancestor node of a given kind containing the byte position.
     fn find_ancestor_of_kind<'a>(
         root: tree_sitter::Node<'a>,
@@ -370,8 +424,15 @@ impl BufferContent {
     /// Get a byte slice from the rope, borrowing if possible.
     /// Returns a Cow that borrows if the slice fits in one chunk, allocates otherwise.
     pub fn slice_cow(&self, range: Range<usize>) -> std::borrow::Cow<'_, str> {
-        let char_start = self.text.byte_to_char(range.start);
-        let char_end = self.text.byte_to_char(range.end);
+        let len = self.text.len_bytes();
+        // Clamp range to valid bounds
+        let start = range.start.min(len);
+        let end = range.end.min(len);
+        if start >= end {
+            return std::borrow::Cow::Borrowed("");
+        }
+        let char_start = self.text.byte_to_char(start);
+        let char_end = self.text.byte_to_char(end);
         let slice = self.text.slice(char_start..char_end);
         match slice.as_str() {
             Some(s) => std::borrow::Cow::Borrowed(s),
@@ -1660,5 +1721,29 @@ mod sibling_tests {
 
         // These are in different lists (separated by paragraph)
         assert!(!buffer.are_sibling_list_items(0, 4));
+    }
+
+    #[test]
+    fn test_nested_list_related() {
+        let text = "- item1\n\n  - nested\n\n- item2";
+        let buffer: Buffer = text.parse().unwrap();
+
+        // item1 and nested are related (parent-child)
+        assert!(buffer.are_related_list_items(0, 2));
+        // item1 and item2 are related (siblings)
+        assert!(buffer.are_related_list_items(0, 4));
+        // nested and item2 are NOT related (different branches)
+        assert!(!buffer.are_related_list_items(2, 4));
+    }
+
+    #[test]
+    fn test_deeply_nested_list_related() {
+        let text = "- item1\n\n  - nested1\n\n    - nested2";
+        let buffer: Buffer = text.parse().unwrap();
+
+        // All are related through parent-child chain
+        assert!(buffer.are_related_list_items(0, 2)); // item1 -> nested1
+        assert!(buffer.are_related_list_items(2, 4)); // nested1 -> nested2
+        assert!(buffer.are_related_list_items(0, 4)); // item1 -> nested2 (grandparent)
     }
 }

@@ -1515,7 +1515,6 @@ impl Render for Editor {
 
         let lines = self.state.buffer.lines().to_vec();
         let cursor_line = self.state.buffer.byte_to_line(cursor_offset);
-        let cursor_child_index = Some(cursor_line + 1);
 
         // Determine which lines should be collapsed (hidden empty lines between list items)
         let is_collapsed: Vec<bool> = lines
@@ -1542,10 +1541,19 @@ impl Render for Editor {
                 if !prev.has_list_marker() || !next.has_list_marker() {
                     return false;
                 }
-                // They must be siblings in the same list container
-                self.state.buffer.are_sibling_list_items(idx - 1, idx + 1)
+                // They must be related (siblings or parent-child) in the list structure
+                self.state.buffer.are_related_list_items(idx - 1, idx + 1)
             })
             .collect();
+
+        // Compute cursor_child_index accounting for collapsed lines
+        // +1 for the top spacer, then count non-collapsed lines before cursor
+        let cursor_line_clamped = cursor_line.min(is_collapsed.len());
+        let collapsed_before_cursor = is_collapsed[..cursor_line_clamped]
+            .iter()
+            .filter(|&&c| c)
+            .count();
+        let cursor_child_index = Some(cursor_line_clamped - collapsed_before_cursor + 1);
 
         // Pre-compute inline styles and code highlights for each line
         let line_data: Vec<_> = lines
