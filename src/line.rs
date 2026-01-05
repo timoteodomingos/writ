@@ -718,15 +718,33 @@ impl IntoElement for Line<'_> {
             let source = self.resolve_image_source(url);
             let on_click = self.on_click.clone();
             let line_end = line_range.end;
-            (source, on_click, line_end)
+            // Resolve URL for opening (handles relative paths)
+            let open_url = if url.starts_with("http://") || url.starts_with("https://") {
+                url.to_string()
+            } else {
+                let path = std::path::Path::new(url);
+                if path.is_absolute() {
+                    url.to_string()
+                } else if let Some(base) = &self.base_path {
+                    base.join(url).to_string_lossy().to_string()
+                } else {
+                    url.to_string()
+                }
+            };
+            (source, on_click, line_end, open_url)
         });
 
         // If standalone image and cursor is NOT on line, just show the image
-        if let Some((source, on_click, line_end)) = standalone_image.clone() {
+        if let Some((source, on_click, line_end, open_url)) = standalone_image.clone() {
             if !self.cursor_on_line() && !self.selection_on_line() {
                 return line_base(line_number).child(img(source).max_w_full().on_mouse_down(
                     MouseButton::Left,
                     move |event: &MouseDownEvent, window, cx| {
+                        // Ctrl/Cmd + click opens the image
+                        if event.modifiers.control || event.modifiers.platform {
+                            let _ = open::that(&open_url);
+                            return;
+                        }
                         if let Some(ref on_click) = on_click {
                             on_click(
                                 line_end,
@@ -1068,13 +1086,20 @@ impl IntoElement for Line<'_> {
         }
 
         // If cursor is on a standalone image line, show image below the text
-        if let Some((source, _, _)) = standalone_image {
+        if let Some((source, _, _, open_url)) = standalone_image {
             return div()
                 .id(line_number)
                 .flex()
                 .flex_col()
                 .child(line_div)
-                .child(img(source).max_w_full())
+                .child(img(source).max_w_full().on_mouse_down(
+                    MouseButton::Left,
+                    move |event: &MouseDownEvent, _, _| {
+                        if event.modifiers.control || event.modifiers.platform {
+                            let _ = open::that(&open_url);
+                        }
+                    },
+                ))
                 .anchor_scroll(self.scroll_anchor);
         }
 
