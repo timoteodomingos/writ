@@ -19,6 +19,7 @@ use crate::buffer::Buffer;
 use crate::cursor::{Cursor, Selection};
 use crate::line::{CheckboxCallback, ClickCallback, DragCallback, HoverCallback, Line, LineTheme};
 use crate::marker::{LineMarkers, MarkerKind};
+use crate::paste::{PasteContext, transform_paste};
 
 /// A markdown editor component with live inline rendering.
 ///
@@ -1177,7 +1178,11 @@ impl Editor {
                 if let Some(clipboard_item) = cx.read_from_clipboard()
                     && let Some(text) = clipboard_item.text()
                 {
-                    self.insert_text(&text);
+                    // Context-aware paste: transform content based on cursor position
+                    let ctx =
+                        PasteContext::from_buffer(&self.state.buffer, self.state.cursor().offset);
+                    let transformed = transform_paste(&text, &ctx);
+                    self.insert_text(&transformed);
                     cx.notify();
                 }
             }

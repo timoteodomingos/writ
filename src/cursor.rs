@@ -42,19 +42,18 @@ impl Cursor {
         }
 
         // Check if we're within a marker range - if so, skip to previous line
-        if let Some(line) = buffer.lines().get(current_line_idx) {
-            if let Some(marker_range) = line.marker_range() {
-                if self.offset <= marker_range.end {
-                    // We're in the marker area - skip to previous content line
-                    if current_line_idx > 0 {
-                        return self.skip_to_prev_content_line(buffer, current_line_idx - 1);
-                    } else {
-                        // On first line, stay at marker end
-                        return Self {
-                            offset: marker_range.end,
-                        };
-                    }
-                }
+        if let Some(line) = buffer.lines().get(current_line_idx)
+            && let Some(marker_range) = line.marker_range()
+            && self.offset <= marker_range.end
+        {
+            // We're in the marker area - skip to previous content line
+            if current_line_idx > 0 {
+                return self.skip_to_prev_content_line(buffer, current_line_idx - 1);
+            } else {
+                // On first line, stay at marker end
+                return Self {
+                    offset: marker_range.end,
+                };
             }
         }
 
@@ -90,19 +89,14 @@ impl Cursor {
         }
 
         // Check if we're at line start or within a marker - skip to end of marker
-        if let Some(line) = buffer.lines().get(current_line_idx) {
-            if let Some(marker_range) = line.marker_range() {
-                if self.offset == line.range.start {
-                    return Self {
-                        offset: marker_range.end,
-                    };
-                }
-                if self.offset > marker_range.start && self.offset < marker_range.end {
-                    return Self {
-                        offset: marker_range.end,
-                    };
-                }
-            }
+        if let Some(line) = buffer.lines().get(current_line_idx)
+            && let Some(marker_range) = line.marker_range()
+            && (self.offset == line.range.start
+                || (self.offset > marker_range.start && self.offset < marker_range.end))
+        {
+            return Self {
+                offset: marker_range.end,
+            };
         }
 
         // Normal character movement
@@ -151,12 +145,12 @@ impl Cursor {
             target_line += 1;
         }
 
-        if !buffer.is_line_empty(target_line) {
-            if let Some(line) = buffer.lines().get(target_line) {
-                return Self {
-                    offset: line.content_start(),
-                };
-            }
+        if !buffer.is_line_empty(target_line)
+            && let Some(line) = buffer.lines().get(target_line)
+        {
+            return Self {
+                offset: line.content_start(),
+            };
         }
 
         // All lines are empty, stay put
@@ -178,7 +172,7 @@ impl Cursor {
 
         // If target is still empty (line 0 is empty), stay on current line
         if buffer.is_line_empty(target_line) {
-            return self.clone();
+            return *self;
         }
 
         // Get column offset within current line
@@ -214,7 +208,7 @@ impl Cursor {
 
         // If target is still empty (last line is empty), stay on current line
         if buffer.is_line_empty(target_line) {
-            return self.clone();
+            return *self;
         }
 
         // Get column offset within current line
