@@ -791,7 +791,8 @@ impl IntoElement for Line<'_> {
         let mut line_div = line_base(line_number).relative().flex().flex_row();
 
         // Collect spacers for blockquotes and indent markers
-        // Iterate in reverse (outermost to innermost) for correct visual layout
+        // Markers are stored innermost-to-outermost (highest byte first),
+        // so iterate in reverse for left-to-right visual layout
         let mut spacers: Vec<gpui::Div> = Vec::new();
 
         for marker in self.line.markers.iter().rev() {

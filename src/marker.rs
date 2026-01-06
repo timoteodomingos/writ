@@ -567,21 +567,22 @@ pub fn markers_at(nodes: &[Node], rope: &Rope, line_start: usize, line_end: usiz
                     }
                     // Reverse so innermost (last >) is first, outermost (first >) is last
                     blockquote_markers.reverse();
+                    let num_blockquotes = blockquote_markers.len();
                     markers.extend(blockquote_markers);
 
                     // If there's trailing whitespace after the last "> ", create an Indent marker
                     // e.g., ">    " has "> " as BlockQuote and "   " as Indent
-                    // Indent is innermost (closest to content), so insert at beginning
+                    // Insert before the blockquote markers we just added (they're at the end)
                     if last_marker_end < end {
                         let trailing = rope_slice_cow(rope, last_marker_end, end);
                         if !trailing.is_empty() && trailing.chars().all(|c| c.is_whitespace()) {
-                            markers.insert(
-                                0,
-                                Marker {
-                                    kind: MarkerKind::Indent,
-                                    range: last_marker_end..end,
-                                },
-                            );
+                            let indent_marker = Marker {
+                                kind: MarkerKind::Indent,
+                                range: last_marker_end..end,
+                            };
+                            // Insert before the blockquotes we just added
+                            let insert_pos = markers.len() - num_blockquotes;
+                            markers.insert(insert_pos, indent_marker);
                         }
                     }
                 } else if !content.is_empty() && content.chars().all(|c| c.is_whitespace()) {
@@ -1256,6 +1257,33 @@ mod tests {
         assert_eq!(kinds(&lines[1].markers), vec![] as Vec<&MarkerKind>);
         // Line 3: second paragraph with indent
         assert_eq!(kinds(&lines[2].markers), vec![&MarkerKind::Indent]);
+    }
+
+    #[test]
+    fn test_nested_blockquote_with_indent() {
+        // ">    > x" - outer blockquote with indent, then inner blockquote with content
+        // Markers should be in reverse byte order: inner > first, then indent, then outer >
+        let buf: Buffer = "> 1. hey\n>\n>    > x\n".parse().unwrap();
+        let lines = buf.lines();
+
+        // Line 2: ">    > x" has three markers
+        // Bytes: "> 1. hey\n>\n>    > x\n"
+        //        01234567890123456789
+        // Line 2 is bytes 11-20: ">    > x\n"
+        // Outer > at 11-13, indent at 13-16, inner > at 16-18
+        assert_eq!(lines[2].markers.len(), 3);
+        assert_eq!(
+            kinds(&lines[2].markers),
+            vec![
+                &MarkerKind::BlockQuote, // inner "> " (16-18)
+                &MarkerKind::Indent,     // spaces (13-16)
+                &MarkerKind::BlockQuote, // outer "> " (11-13)
+            ]
+        );
+        // Verify byte order is descending (innermost first)
+        assert_eq!(lines[2].markers[0].range, 16..18); // inner "> "
+        assert_eq!(lines[2].markers[1].range, 13..16); // "   "
+        assert_eq!(lines[2].markers[2].range, 11..13); // outer "> "
     }
 
     #[test]
