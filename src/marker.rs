@@ -484,6 +484,177 @@ fn rope_slice_cow(rope: &Rope, start: usize, end: usize) -> std::borrow::Cow<'_,
     }
 }
 
+/// Extract a marker from a tree-sitter node.
+/// Handles block_quote_marker and list_marker_* nodes.
+/// Returns (main_marker, optional_indent_for_leading_whitespace).
+fn marker_from_node(
+    node_kind: &str,
+    content: &str,
+    base_offset: usize,
+) -> (Option<Marker>, Option<Marker>) {
+    let bytes = content.as_bytes();
+
+    // Find where the actual marker character starts (skip leading whitespace)
+    let mut marker_start = 0;
+    while marker_start < bytes.len()
+        && (bytes[marker_start] == b' ' || bytes[marker_start] == b'\t')
+    {
+        marker_start += 1;
+    }
+
+    // Create indent marker for leading whitespace if present
+    let indent_marker = if marker_start > 0 {
+        Some(Marker {
+            kind: MarkerKind::Indent,
+            range: base_offset..(base_offset + marker_start),
+        })
+    } else {
+        None
+    };
+
+    let marker = match node_kind {
+        "block_quote_marker" => {
+            if let Some(rel_gt) = content[marker_start..].find('>') {
+                let gt_pos = marker_start + rel_gt;
+                let range_end = if bytes.get(gt_pos + 1) == Some(&b' ') {
+                    gt_pos + 2
+                } else {
+                    gt_pos + 1
+                };
+                Some(Marker {
+                    kind: MarkerKind::BlockQuote,
+                    range: (base_offset + gt_pos)..(base_offset + range_end),
+                })
+            } else {
+                None
+            }
+        }
+        "list_marker_minus" | "list_marker_plus" | "list_marker_star" => {
+            let unordered_marker = Some(match node_kind {
+                "list_marker_minus" => UnorderedMarker::Minus,
+                "list_marker_star" => UnorderedMarker::Star,
+                "list_marker_plus" => UnorderedMarker::Plus,
+                _ => unreachable!(),
+            });
+            Some(Marker {
+                kind: MarkerKind::ListItem {
+                    ordered: false,
+                    unordered_marker,
+                    ordered_marker: None,
+                },
+                range: (base_offset + marker_start)..(base_offset + content.len()),
+            })
+        }
+        "list_marker_dot" | "list_marker_parenthesis" => {
+            let ordered_marker = Some(match node_kind {
+                "list_marker_dot" => OrderedMarker::Dot,
+                "list_marker_parenthesis" => OrderedMarker::Parenthesis,
+                _ => unreachable!(),
+            });
+            Some(Marker {
+                kind: MarkerKind::ListItem {
+                    ordered: true,
+                    unordered_marker: None,
+                    ordered_marker,
+                },
+                range: (base_offset + marker_start)..(base_offset + content.len()),
+            })
+        }
+        _ => None,
+    };
+
+    (marker, indent_marker)
+}
+
+/// Parse a continuation string into markers using tree-sitter.
+/// Returns markers innermost-to-outermost (reverse document order) for use by markers_at.
+pub fn parse_continuation(content: &str, base_offset: usize) -> Vec<Marker> {
+    use crate::parser::MarkdownParser;
+    use std::cell::RefCell;
+
+    thread_local! {
+        static PARSER: RefCell<MarkdownParser> = RefCell::new(MarkdownParser::default());
+    }
+
+    let mut markers = Vec::new();
+
+    let bytes = content.as_bytes();
+    let tree =
+        PARSER.with_borrow_mut(|parser| parser.parse_with(&mut |byte, _| &bytes[byte..], None));
+    let Some(tree) = tree else {
+        return markers;
+    };
+
+    let root = tree.block_tree().root_node();
+    let mut last_marker_end = 0usize;
+    let mut first_marker_seen = false;
+
+    // Walk tree with cursor, processing only marker nodes
+    let mut cursor = root.walk();
+    loop {
+        let node = cursor.node();
+        let kind = node.kind();
+
+        if matches!(
+            kind,
+            "block_quote_marker"
+                | "list_marker_minus"
+                | "list_marker_plus"
+                | "list_marker_star"
+                | "list_marker_dot"
+                | "list_marker_parenthesis"
+        ) {
+            let start = node.start_byte();
+            let node_content = &content[start..node.end_byte()];
+            let (marker, indent) = marker_from_node(kind, node_content, base_offset + start);
+
+            // Only add indent markers AFTER the first marker (for whitespace between markers).
+            // Leading whitespace before the first marker is handled by a separate
+            // whitespace-only block_continuation node in the original tree.
+            if let Some(ind) = indent
+                && first_marker_seen
+            {
+                markers.insert(0, ind);
+            }
+            if let Some(m) = marker {
+                first_marker_seen = true;
+                last_marker_end = m.range.end - base_offset;
+                markers.insert(0, m);
+            }
+        }
+
+        // Walk tree: descend, then sibling, then up
+        if cursor.goto_first_child() {
+            continue;
+        }
+        if cursor.goto_next_sibling() {
+            continue;
+        }
+        loop {
+            if !cursor.goto_parent() {
+                // Done walking - handle trailing whitespace
+                if last_marker_end > 0 && last_marker_end < content.len() {
+                    let trailing = &content[last_marker_end..];
+                    if !trailing.is_empty() && trailing.chars().all(|c| c.is_whitespace()) {
+                        markers.insert(
+                            0,
+                            Marker {
+                                kind: MarkerKind::Indent,
+                                range: (base_offset + last_marker_end)
+                                    ..(base_offset + content.len()),
+                            },
+                        );
+                    }
+                }
+                return markers;
+            }
+            if cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+}
+
 /// Collect all nodes in document order (preorder traversal).
 pub fn collect_nodes<'a>(root: &Node<'a>) -> Vec<Node<'a>> {
     let mut cursor = root.walk();
@@ -543,63 +714,9 @@ pub fn markers_at(nodes: &[Node], rope: &Rope, line_start: usize, line_end: usiz
                 }
                 let content = rope_slice_cow(rope, start, end);
                 if content.contains('>') {
-                    // Split nested blockquote continuations into separate markers
-                    // e.g., "> > " should become two BlockQuote markers
-                    // e.g., ">    > " should become BlockQuote, Indent, BlockQuote
-                    // Markers must be in innermost-to-outermost order, so collect
-                    // and reverse before adding.
-                    let mut segment_markers = Vec::new();
-                    let mut last_marker_end = start;
-                    let mut first_gt_seen = false;
-                    for (i, c) in content.char_indices() {
-                        if c == '>' {
-                            let gt_pos = start + i;
-                            // Check for whitespace gap between last marker and this >
-                            // This creates Indent markers for spaces BETWEEN blockquotes
-                            // (not before the first one - that comes from a separate node)
-                            if first_gt_seen && gt_pos > last_marker_end {
-                                let gap = rope_slice_cow(rope, last_marker_end, gt_pos);
-                                if !gap.is_empty() && gap.chars().all(|c| c.is_whitespace()) {
-                                    segment_markers.push(Marker {
-                                        kind: MarkerKind::Indent,
-                                        range: last_marker_end..gt_pos,
-                                    });
-                                }
-                            }
-                            first_gt_seen = true;
-                            // Check for trailing space after >
-                            let range_end = if rope.get_byte(gt_pos + 1) == Some(b' ') {
-                                gt_pos + 2
-                            } else {
-                                gt_pos + 1
-                            };
-                            segment_markers.push(Marker {
-                                kind: MarkerKind::BlockQuote,
-                                range: gt_pos..range_end,
-                            });
-                            last_marker_end = range_end;
-                        }
-                    }
-                    // Reverse so innermost (last >) is first, outermost (first >) is last
-                    segment_markers.reverse();
-                    let num_segments = segment_markers.len();
-                    markers.extend(segment_markers);
-
-                    // If there's trailing whitespace after the last "> ", create an Indent marker
-                    // e.g., ">    " has "> " as BlockQuote and "   " as Indent
-                    // Insert before the markers we just added (they're at the end)
-                    if last_marker_end < end {
-                        let trailing = rope_slice_cow(rope, last_marker_end, end);
-                        if !trailing.is_empty() && trailing.chars().all(|c| c.is_whitespace()) {
-                            let indent_marker = Marker {
-                                kind: MarkerKind::Indent,
-                                range: last_marker_end..end,
-                            };
-                            // Insert before the markers we just added
-                            let insert_pos = markers.len() - num_segments;
-                            markers.insert(insert_pos, indent_marker);
-                        }
-                    }
+                    // Use parse_continuation to extract markers via tree-sitter.
+                    // It returns markers innermost-to-outermost, matching our order.
+                    markers.extend(parse_continuation(&content, start));
                 } else if !content.is_empty() && content.chars().all(|c| c.is_whitespace()) {
                     markers.push(Marker {
                         kind: MarkerKind::Indent,
