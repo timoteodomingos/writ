@@ -109,55 +109,6 @@ impl Cursor {
         }
     }
 
-    /// Helper: skip backwards to find the previous content line and position at its end.
-    fn skip_to_prev_content_line(&self, buffer: &Buffer, start_line: usize) -> Self {
-        let mut target_line = start_line;
-        while target_line > 0 && buffer.is_line_empty(target_line) {
-            target_line -= 1;
-        }
-
-        if !buffer.is_line_empty(target_line) {
-            let target_range = buffer.line_byte_range(target_line);
-            let line_text = buffer.slice_cow(target_range.clone());
-            let trimmed_len = line_text.trim_end().len();
-            return Self {
-                offset: target_range.start + trimmed_len,
-            };
-        }
-
-        // All lines are empty, stay put
-        *self
-    }
-
-    /// Helper: skip forwards to find the next content line and position after its marker.
-    fn skip_to_next_content_line(&self, buffer: &Buffer, start_line: usize) -> Self {
-        let line_count = buffer.line_count();
-        let mut target_line = start_line;
-        while target_line < line_count - 1 && buffer.is_line_empty(target_line) {
-            target_line += 1;
-        }
-
-        if !buffer.is_line_empty(target_line)
-            && let Some(line) = buffer.lines().get(target_line)
-        {
-            return Self {
-                offset: line.content_start(),
-            };
-        }
-
-        // If we're on the last line (document tail), allow landing there
-        if target_line == line_count - 1
-            && let Some(line) = buffer.lines().get(target_line)
-        {
-            return Self {
-                offset: line.content_start(),
-            };
-        }
-
-        // All lines are empty and not at end, stay put
-        *self
-    }
-
     /// Move cursor up. Blank lines are not skipped.
     pub fn move_up(&self, buffer: &Buffer) -> Self {
         let current_line = buffer.byte_to_line(self.offset);

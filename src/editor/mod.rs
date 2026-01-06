@@ -190,35 +190,6 @@ impl EditorState {
         false
     }
 
-    /// Delete a range and adjust cursor position accordingly.
-    /// If deleting before the cursor, the cursor shifts back.
-    /// If deleting at or after the cursor, the cursor moves to the start of deleted range.
-    fn delete_and_adjust(&mut self, range: std::ops::Range<usize>) {
-        let cursor_offset = self.cursor().offset;
-        self.buffer.delete(range.clone(), cursor_offset);
-        let deleted_len = range.end - range.start;
-        let new_pos = if range.end <= cursor_offset {
-            cursor_offset - deleted_len
-        } else {
-            range.start
-        };
-        self.selection = Selection::new(new_pos, new_pos);
-    }
-
-    /// Insert text at a position and adjust cursor accordingly.
-    /// If inserting before the cursor, the cursor shifts forward.
-    /// If inserting at or after the cursor, the cursor moves to end of inserted text.
-    fn insert_at(&mut self, pos: usize, text: &str) {
-        let cursor_offset = self.cursor().offset;
-        self.buffer.insert(pos, text, cursor_offset);
-        let new_pos = if pos <= cursor_offset {
-            cursor_offset + text.len()
-        } else {
-            pos + text.len()
-        };
-        self.selection = Selection::new(new_pos, new_pos);
-    }
-
     /// Check if a line has content after its markers.
     /// Lines with code fences are always considered to have content.
     fn line_has_content(&self, line: &LineMarkers) -> bool {
@@ -234,24 +205,6 @@ impl EditorState {
             .slice_cow(content_start..line.range.end)
             .trim()
             .is_empty()
-    }
-
-    /// Find the previous line with content, looking back up to `max_lines` lines.
-    /// Skips over empty lines (lines with only markers or whitespace).
-    /// Returns None if no content line is found within the limit.
-    fn prev_content_line(&self, line_idx: usize, max_lines: usize) -> Option<&LineMarkers> {
-        if line_idx == 0 {
-            return None;
-        }
-        let lines = self.buffer.lines();
-        let start = line_idx.saturating_sub(max_lines);
-        for i in (start..line_idx).rev() {
-            let line = &lines[i];
-            if self.line_has_content(line) {
-                return Some(line);
-            }
-        }
-        None
     }
 
     /// Get context about the line at the cursor.
@@ -278,44 +231,6 @@ impl EditorState {
             has_container: line.has_container(),
             prev_line,
         })
-    }
-
-    /// Check if cursor is at end of a "pending marker" (e.g., `*|` or `1.|`)
-    /// that would become a list marker if we added a space.
-    fn is_pending_marker(&self, cursor_pos: usize) -> bool {
-        let line_idx = self.buffer.byte_to_line(cursor_pos);
-        let lines = self.buffer.lines();
-        let Some(current_line) = lines.get(line_idx) else {
-            return false;
-        };
-
-        if !current_line.markers.is_empty() {
-            return false;
-        }
-
-        let line_start = current_line.range.start;
-        if cursor_pos < line_start {
-            return false;
-        }
-
-        let line_to_cursor = self.buffer.slice_cow(line_start..cursor_pos);
-
-        if line_to_cursor == "*" || line_to_cursor == "-" || line_to_cursor == "+" {
-            return true;
-        }
-
-        if let Some(before_dot) = line_to_cursor.strip_suffix('.')
-            && !before_dot.is_empty()
-            && before_dot.chars().all(|c| c.is_ascii_digit())
-        {
-            return true;
-        }
-
-        false
-    }
-
-    fn complete_pending_marker(&mut self) {
-        self.insert_text(" ");
     }
 
     /// Auto-insert space after `>` if it just became a blockquote marker.
@@ -396,22 +311,6 @@ impl EditorState {
         }
     }
 
-    fn compute_enter_text(&self, cursor_pos: usize) -> String {
-        let lines = self.buffer.lines();
-        let cursor_line_idx = self.buffer.byte_to_line(cursor_pos);
-
-        let Some(line_info) = lines.get(cursor_line_idx) else {
-            return "\n".to_string();
-        };
-
-        let continuation = line_info.continuation_rope(self.buffer.rope());
-        if continuation.is_empty() {
-            "\n".to_string()
-        } else {
-            format!("\n{}", continuation)
-        }
-    }
-
     /// Smart tab: adds structure based on context.
     /// Tab: cycle forward through nesting states based on context (up to 2 lines above).
     /// States depend on context type:
@@ -458,7 +357,7 @@ impl EditorState {
         let context_line = self.find_context_line(ctx.line_idx, 1)?;
 
         // Get the current line's prefix (everything before content)
-        let current_prefix = self.current_line_prefix(&ctx.line);
+        let current_prefix = self.current_line_prefix(ctx.line);
 
         // Build states based on context
         let states = self.build_cycle_states(&context_line);
@@ -674,123 +573,6 @@ impl EditorState {
     /// Shift+Tab: cycle backward through nesting states.
     pub fn shift_tab(&mut self) {
         self.shift_tab_cycle();
-    }
-
-    /// Remove a marker at cursor position (innermost) and matching marker from line above.
-    /// Used by backspace.
-    fn remove_marker_at_cursor(&mut self) {
-        let cursor_pos = self.cursor().offset;
-        let Some((delete_range, _is_indent)) = self.backspace_range_with_type(cursor_pos) else {
-            return;
-        };
-
-        let line_idx = self.buffer.byte_to_line(cursor_pos);
-        let lines = self.buffer.lines();
-        let current_line = &lines[line_idx];
-        let original_marker_count = current_line.markers.len();
-
-        // Find which marker we're removing (by matching the range)
-        let mut marker_idx = None;
-        let mut marker_kind = None;
-        for (idx, marker) in current_line.markers.iter().enumerate() {
-            if marker.range == delete_range {
-                marker_idx = Some(idx);
-                marker_kind = Some(marker.kind.clone());
-                break;
-            }
-        }
-
-        // Delete the marker
-        self.delete_and_adjust(delete_range);
-
-        // Now check if the line above is empty and has a matching marker at same level
-        if let (Some(kind), Some(idx)) = (marker_kind, marker_idx) {
-            self.remove_matching_marker_from_empty_line_above(
-                Some(kind),
-                idx,
-                original_marker_count,
-            );
-        }
-    }
-
-    /// If the line above is empty (markers only) and has a matching marker at the
-    /// same nesting level, remove it.
-    fn remove_matching_marker_from_empty_line_above(
-        &mut self,
-        marker_kind: Option<MarkerKind>,
-        marker_idx: usize,
-        original_marker_count: usize,
-    ) {
-        let cursor_pos = self.cursor().offset;
-        let line_idx = self.buffer.byte_to_line(cursor_pos);
-
-        if line_idx == 0 {
-            return;
-        }
-
-        let lines = self.buffer.lines();
-        let Some(prev_line) = lines.get(line_idx - 1) else {
-            return;
-        };
-
-        // Check if previous line is empty (has markers but no content)
-        if prev_line.markers.is_empty() {
-            return;
-        }
-
-        let prev_content_start = prev_line
-            .marker_range()
-            .map(|r| r.end)
-            .unwrap_or(prev_line.range.start);
-        let prev_is_empty = self
-            .buffer
-            .slice_cow(prev_content_start..prev_line.range.end)
-            .trim()
-            .is_empty();
-
-        if !prev_is_empty {
-            return;
-        }
-
-        // Only remove from above if prev line has at least as many markers as
-        // current line had before removal. This ensures we're comparing markers
-        // at the same nesting depth.
-        //
-        // Example where we should NOT remove:
-        //   Current: ">    > |" has 3 markers [inner_bq, indent, outer_bq]
-        //   Prev:    ">"       has 1 marker [outer_bq]
-        //   We removed inner_bq (idx 0), but prev only has 1 marker.
-        //   1 < 3, so we don't remove - the nesting levels don't match.
-        //
-        // Example where we SHOULD remove:
-        //   Current: "> |" has 1 marker [bq]
-        //   Prev:    ">"   has 1 marker [bq]
-        //   We removed bq (idx 0), prev has 1 >= 1 markers, and bq at idx 0 matches.
-        if prev_line.markers.len() < original_marker_count {
-            return;
-        }
-        if marker_idx >= prev_line.markers.len() {
-            return;
-        }
-
-        let prev_marker = &prev_line.markers[marker_idx];
-        let kinds_match = matches!(
-            (&marker_kind, &prev_marker.kind),
-            (Some(MarkerKind::BlockQuote), MarkerKind::BlockQuote)
-                | (
-                    Some(MarkerKind::ListItem { .. }),
-                    MarkerKind::ListItem { .. }
-                )
-                | (
-                    Some(MarkerKind::TaskList { .. }),
-                    MarkerKind::TaskList { .. }
-                )
-                | (Some(MarkerKind::Indent), MarkerKind::Indent)
-        );
-
-        if kinds_match {
-            self.delete_and_adjust(prev_marker.range.clone());
-        }
     }
 
     fn backspace_range_with_type(
