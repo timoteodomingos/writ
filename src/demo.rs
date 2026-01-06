@@ -54,9 +54,9 @@ pub fn demo_script() -> Vec<DemoStep> {
         Action(A::Enter),
         Wait(600),
         // Task lists
-        Type("- [ ] Unchecked task".into()),
-        Action(A::ShiftEnter),
-        Type("[x] Checked task".into()),
+        Type("- [x] Unchecked task".into()),
+        Action(A::Enter),
+        Type("- [ ] Checked task".into()),
         Action(A::ShiftEnter),
         Type("[ ] Click to toggle".into()),
         Action(A::Enter),
