@@ -875,15 +875,21 @@ impl IntoElement for Line<'_> {
                     };
                 }
                 MarkerKind::BlockQuote => {
-                    // Create a spacer with left border for wrap indentation
+                    // Create a spacer for wrap indentation with border as separate child
                     let marker_chars = marker.range.len();
                     let spacer_width = self.theme.monospace_char_width * marker_chars as f32;
+                    let border_element = div()
+                        .absolute()
+                        .top_0()
+                        .bottom_0()
+                        .left_0()
+                        .w(px(2.0))
+                        .bg(self.theme.border_color);
                     let mut spacer = div()
                         .relative()
                         .w(spacer_width)
                         .min_h_full()
-                        .border_l_2()
-                        .border_color(self.theme.border_color);
+                        .child(border_element);
                     if cursor_in_this_marker {
                         spacer = spacer.child(self.render_spacer_cursor(cursor_char_offset));
                     }
