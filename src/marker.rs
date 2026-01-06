@@ -728,92 +728,48 @@ pub fn markers_at(nodes: &[Node], rope: &Rope, line_start: usize, line_end: usiz
                 }
             }
             "list_marker_minus" | "list_marker_plus" | "list_marker_star" => {
-                // Tree-sitter includes leading whitespace in list markers for nested lists.
-                // Strip it so ListItem markers only contain the actual marker (e.g., "- ").
-                // The Indent marker already handles the leading whitespace separately.
-                let mut marker_start = start;
-                while marker_start < end {
-                    if let Some(b) = rope.get_byte(marker_start) {
-                        if b == b' ' || b == b'\t' {
-                            marker_start += 1;
-                        } else {
-                            break;
-                        }
-                    } else {
-                        break;
-                    }
-                }
+                let (marker, indent) = marker_from_node(kind, rope, start, end);
+
                 // Add Indent marker for the leading whitespace if present
-                if marker_start > start {
-                    markers.push(Marker {
-                        kind: MarkerKind::Indent,
-                        range: start..marker_start,
-                    });
+                if let Some(ind) = indent {
+                    markers.push(ind);
                 }
-                // Determine which unordered marker type
-                let unordered_marker = Some(match kind {
-                    "list_marker_minus" => UnorderedMarker::Minus,
-                    "list_marker_star" => UnorderedMarker::Star,
-                    "list_marker_plus" => UnorderedMarker::Plus,
-                    _ => unreachable!(),
-                });
+
                 // Check if this list marker has a pending task checkbox
                 if let Some((checked, checkbox_end)) = pending_task.take() {
-                    // Combine into a single TaskList marker spanning list marker to checkbox end
-                    markers.push(Marker {
-                        kind: MarkerKind::TaskList {
-                            checked,
-                            unordered_marker,
-                        },
-                        range: marker_start..checkbox_end,
-                    });
-                } else {
-                    markers.push(Marker {
-                        kind: MarkerKind::ListItem {
-                            ordered: false,
-                            unordered_marker,
-                            ordered_marker: None,
-                        },
-                        range: marker_start..end,
-                    });
+                    // Extract the unordered marker type from the ListItem marker
+                    if let Some(Marker {
+                        kind:
+                            MarkerKind::ListItem {
+                                unordered_marker, ..
+                            },
+                        range,
+                    }) = marker
+                    {
+                        // Combine into a single TaskList marker spanning list marker to checkbox end
+                        markers.push(Marker {
+                            kind: MarkerKind::TaskList {
+                                checked,
+                                unordered_marker,
+                            },
+                            range: range.start..checkbox_end,
+                        });
+                    }
+                } else if let Some(m) = marker {
+                    markers.push(m);
                 }
             }
             "list_marker_dot" | "list_marker_parenthesis" => {
-                // Tree-sitter includes leading whitespace in list markers for nested lists.
-                // Strip it so ListItem markers only contain the actual marker (e.g., "1. ").
-                let mut marker_start = start;
-                while marker_start < end {
-                    if let Some(b) = rope.get_byte(marker_start) {
-                        if b == b' ' || b == b'\t' {
-                            marker_start += 1;
-                        } else {
-                            break;
-                        }
-                    } else {
-                        break;
-                    }
-                }
+                let (marker, indent) = marker_from_node(kind, rope, start, end);
+
                 // Add Indent marker for the leading whitespace if present
-                if marker_start > start {
-                    markers.push(Marker {
-                        kind: MarkerKind::Indent,
-                        range: start..marker_start,
-                    });
+                if let Some(ind) = indent {
+                    markers.push(ind);
                 }
-                // Determine which ordered marker style
-                let ordered_marker = Some(match kind {
-                    "list_marker_dot" => OrderedMarker::Dot,
-                    "list_marker_parenthesis" => OrderedMarker::Parenthesis,
-                    _ => unreachable!(),
-                });
-                markers.push(Marker {
-                    kind: MarkerKind::ListItem {
-                        ordered: true,
-                        unordered_marker: None,
-                        ordered_marker,
-                    },
-                    range: marker_start..end,
-                });
+
+                if let Some(m) = marker {
+                    markers.push(m);
+                }
             }
             "task_list_marker_unchecked" => {
                 // Include trailing space after ] if present
