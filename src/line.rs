@@ -437,6 +437,14 @@ impl<'a> Line<'a> {
         let base_code_font = &self.theme.code_font;
         let base_text_font = &self.theme.text_font;
 
+        // Pre-compute ordered list marker range (if any) - should use code_font for consistent width
+        let ordered_marker_range = self
+            .line
+            .markers
+            .iter()
+            .find(|m| matches!(m.kind, MarkerKind::ListItem { ordered: true, .. }))
+            .map(|m| m.range.clone());
+
         for region in &self.inline_styles {
             let cursor_inside = self.cursor_offset >= region.full_range.start
                 && self.cursor_offset <= region.full_range.end;
@@ -508,7 +516,12 @@ impl<'a> Line<'a> {
                 }
             }
 
-            let base_font = if is_code || is_code_block {
+            // Check if this segment is within the ordered list marker range
+            let in_ordered_marker = ordered_marker_range
+                .as_ref()
+                .is_some_and(|r| start < r.end && end > r.start);
+
+            let base_font = if is_code || is_code_block || in_ordered_marker {
                 base_code_font
             } else {
                 base_text_font
@@ -785,9 +798,10 @@ impl IntoElement for Line<'_> {
         let mut line_div = line_base(line_number).relative().flex().flex_row();
 
         // Collect spacers for blockquotes and indent markers
+        // Iterate in reverse (outermost to innermost) for correct visual layout
         let mut spacers: Vec<gpui::Div> = Vec::new();
 
-        for marker in &self.line.markers {
+        for marker in self.line.markers.iter().rev() {
             match &marker.kind {
                 MarkerKind::Heading(level) => {
                     line_div = line_div.font_weight(FontWeight::BOLD);

@@ -814,63 +814,87 @@ impl EditorState {
             // Check if we're at a marker position
             if self.backspace_range_with_type(cursor_pos).is_some() {
                 // At marker position - remove the marker at cursor (innermost)
-                // and matching marker from empty line above
+                // and matching marker from empty line above (same as shift-tab)
                 self.remove_marker_at_cursor();
 
-                // After removing nesting level, check if we're now on a blank line
-                // (no markers). If so, and prev line is also blank, join to content.
+                // After removing markers, if current line is now blank with no markers,
+                // check if we should join to content above.
+                // - If immediate prev line has content → join
+                // - If immediate prev line is also blank (no markers) → find content above and join
+                // - If immediate prev line has markers but no content → don't join (need more backspaces)
                 let cursor_pos = self.cursor().offset;
                 let line_idx = self.buffer.byte_to_line(cursor_pos);
                 let lines = self.buffer.lines();
 
-                if let Some(current_line) = lines.get(line_idx) {
-                    // If current line now has no markers and is empty, join to content above
-                    if current_line.markers.is_empty() {
-                        let current_is_blank = self
-                            .buffer
-                            .slice_cow(current_line.range.clone())
-                            .trim()
-                            .is_empty();
-
-                        if current_is_blank && line_idx > 0 {
-                            // Find the last line with content
-                            let mut target_idx = line_idx - 1;
-                            while target_idx > 0 {
-                                let line = &lines[target_idx];
-                                let line_content_start = line
-                                    .marker_range()
-                                    .map(|r| r.end)
-                                    .unwrap_or(line.range.start);
-                                let is_empty = !line.is_fence()
-                                    && self
-                                        .buffer
-                                        .slice_cow(line_content_start..line.range.end)
-                                        .trim()
-                                        .is_empty();
-                                if !is_empty {
-                                    break;
-                                }
-                                target_idx -= 1;
-                            }
-
-                            let target_line = &lines[target_idx];
-                            let target_content_start = target_line
+                if line_idx > 0 {
+                    if let Some(current_line) = lines.get(line_idx) {
+                        // Current line must be blank with no markers
+                        if current_line.markers.is_empty()
+                            && self
+                                .buffer
+                                .slice_cow(current_line.range.clone())
+                                .trim()
+                                .is_empty()
+                        {
+                            let prev_line = &lines[line_idx - 1];
+                            let prev_content_start = prev_line
                                 .marker_range()
                                 .map(|r| r.end)
-                                .unwrap_or(target_line.range.start);
-                            let target_has_content = !self
-                                .buffer
-                                .slice_cow(target_content_start..target_line.range.end)
-                                .trim()
-                                .is_empty();
+                                .unwrap_or(prev_line.range.start);
+                            let prev_is_blank_no_markers = prev_line.markers.is_empty()
+                                && self
+                                    .buffer
+                                    .slice_cow(prev_line.range.clone())
+                                    .trim()
+                                    .is_empty();
+                            let prev_has_content = !prev_line.is_fence()
+                                && !self
+                                    .buffer
+                                    .slice_cow(prev_content_start..prev_line.range.end)
+                                    .trim()
+                                    .is_empty();
 
-                            if target_has_content {
-                                // Delete from end of target content to current position
-                                let join_pos = target_line.range.end;
+                            if prev_has_content {
+                                // Immediate prev line has content → join directly
+                                let join_pos = prev_line.range.end;
                                 let current_pos = self.cursor().offset;
                                 self.buffer.delete(join_pos..current_pos, current_pos);
                                 self.selection = Selection::new(join_pos, join_pos);
+                            } else if prev_is_blank_no_markers {
+                                // Prev line is also blank with no markers → find content above
+                                let mut target_idx = line_idx - 1;
+                                while target_idx > 0 {
+                                    let line = &lines[target_idx];
+                                    let content_start = line
+                                        .marker_range()
+                                        .map(|r| r.end)
+                                        .unwrap_or(line.range.start);
+                                    let has_content = !line.is_fence()
+                                        && !self
+                                            .buffer
+                                            .slice_cow(content_start..line.range.end)
+                                            .trim()
+                                            .is_empty();
+                                    if has_content {
+                                        break;
+                                    }
+                                    // Stop if we hit a line with markers (don't skip over them)
+                                    if !line.markers.is_empty() {
+                                        target_idx = line_idx; // Reset to prevent join
+                                        break;
+                                    }
+                                    target_idx -= 1;
+                                }
+
+                                if target_idx < line_idx {
+                                    let target_line = &lines[target_idx];
+                                    let join_pos = target_line.range.end;
+                                    let current_pos = self.cursor().offset;
+                                    self.buffer.delete(join_pos..current_pos, current_pos);
+                                    self.selection = Selection::new(join_pos, join_pos);
+                                }
                             }
+                            // If prev line has markers but no content, don't join
                         }
                     }
                 }
@@ -3223,53 +3247,6 @@ plain text|"#,
         }
 
         #[test]
-        fn debug_nested_blockquote_backspace() {
-            let mut state = editor_with_cursor("> > - item\n> >\n> > - |");
-
-            println!("\n=== INITIAL STATE ===");
-            println!("Text: {:?}", state.text());
-            println!("Cursor: {}", state.cursor().offset);
-            for (i, line) in state.buffer.lines().iter().enumerate() {
-                println!(
-                    "Line {}: range={:?}, markers={:?}",
-                    i, line.range, line.markers
-                );
-            }
-
-            // Dump tree-sitter nodes
-            if let Some(tree) = state.buffer.tree() {
-                println!("\n=== TREE-SITTER NODES ===");
-                fn print_node(node: tree_sitter::Node, indent: usize) {
-                    println!(
-                        "{}{} [{}-{}]",
-                        "  ".repeat(indent),
-                        node.kind(),
-                        node.start_byte(),
-                        node.end_byte()
-                    );
-                    let mut cursor = node.walk();
-                    for child in node.children(&mut cursor) {
-                        print_node(child, indent + 1);
-                    }
-                }
-                print_node(tree.block_tree().root_node(), 0);
-            }
-
-            for step in 1..=5 {
-                state.delete_backward();
-                println!("\n=== AFTER BACKSPACE {} ===", step);
-                println!("Text: {:?}", state.text());
-                println!("Cursor: {}", state.cursor().offset);
-                for (i, line) in state.buffer.lines().iter().enumerate() {
-                    println!(
-                        "Line {}: range={:?}, markers={:?}",
-                        i, line.range, line.markers
-                    );
-                }
-            }
-        }
-
-        #[test]
         fn backspace_after_closing_fence_in_blockquote() {
             // Closing fence should not be treated as empty - step by step behavior
             let mut state = editor_with_cursor(
@@ -3422,50 +3399,6 @@ plain text|"#,
                 r#"
 > 1. hey|hey"#,
             );
-        }
-
-        #[test]
-        fn debug_markers_for_list_in_blockquote() {
-            let mut state = editor_with_cursor(
-                r#"
-> 1. hey
->
-> 2. |hey"#,
-            );
-
-            println!("\n=== INITIAL STATE ===");
-            println!("Text: {:?}", state.text());
-            println!("Cursor: {}", state.cursor().offset);
-            for (i, line) in state.buffer.lines().iter().enumerate() {
-                println!(
-                    "Line {}: range={:?}, markers={:?}",
-                    i, line.range, line.markers
-                );
-            }
-
-            state.delete_backward();
-
-            println!("\n=== AFTER FIRST BACKSPACE ===");
-            println!("Text: {:?}", state.text());
-            println!("Cursor: {}", state.cursor().offset);
-            for (i, line) in state.buffer.lines().iter().enumerate() {
-                println!(
-                    "Line {}: range={:?}, markers={:?}",
-                    i, line.range, line.markers
-                );
-            }
-
-            state.delete_backward();
-
-            println!("\n=== AFTER SECOND BACKSPACE ===");
-            println!("Text: {:?}", state.text());
-            println!("Cursor: {}", state.cursor().offset);
-            for (i, line) in state.buffer.lines().iter().enumerate() {
-                println!(
-                    "Line {}: range={:?}, markers={:?}",
-                    i, line.range, line.markers
-                );
-            }
         }
     }
 
