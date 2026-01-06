@@ -659,7 +659,8 @@ impl EditorState {
         }
     }
 
-    /// Smart shift-tab: removes one level of structure.
+    /// Smart shift-tab: removes one level of nesting (innermost marker).
+    /// Also removes matching marker from the empty line above (if it exists).
     pub fn shift_tab(&mut self) {
         let Some(ctx) = self.line_context() else {
             return;
@@ -671,13 +672,113 @@ impl EditorState {
 
         let line_text = self.buffer.slice_cow(ctx.line.range.clone());
 
-        if line_text.starts_with("  ") {
+        // Determine which marker to remove and its index
+        let (marker_to_remove, marker_idx) = if line_text.starts_with("  ") {
             // Nested - remove indentation
+            (None, 0) // Special case for indent
+        } else {
+            // Remove the innermost marker (first in array)
+            (Some(ctx.line.markers[0].kind.clone()), 0)
+        };
+
+        // Remove the marker from current line
+        if line_text.starts_with("  ") {
             let delete_start = ctx.line.range.start;
             self.delete_and_adjust(delete_start..delete_start + 2);
         } else {
-            // At root level - remove the outermost marker
             self.delete_and_adjust(ctx.line.markers[0].range.clone());
+        }
+
+        // Now check if the line above is empty and has a matching marker at same level
+        self.remove_matching_marker_from_empty_line_above(marker_to_remove, marker_idx);
+    }
+
+    /// Remove a marker at cursor position (innermost) and matching marker from line above.
+    /// Used by backspace.
+    fn remove_marker_at_cursor(&mut self) {
+        let cursor_pos = self.cursor().offset;
+        let Some((delete_range, _is_indent)) = self.backspace_range_with_type(cursor_pos) else {
+            return;
+        };
+
+        let line_idx = self.buffer.byte_to_line(cursor_pos);
+        let lines = self.buffer.lines();
+        let current_line = &lines[line_idx];
+
+        // Find which marker we're removing (by matching the range)
+        let mut marker_idx = None;
+        let mut marker_kind = None;
+        for (idx, marker) in current_line.markers.iter().enumerate() {
+            if marker.range == delete_range {
+                marker_idx = Some(idx);
+                marker_kind = Some(marker.kind.clone());
+                break;
+            }
+        }
+
+        // Delete the marker
+        self.delete_and_adjust(delete_range);
+
+        // Now check if the line above is empty and has a matching marker at same level
+        if let (Some(kind), Some(idx)) = (marker_kind, marker_idx) {
+            self.remove_matching_marker_from_empty_line_above(Some(kind), idx);
+        }
+    }
+
+    /// If the line above is empty (markers only) and has a matching marker at the
+    /// same nesting level, remove it.
+    fn remove_matching_marker_from_empty_line_above(
+        &mut self,
+        marker_kind: Option<MarkerKind>,
+        marker_idx: usize,
+    ) {
+        let cursor_pos = self.cursor().offset;
+        let line_idx = self.buffer.byte_to_line(cursor_pos);
+
+        if line_idx == 0 {
+            return;
+        }
+
+        let lines = self.buffer.lines();
+        let Some(prev_line) = lines.get(line_idx - 1) else {
+            return;
+        };
+
+        // Check if previous line is empty (has markers but no content)
+        if prev_line.markers.is_empty() {
+            return;
+        }
+
+        let prev_content_start = prev_line
+            .marker_range()
+            .map(|r| r.end)
+            .unwrap_or(prev_line.range.start);
+        let prev_is_empty = self
+            .buffer
+            .slice_cow(prev_content_start..prev_line.range.end)
+            .trim()
+            .is_empty();
+
+        if !prev_is_empty {
+            return;
+        }
+
+        // Check if prev line has a marker at the same index with same kind
+        if marker_idx >= prev_line.markers.len() {
+            return;
+        }
+
+        let prev_marker = &prev_line.markers[marker_idx];
+        let kinds_match = match (&marker_kind, &prev_marker.kind) {
+            (Some(MarkerKind::BlockQuote), MarkerKind::BlockQuote) => true,
+            (Some(MarkerKind::ListItem { .. }), MarkerKind::ListItem { .. }) => true,
+            (Some(MarkerKind::TaskList { .. }), MarkerKind::TaskList { .. }) => true,
+            (Some(MarkerKind::Indent), MarkerKind::Indent) => true,
+            _ => false,
+        };
+
+        if kinds_match {
+            self.delete_and_adjust(prev_marker.range.clone());
         }
     }
 
@@ -710,44 +811,29 @@ impl EditorState {
         } else if self.cursor().offset > 0 {
             let cursor_pos = self.cursor().offset;
 
-            if let Some((delete_range, is_indent_marker)) =
-                self.backspace_range_with_type(cursor_pos)
-            {
+            // Check if we're at a marker position
+            if self.backspace_range_with_type(cursor_pos).is_some() {
+                // At marker position - remove the marker at cursor (innermost)
+                // and matching marker from empty line above
+                self.remove_marker_at_cursor();
+
+                // After removing nesting level, check if we're now on a blank line
+                // (no markers). If so, and prev line is also blank, join to content.
+                let cursor_pos = self.cursor().offset;
                 let line_idx = self.buffer.byte_to_line(cursor_pos);
                 let lines = self.buffer.lines();
-                let current_line = &lines[line_idx];
 
-                // Check if after deletion we'll be at line start (no more markers before cursor)
-                // This means we're deleting the outermost marker
-                let will_be_at_line_start = delete_range.start == current_line.range.start;
+                if let Some(current_line) = lines.get(line_idx) {
+                    // If current line now has no markers and is empty, join to content above
+                    if current_line.markers.is_empty() {
+                        let current_is_blank = self
+                            .buffer
+                            .slice_cow(current_line.range.clone())
+                            .trim()
+                            .is_empty();
 
-                // Delete the marker
-                let new_pos = delete_range.start;
-                self.buffer.delete(delete_range, cursor_pos);
-
-                // If we deleted the outermost marker (and it's not an Indent), check if
-                // previous line is empty and should be collapsed.
-                // Indent markers are special - they don't trigger collapsing because
-                // the blank line before an indented paragraph is intentional structure.
-                if will_be_at_line_start && line_idx > 0 && !is_indent_marker {
-                    // Re-fetch lines after the delete
-                    let lines = self.buffer.lines();
-                    if let Some(prev_line) = lines.get(line_idx - 1) {
-                        let prev_content_start = prev_line
-                            .marker_range()
-                            .map(|r| r.end)
-                            .unwrap_or(prev_line.range.start);
-                        let prev_is_empty = !prev_line.is_fence()
-                            && self
-                                .buffer
-                                .slice_cow(prev_content_start..prev_line.range.end)
-                                .trim()
-                                .is_empty();
-                        let prev_has_markers = prev_line.marker_range().is_some();
-
-                        if prev_is_empty && !prev_has_markers {
-                            // Previous line is truly empty (no markers, no content)
-                            // Find the last non-empty line before it and collapse
+                        if current_is_blank && line_idx > 0 {
+                            // Find the last line with content
                             let mut target_idx = line_idx - 1;
                             while target_idx > 0 {
                                 let line = &lines[target_idx];
@@ -772,43 +858,21 @@ impl EditorState {
                                 .marker_range()
                                 .map(|r| r.end)
                                 .unwrap_or(target_line.range.start);
-                            let target_is_empty = !target_line.is_fence()
-                                && self
-                                    .buffer
-                                    .slice_cow(target_content_start..target_line.range.end)
-                                    .trim()
-                                    .is_empty();
+                            let target_has_content = !self
+                                .buffer
+                                .slice_cow(target_content_start..target_line.range.end)
+                                .trim()
+                                .is_empty();
 
-                            if !target_is_empty {
+                            if target_has_content {
                                 // Delete from end of target content to current position
                                 let join_pos = target_line.range.end;
-                                self.buffer.delete(join_pos..new_pos, new_pos);
+                                let current_pos = self.cursor().offset;
+                                self.buffer.delete(join_pos..current_pos, current_pos);
                                 self.selection = Selection::new(join_pos, join_pos);
-                            } else {
-                                self.selection = Selection::new(new_pos, new_pos);
-                            }
-                        } else {
-                            // Previous line has content or markers, just join to it
-                            if self.buffer.byte_at(new_pos - 1) == Some(b'\n') {
-                                self.buffer.delete(new_pos - 1..new_pos, new_pos);
-                                self.selection = Selection::new(new_pos - 1, new_pos - 1);
-                            } else {
-                                self.selection = Selection::new(new_pos, new_pos);
                             }
                         }
-                    } else {
-                        self.selection = Selection::new(new_pos, new_pos);
                     }
-                } else if !is_indent_marker && new_pos > 0 {
-                    // Not outermost, but still join lines if there's a newline before
-                    if self.buffer.byte_at(new_pos - 1) == Some(b'\n') {
-                        self.buffer.delete(new_pos - 1..new_pos, new_pos);
-                        self.selection = Selection::new(new_pos - 1, new_pos - 1);
-                    } else {
-                        self.selection = Selection::new(new_pos, new_pos);
-                    }
-                } else {
-                    self.selection = Selection::new(new_pos, new_pos);
                 }
             } else {
                 let char_before = if cursor_pos > 0 {
@@ -3025,7 +3089,9 @@ plain text|"#,
 
         #[test]
         fn backspace_on_empty_nested_paragraph_under_ordered_list_joins_to_content() {
-            // Backspace on empty indented line under ordered list first removes indent marker
+            // Backspace on empty indented line under ordered list
+            // The indent marker is removed + matching marker from empty line above,
+            // then join to content
             let mut state = editor_with_cursor(
                 r#"
 1. item
@@ -3034,18 +3100,7 @@ plain text|"#,
 
    |"#,
             );
-            state.delete_backward();
-            // First backspace removes the indent marker, lands on blank line
-            assert_editor_eq(
-                &state,
-                r#"
-1. item
-
-   paragraph
-
-|"#,
-            );
-            // Second backspace joins to paragraph content
+            // Backspace removes indent and joins to paragraph content
             state.delete_backward();
             assert_editor_eq(
                 &state,
@@ -3125,22 +3180,13 @@ plain text|"#,
 
         #[test]
         fn backspace_on_blockquote_after_empty_continuation_joins_to_content() {
-            // "> paraga\n>\n> |" -> backspace removes markers one at a time
+            // "> paraga\n>\n> |" -> backspace collapses through empty line to content
             let mut state = editor_with_cursor(
                 r#"
 > paraga
 >
 > |"#,
             );
-            // First backspace: remove blockquote marker, join to prev line
-            state.delete_backward();
-            assert_editor_eq(
-                &state,
-                r#"
-> paraga
->|"#,
-            );
-            // Second backspace: remove blockquote marker, join to content
             state.delete_backward();
             assert_editor_eq(
                 &state,
@@ -3152,16 +3198,11 @@ plain text|"#,
         #[test]
         fn backspace_on_empty_nested_blockquote_joins_to_content() {
             let mut state = editor_with_cursor("> > text\n> >\n> > |");
-            // First backspace: remove inner blockquote
+            // 1st backspace: remove inner blockquote and matching from line above
             state.delete_backward();
-            assert_editor_eq(&state, "> > text\n> >\n> |");
-            // Second backspace: remove outer blockquote, join to prev line
-            state.delete_backward();
-            assert_editor_eq(&state, "> > text\n> >|");
-            // Third backspace: remove inner blockquote on line 1
-            state.delete_backward();
-            assert_editor_eq(&state, "> > text\n> |");
-            // Fourth backspace: remove outer blockquote, join to content
+            assert_editor_eq(&state, "> > text\n> \n> |");
+            // 2nd backspace: remove outer blockquote and matching from line above,
+            // then join to content since both lines become blank
             state.delete_backward();
             assert_editor_eq(&state, "> > text|");
         }
@@ -3169,19 +3210,14 @@ plain text|"#,
         #[test]
         fn backspace_on_empty_list_inside_nested_blockquote_joins_to_content() {
             let mut state = editor_with_cursor("> > - item\n> >\n> > - |");
-            // First backspace: remove list marker
+            // 1st backspace: remove list marker
             state.delete_backward();
             assert_editor_eq(&state, "> > - item\n> >\n> > |");
-            // Second backspace: remove inner blockquote marker
+            // 2nd backspace: remove inner blockquote and matching from line above
             state.delete_backward();
-            assert_editor_eq(&state, "> > - item\n> >\n> |");
-            // Third backspace: remove outer blockquote marker, join to prev line
-            state.delete_backward();
-            assert_editor_eq(&state, "> > - item\n> >|");
-            // Fourth backspace: remove inner blockquote on line 1
-            state.delete_backward();
-            assert_editor_eq(&state, "> > - item\n> |");
-            // Fifth backspace: remove outer blockquote, join to content
+            assert_editor_eq(&state, "> > - item\n> \n> |");
+            // 3rd backspace: remove outer blockquote and matching from line above,
+            // then join to content since both lines become blank
             state.delete_backward();
             assert_editor_eq(&state, "> > - item|");
         }
@@ -3235,8 +3271,7 @@ plain text|"#,
 
         #[test]
         fn backspace_after_closing_fence_in_blockquote() {
-            // Closing fence should not be treated as empty - backspace should just
-            // remove the empty continuation line, not the fence
+            // Closing fence should not be treated as empty - step by step behavior
             let mut state = editor_with_cursor(
                 r#"
 > ```
@@ -3244,6 +3279,20 @@ plain text|"#,
 > ```
 > |"#,
             );
+
+            // First backspace: removes "> " marker from current line
+            // (no matching marker removed from above because fence line has content)
+            state.delete_backward();
+            assert_editor_eq(
+                &state,
+                r#"
+> ```
+> code
+> ```
+|"#,
+            );
+
+            // Second backspace: join to fence line
             state.delete_backward();
             assert_editor_eq(
                 &state,
@@ -3307,14 +3356,15 @@ plain text|"#,
 
         #[test]
         fn backspace_on_list_in_blockquote_removes_list_marker_first() {
-            // "> 1. hey\n>\n> 2. |hey" -> backspace removes markers one at a time
+            // Step-by-step: remove innermost marker first, then work outward
             let mut state = editor_with_cursor(
                 r#"
 > 1. hey
 >
 > 2. |hey"#,
             );
-            // First backspace: remove list marker only
+
+            // First backspace: remove "2. " list marker (innermost)
             state.delete_backward();
             assert_editor_eq(
                 &state,
@@ -3323,15 +3373,49 @@ plain text|"#,
 >
 > |hey"#,
             );
-            // Second backspace: remove blockquote, join to prev line
+
+            // Second backspace: remove "> " from current line + matching ">" from empty line above
             state.delete_backward();
             assert_editor_eq(
                 &state,
                 r#"
 > 1. hey
->|hey"#,
+
+|hey"#,
             );
-            // Third backspace: remove blockquote, join content
+
+            // Third backspace: on blank line with no markers, join to content above
+            state.delete_backward();
+            assert_editor_eq(
+                &state,
+                r#"
+> 1. hey|hey"#,
+            );
+        }
+
+        #[test]
+        fn backspace_with_content_after_cursor_collapses_through_empty_line() {
+            // Cursor is at "> |hey" with content after cursor
+            // Previous line ">" is empty (has marker, no content)
+            // Step-by-step: remove markers first, then join
+            let mut state = editor_with_cursor(
+                r#"
+> 1. hey
+>
+> |hey"#,
+            );
+
+            // First backspace: remove "> " from current line and matching ">" from empty line above
+            state.delete_backward();
+            assert_editor_eq(
+                &state,
+                r#"
+> 1. hey
+
+|hey"#,
+            );
+
+            // Second backspace: on blank line with no markers, join to content above
             state.delete_backward();
             assert_editor_eq(
                 &state,
