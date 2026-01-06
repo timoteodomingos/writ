@@ -489,9 +489,11 @@ fn rope_slice_cow(rope: &Rope, start: usize, end: usize) -> std::borrow::Cow<'_,
 /// Returns (main_marker, optional_indent_for_leading_whitespace).
 fn marker_from_node(
     node_kind: &str,
-    content: &str,
-    base_offset: usize,
+    rope: &Rope,
+    start: usize,
+    end: usize,
 ) -> (Option<Marker>, Option<Marker>) {
+    let content = rope_slice_cow(rope, start, end);
     let bytes = content.as_bytes();
 
     // Find where the actual marker character starts (skip leading whitespace)
@@ -506,7 +508,7 @@ fn marker_from_node(
     let indent_marker = if marker_start > 0 {
         Some(Marker {
             kind: MarkerKind::Indent,
-            range: base_offset..(base_offset + marker_start),
+            range: start..(start + marker_start),
         })
     } else {
         None
@@ -523,7 +525,7 @@ fn marker_from_node(
                 };
                 Some(Marker {
                     kind: MarkerKind::BlockQuote,
-                    range: (base_offset + gt_pos)..(base_offset + range_end),
+                    range: (start + gt_pos)..(start + range_end),
                 })
             } else {
                 None
@@ -542,7 +544,7 @@ fn marker_from_node(
                     unordered_marker,
                     ordered_marker: None,
                 },
-                range: (base_offset + marker_start)..(base_offset + content.len()),
+                range: (start + marker_start)..end,
             })
         }
         "list_marker_dot" | "list_marker_parenthesis" => {
@@ -557,7 +559,7 @@ fn marker_from_node(
                     unordered_marker: None,
                     ordered_marker,
                 },
-                range: (base_offset + marker_start)..(base_offset + content.len()),
+                range: (start + marker_start)..end,
             })
         }
         _ => None,
@@ -568,7 +570,7 @@ fn marker_from_node(
 
 /// Parse a continuation string into markers using tree-sitter.
 /// Returns markers innermost-to-outermost (reverse document order) for use by markers_at.
-pub fn parse_continuation(content: &str, base_offset: usize) -> Vec<Marker> {
+pub fn parse_continuation(rope: &Rope, start: usize, end: usize) -> Vec<Marker> {
     use crate::parser::MarkdownParser;
     use std::cell::RefCell;
 
@@ -578,6 +580,7 @@ pub fn parse_continuation(content: &str, base_offset: usize) -> Vec<Marker> {
 
     let mut markers = Vec::new();
 
+    let content = rope_slice_cow(rope, start, end);
     let bytes = content.as_bytes();
     let tree =
         PARSER.with_borrow_mut(|parser| parser.parse_with(&mut |byte, _| &bytes[byte..], None));
@@ -604,9 +607,10 @@ pub fn parse_continuation(content: &str, base_offset: usize) -> Vec<Marker> {
                 | "list_marker_dot"
                 | "list_marker_parenthesis"
         ) {
-            let start = node.start_byte();
-            let node_content = &content[start..node.end_byte()];
-            let (marker, indent) = marker_from_node(kind, node_content, base_offset + start);
+            let node_start = node.start_byte();
+            let node_end = node.end_byte();
+            let (marker, indent) =
+                marker_from_node(kind, rope, start + node_start, start + node_end);
 
             // Only add indent markers AFTER the first marker (for whitespace between markers).
             // Leading whitespace before the first marker is handled by a separate
@@ -618,7 +622,7 @@ pub fn parse_continuation(content: &str, base_offset: usize) -> Vec<Marker> {
             }
             if let Some(m) = marker {
                 first_marker_seen = true;
-                last_marker_end = m.range.end - base_offset;
+                last_marker_end = m.range.end - start;
                 markers.insert(0, m);
             }
         }
@@ -640,8 +644,7 @@ pub fn parse_continuation(content: &str, base_offset: usize) -> Vec<Marker> {
                             0,
                             Marker {
                                 kind: MarkerKind::Indent,
-                                range: (base_offset + last_marker_end)
-                                    ..(base_offset + content.len()),
+                                range: (start + last_marker_end)..(start + content.len()),
                             },
                         );
                     }
@@ -716,7 +719,7 @@ pub fn markers_at(nodes: &[Node], rope: &Rope, line_start: usize, line_end: usiz
                 if content.contains('>') {
                     // Use parse_continuation to extract markers via tree-sitter.
                     // It returns markers innermost-to-outermost, matching our order.
-                    markers.extend(parse_continuation(&content, start));
+                    markers.extend(parse_continuation(rope, start, end));
                 } else if !content.is_empty() && content.chars().all(|c| c.is_whitespace()) {
                     markers.push(Marker {
                         kind: MarkerKind::Indent,
