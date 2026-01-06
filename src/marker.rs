@@ -107,12 +107,16 @@ impl LineMarkers {
             return String::new();
         }
 
-        // If markers are only Indent, BlockQuote, or CodeBlockFence, return empty
-        // - padding is handled by rendering for these
+        // If markers are only spacer-handled types or code fences, return empty
+        // - padding is handled by rendering (spacers) for these
         if self.markers.iter().all(|m| {
             matches!(
                 m.kind,
-                MarkerKind::Indent | MarkerKind::BlockQuote | MarkerKind::CodeBlockFence { .. }
+                MarkerKind::Indent
+                    | MarkerKind::BlockQuote
+                    | MarkerKind::ListItem { .. }
+                    | MarkerKind::TaskList { .. }
+                    | MarkerKind::CodeBlockFence { .. }
             )
         }) {
             return String::new();
@@ -151,10 +155,16 @@ impl LineMarkers {
         };
 
         // Build substitution: leading whitespace + marker substitutions
-        // Skip Indent and BlockQuote - their padding is handled by rendering (spacers)
+        // Skip spacer-handled markers - their padding is handled by rendering
         let mut result = leading_ws.into_owned();
         for m in self.markers.iter().rev() {
-            if !matches!(m.kind, MarkerKind::Indent | MarkerKind::BlockQuote) {
+            if !matches!(
+                m.kind,
+                MarkerKind::Indent
+                    | MarkerKind::BlockQuote
+                    | MarkerKind::ListItem { .. }
+                    | MarkerKind::TaskList { .. }
+            ) {
                 result.push_str(m.kind.substitution());
             }
         }
@@ -1339,54 +1349,40 @@ mod tests {
     fn test_line_substitution() {
         let buf: Buffer = "> - Item text here\n".parse().unwrap();
         let lines = buf.lines();
-        // Blockquote padding is handled by rendering, substitution only includes bullet
-        assert_eq!(lines[0].substitution_rope(buf.rope()), "• ");
+        // All markers (blockquote, list) are now rendered as spacers, not substitution
+        assert_eq!(lines[0].substitution_rope(buf.rope()), "");
     }
 
     #[test]
     fn test_line_substitution_task_list() {
         let buf: Buffer = "- [ ] Task item\n".parse().unwrap();
         let lines = buf.lines();
-        assert_eq!(lines[0].substitution_rope(buf.rope()), "• [ ] ");
+        // Task list markers are rendered as spacers, not substitution
+        assert_eq!(lines[0].substitution_rope(buf.rope()), "");
     }
 
     #[test]
     fn test_line_substitution_different_markers() {
-        // Each unordered list marker should have a distinct bullet
+        // All list markers are now rendered as spacers, not substitution
         let buf_minus: Buffer = "- item\n".parse().unwrap();
         let buf_star: Buffer = "* item\n".parse().unwrap();
         let buf_plus: Buffer = "+ item\n".parse().unwrap();
 
-        // - uses filled circle
-        assert_eq!(
-            buf_minus.lines()[0].substitution_rope(buf_minus.rope()),
-            "• "
-        );
-        // * uses white bullet (small hollow)
-        assert_eq!(buf_star.lines()[0].substitution_rope(buf_star.rope()), "◦ ");
-        // + uses triangular bullet
-        assert_eq!(buf_plus.lines()[0].substitution_rope(buf_plus.rope()), "‣ ");
+        assert_eq!(buf_minus.lines()[0].substitution_rope(buf_minus.rope()), "");
+        assert_eq!(buf_star.lines()[0].substitution_rope(buf_star.rope()), "");
+        assert_eq!(buf_plus.lines()[0].substitution_rope(buf_plus.rope()), "");
     }
 
     #[test]
     fn test_task_list_substitution_different_markers() {
-        // Task lists with different markers should have distinct bullets
+        // Task list markers are now rendered as spacers, not substitution
         let buf_minus: Buffer = "- [ ] task\n".parse().unwrap();
         let buf_star: Buffer = "* [ ] task\n".parse().unwrap();
         let buf_plus: Buffer = "+ [ ] task\n".parse().unwrap();
 
-        assert_eq!(
-            buf_minus.lines()[0].substitution_rope(buf_minus.rope()),
-            "• [ ] "
-        );
-        assert_eq!(
-            buf_star.lines()[0].substitution_rope(buf_star.rope()),
-            "◦ [ ] "
-        );
-        assert_eq!(
-            buf_plus.lines()[0].substitution_rope(buf_plus.rope()),
-            "‣ [ ] "
-        );
+        assert_eq!(buf_minus.lines()[0].substitution_rope(buf_minus.rope()), "");
+        assert_eq!(buf_star.lines()[0].substitution_rope(buf_star.rope()), "");
+        assert_eq!(buf_plus.lines()[0].substitution_rope(buf_plus.rope()), "");
     }
 
     #[test]

@@ -1459,8 +1459,9 @@ mod tests {
         let buf: Buffer = "- Item\n".parse().unwrap();
         let lines = buf.lines();
 
+        // List markers are now rendered as spacers, not substitution
         let sub = lines[0].substitution_rope(buf.rope());
-        assert!(sub.contains('•') || sub.contains('-'));
+        assert_eq!(sub, "");
     }
 
     #[test]

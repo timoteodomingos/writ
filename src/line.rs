@@ -177,17 +177,8 @@ impl<'a> Line<'a> {
         let range = &self.line.range;
 
         if let Some(marker_range) = self.line.marker_range() {
-            // For ordered lists, we want to show the number (e.g., "1. ") but still hide
-            // other markers like blockquotes. Find where the ordered list marker starts.
-            if let Some(ordered_marker) = self
-                .line
-                .markers
-                .iter()
-                .find(|m| matches!(m.kind, MarkerKind::ListItem { ordered: true, .. }))
-            {
-                // Start from the ordered list marker, not the full line
-                ordered_marker.range.start..range.end
-            } else if let Some(fence_marker) = self
+            // For code fences, show the fence markers (```) in content
+            if let Some(fence_marker) = self
                 .line
                 .markers
                 .iter()
@@ -195,6 +186,7 @@ impl<'a> Line<'a> {
             {
                 fence_marker.range.start..range.end
             } else {
+                // Content starts after all markers (they're rendered as spacers)
                 marker_range.end..range.end
             }
         } else {
@@ -891,7 +883,64 @@ impl IntoElement for Line<'_> {
                     let spacer = div().w(spacer_width).min_h_full();
                     spacers.push(spacer);
                 }
-                MarkerKind::ListItem { .. } | MarkerKind::TaskList { .. } => {}
+                MarkerKind::ListItem {
+                    ordered,
+                    unordered_marker,
+                    ..
+                } => {
+                    // Create a spacer containing the list marker (bullet or number)
+                    // This ensures wrapped text indents past the marker
+                    let marker_chars = marker.range.len();
+                    let spacer_width = self.theme.monospace_char_width * marker_chars as f32;
+
+                    let marker_text = if *ordered {
+                        // For ordered lists, get the actual number from the buffer
+                        self.slice(marker.range.clone()).into_owned()
+                    } else {
+                        // For unordered lists, use the bullet substitution
+                        unordered_marker.map_or("• ", |m| m.bullet()).to_string()
+                    };
+
+                    let marker_label = div()
+                        .w(spacer_width)
+                        .min_h_full()
+                        .font_family(self.theme.code_font.family.clone())
+                        .text_color(self.theme.text_color)
+                        .child(marker_text);
+
+                    spacers.push(marker_label);
+                }
+                MarkerKind::TaskList {
+                    checked,
+                    unordered_marker,
+                } => {
+                    // Create a spacer containing the checkbox
+                    let marker_chars = marker.range.len();
+                    let spacer_width = self.theme.monospace_char_width * marker_chars as f32;
+
+                    let checkbox_str = if *checked { "[x] " } else { "[ ] " };
+                    let bullet = unordered_marker.map_or("• ", |m| m.bullet());
+
+                    let marker_label = div()
+                        .w(spacer_width)
+                        .min_h_full()
+                        .flex()
+                        .flex_row()
+                        .child(
+                            div()
+                                .font_family(self.theme.code_font.family.clone())
+                                .text_color(self.theme.text_color)
+                                .child(bullet.to_string()),
+                        )
+                        .child(
+                            div()
+                                .font_family(self.theme.code_font.family.clone())
+                                .text_color(self.theme.link_color)
+                                .child(checkbox_str.to_string()),
+                        );
+
+                    spacers.push(marker_label);
+                }
             }
         }
 
