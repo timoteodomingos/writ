@@ -769,13 +769,19 @@ impl EditorState {
         }
 
         let prev_marker = &prev_line.markers[marker_idx];
-        let kinds_match = match (&marker_kind, &prev_marker.kind) {
-            (Some(MarkerKind::BlockQuote), MarkerKind::BlockQuote) => true,
-            (Some(MarkerKind::ListItem { .. }), MarkerKind::ListItem { .. }) => true,
-            (Some(MarkerKind::TaskList { .. }), MarkerKind::TaskList { .. }) => true,
-            (Some(MarkerKind::Indent), MarkerKind::Indent) => true,
-            _ => false,
-        };
+        let kinds_match = matches!(
+            (&marker_kind, &prev_marker.kind),
+            (Some(MarkerKind::BlockQuote), MarkerKind::BlockQuote)
+                | (
+                    Some(MarkerKind::ListItem { .. }),
+                    MarkerKind::ListItem { .. }
+                )
+                | (
+                    Some(MarkerKind::TaskList { .. }),
+                    MarkerKind::TaskList { .. }
+                )
+                | (Some(MarkerKind::Indent), MarkerKind::Indent)
+        );
 
         if kinds_match {
             self.delete_and_adjust(prev_marker.range.clone());
@@ -826,77 +832,75 @@ impl EditorState {
                 let line_idx = self.buffer.byte_to_line(cursor_pos);
                 let lines = self.buffer.lines();
 
-                if line_idx > 0 {
-                    if let Some(current_line) = lines.get(line_idx) {
-                        // Current line must be blank with no markers
-                        if current_line.markers.is_empty()
-                            && self
-                                .buffer
-                                .slice_cow(current_line.range.clone())
-                                .trim()
-                                .is_empty()
-                        {
-                            let prev_line = &lines[line_idx - 1];
-                            let prev_content_start = prev_line
+                if line_idx > 0
+                    && let Some(current_line) = lines.get(line_idx)
+                    // Current line must be blank with no markers
+                    && current_line.markers.is_empty()
+                    && self
+                        .buffer
+                        .slice_cow(current_line.range.clone())
+                        .trim()
+                        .is_empty()
+                {
+                    let prev_line = &lines[line_idx - 1];
+                    let prev_content_start = prev_line
+                        .marker_range()
+                        .map(|r| r.end)
+                        .unwrap_or(prev_line.range.start);
+                    let prev_is_blank_no_markers = prev_line.markers.is_empty()
+                        && self
+                            .buffer
+                            .slice_cow(prev_line.range.clone())
+                            .trim()
+                            .is_empty();
+                    let prev_has_content = !prev_line.is_fence()
+                        && !self
+                            .buffer
+                            .slice_cow(prev_content_start..prev_line.range.end)
+                            .trim()
+                            .is_empty();
+
+                    if prev_has_content {
+                        // Immediate prev line has content → join directly
+                        let join_pos = prev_line.range.end;
+                        let current_pos = self.cursor().offset;
+                        self.buffer.delete(join_pos..current_pos, current_pos);
+                        self.selection = Selection::new(join_pos, join_pos);
+                    } else if prev_is_blank_no_markers {
+                        // Prev line is also blank with no markers → find content above
+                        let mut target_idx = line_idx - 1;
+                        while target_idx > 0 {
+                            let line = &lines[target_idx];
+                            let content_start = line
                                 .marker_range()
                                 .map(|r| r.end)
-                                .unwrap_or(prev_line.range.start);
-                            let prev_is_blank_no_markers = prev_line.markers.is_empty()
-                                && self
-                                    .buffer
-                                    .slice_cow(prev_line.range.clone())
-                                    .trim()
-                                    .is_empty();
-                            let prev_has_content = !prev_line.is_fence()
+                                .unwrap_or(line.range.start);
+                            let has_content = !line.is_fence()
                                 && !self
                                     .buffer
-                                    .slice_cow(prev_content_start..prev_line.range.end)
+                                    .slice_cow(content_start..line.range.end)
                                     .trim()
                                     .is_empty();
-
-                            if prev_has_content {
-                                // Immediate prev line has content → join directly
-                                let join_pos = prev_line.range.end;
-                                let current_pos = self.cursor().offset;
-                                self.buffer.delete(join_pos..current_pos, current_pos);
-                                self.selection = Selection::new(join_pos, join_pos);
-                            } else if prev_is_blank_no_markers {
-                                // Prev line is also blank with no markers → find content above
-                                let mut target_idx = line_idx - 1;
-                                while target_idx > 0 {
-                                    let line = &lines[target_idx];
-                                    let content_start = line
-                                        .marker_range()
-                                        .map(|r| r.end)
-                                        .unwrap_or(line.range.start);
-                                    let has_content = !line.is_fence()
-                                        && !self
-                                            .buffer
-                                            .slice_cow(content_start..line.range.end)
-                                            .trim()
-                                            .is_empty();
-                                    if has_content {
-                                        break;
-                                    }
-                                    // Stop if we hit a line with markers (don't skip over them)
-                                    if !line.markers.is_empty() {
-                                        target_idx = line_idx; // Reset to prevent join
-                                        break;
-                                    }
-                                    target_idx -= 1;
-                                }
-
-                                if target_idx < line_idx {
-                                    let target_line = &lines[target_idx];
-                                    let join_pos = target_line.range.end;
-                                    let current_pos = self.cursor().offset;
-                                    self.buffer.delete(join_pos..current_pos, current_pos);
-                                    self.selection = Selection::new(join_pos, join_pos);
-                                }
+                            if has_content {
+                                break;
                             }
-                            // If prev line has markers but no content, don't join
+                            // Stop if we hit a line with markers (don't skip over them)
+                            if !line.markers.is_empty() {
+                                target_idx = line_idx; // Reset to prevent join
+                                break;
+                            }
+                            target_idx -= 1;
+                        }
+
+                        if target_idx < line_idx {
+                            let target_line = &lines[target_idx];
+                            let join_pos = target_line.range.end;
+                            let current_pos = self.cursor().offset;
+                            self.buffer.delete(join_pos..current_pos, current_pos);
+                            self.selection = Selection::new(join_pos, join_pos);
                         }
                     }
+                    // If prev line has markers but no content, don't join
                 }
             } else {
                 let char_before = if cursor_pos > 0 {

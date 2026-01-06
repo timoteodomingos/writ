@@ -748,28 +748,29 @@ impl IntoElement for Line<'_> {
         });
 
         // If standalone image and cursor is NOT on line, just show the image
-        if let Some((source, on_click, line_end, open_url)) = standalone_image.clone() {
-            if !self.cursor_on_line() && !self.selection_on_line() {
-                return line_base(line_number).child(img(source).max_w_full().on_mouse_down(
-                    MouseButton::Left,
-                    move |event: &MouseDownEvent, window, cx| {
-                        // Ctrl/Cmd + click opens the image
-                        if event.modifiers.control || event.modifiers.platform {
-                            let _ = open::that(&open_url);
-                            return;
-                        }
-                        if let Some(ref on_click) = on_click {
-                            on_click(
-                                line_end,
-                                event.modifiers.shift,
-                                event.click_count,
-                                window,
-                                cx,
-                            );
-                        }
-                    },
-                ));
-            }
+        if let Some((source, on_click, line_end, open_url)) = standalone_image.clone()
+            && !self.cursor_on_line()
+            && !self.selection_on_line()
+        {
+            return line_base(line_number).child(img(source).max_w_full().on_mouse_down(
+                MouseButton::Left,
+                move |event: &MouseDownEvent, window, cx| {
+                    // Ctrl/Cmd + click opens the image
+                    if event.modifiers.control || event.modifiers.platform {
+                        let _ = open::that(&open_url);
+                        return;
+                    }
+                    if let Some(ref on_click) = on_click {
+                        on_click(
+                            line_end,
+                            event.modifiers.shift,
+                            event.click_count,
+                            window,
+                            cx,
+                        );
+                    }
+                },
+            ));
         }
 
         let (display_text, mut runs) = self.build_styled_content();
