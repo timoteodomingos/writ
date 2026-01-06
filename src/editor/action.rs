@@ -6,16 +6,17 @@
 pub enum EditorAction {
     /// Insert a character at the cursor.
     Type(char),
-    /// Insert a newline.
+    /// Insert a raw newline.
     Enter,
-    /// Smart enter: continues lists, blockquotes, etc.
+    /// Continue container: adds markers from current line.
     ShiftEnter,
-    /// Smart tab: indents the current line to nest under the previous sibling.
-    /// Does nothing if there's no valid previous sibling to nest under.
+    /// Indented continuation: creates nested paragraph.
+    ShiftAltEnter,
+    /// Tab: cycles forward through nesting states based on context.
     Tab,
-    /// Smart shift-tab: un-indents the current line.
+    /// Shift-Tab: cycles backward through nesting states.
     ShiftTab,
-    /// Delete the character before the cursor.
+    /// Delete the character before the cursor (markers are atomic).
     Backspace,
     /// Move the cursor in a direction.
     Move(Direction),

@@ -413,289 +413,265 @@ impl EditorState {
     }
 
     /// Smart tab: adds structure based on context.
+    /// Tab: cycle forward through nesting states based on context (up to 2 lines above).
+    /// States depend on context type:
+    /// - List: empty → indent → indent+marker → empty
+    /// - Blockquote: empty → marker → empty
+    /// - Nested (> -): empty → outer → outer+inner → outer+indent → empty
     pub fn tab(&mut self) {
+        let Some((states, current_idx)) = self.tab_cycle_state() else {
+            return;
+        };
+
+        if states.len() <= 1 {
+            return;
+        }
+
+        let next_idx = (current_idx + 1) % states.len();
+        self.set_line_prefix(&states[next_idx]);
+    }
+
+    /// Shift+Tab: cycle backward through nesting states.
+    fn shift_tab_cycle(&mut self) {
+        let Some((states, current_idx)) = self.tab_cycle_state() else {
+            return;
+        };
+
+        if states.len() <= 1 {
+            return;
+        }
+
+        let prev_idx = if current_idx == 0 {
+            states.len() - 1
+        } else {
+            current_idx - 1
+        };
+        self.set_line_prefix(&states[prev_idx]);
+    }
+
+    /// Determine the tab cycle states and current position based on context.
+    /// Returns (states, current_index) or None if no context.
+    fn tab_cycle_state(&self) -> Option<(Vec<String>, usize)> {
+        let ctx = self.line_context()?;
+
+        // Find context line with at most 1 blank line between (0 or 1 blank lines allowed)
+        let context_line = self.find_context_line(ctx.line_idx, 1)?;
+
+        // Get the current line's prefix (everything before content)
+        let current_prefix = self.current_line_prefix(&ctx.line);
+
+        // Build states based on context
+        let states = self.build_cycle_states(&context_line);
+
+        // Find current state in the cycle
+        let current_idx = states
+            .iter()
+            .position(|s| s == &current_prefix)
+            .unwrap_or(0);
+
+        Some((states, current_idx))
+    }
+
+    /// Find the context line (with markers) within max_lines above current.
+    fn find_context_line(&self, line_idx: usize, max_lines: usize) -> Option<LineMarkers> {
+        if line_idx == 0 {
+            return None;
+        }
+
+        let lines = self.buffer.lines();
+        let mut blank_count = 0;
+
+        for i in (0..line_idx).rev() {
+            let line = &lines[i];
+            let text = self.buffer.slice_cow(line.range.clone());
+
+            if !line.markers.is_empty() {
+                // Found a container line
+                if blank_count <= max_lines {
+                    return Some(line.clone());
+                } else {
+                    return None;
+                }
+            }
+
+            if text.trim().is_empty() {
+                blank_count += 1;
+                if blank_count > max_lines {
+                    return None;
+                }
+            } else {
+                // Non-empty non-container line breaks the search
+                return None;
+            }
+        }
+        None
+    }
+
+    /// Get the current prefix of a line (markers/indent before content).
+    fn current_line_prefix(&self, line: &LineMarkers) -> String {
+        if line.markers.is_empty() {
+            String::new()
+        } else {
+            // Find the marker that ends furthest into the line
+            let max_end = line.markers.iter().map(|m| m.range.end).max().unwrap();
+            self.buffer
+                .slice_cow(line.range.start..max_end)
+                .into_owned()
+        }
+    }
+
+    /// Build the cycle states based on context line type.
+    fn build_cycle_states(&self, context: &LineMarkers) -> Vec<String> {
+        let mut states = vec![String::new()]; // Always start with empty
+
+        let has_list = context.markers.iter().any(|m| {
+            matches!(
+                m.kind,
+                MarkerKind::ListItem { .. } | MarkerKind::TaskList { .. }
+            )
+        });
+        let has_blockquote = context
+            .markers
+            .iter()
+            .any(|m| matches!(m.kind, MarkerKind::BlockQuote));
+
+        if has_blockquote && has_list {
+            // Nested context (e.g., "> - item")
+            // States: empty → "> " → "> - " → ">   " → empty
+            let outer = self.blockquote_prefix(context);
+            let full = context.continuation_rope(self.buffer.rope());
+            let indent = context.nested_paragraph_indent(self.buffer.rope());
+
+            states.push(outer);
+            if full != states.last().unwrap().as_str() {
+                states.push(full);
+            }
+            if !indent.is_empty() && indent != states.last().unwrap().as_str() {
+                states.push(indent);
+            }
+        } else if has_list {
+            // List context: empty → "  " → "  - " → empty
+            // nested_paragraph_indent gives us the indent ("  ")
+            // For the full nested marker, we need indent + list marker
+            let indent = context.nested_paragraph_indent(self.buffer.rope());
+            let list_marker = context.continuation_rope(self.buffer.rope());
+            let full = format!("{}{}", indent, list_marker);
+
+            states.push(indent);
+            states.push(full);
+        } else if has_blockquote {
+            // Blockquote only: empty → "> " → empty
+            let marker = context.continuation_rope(self.buffer.rope());
+            if !marker.is_empty() {
+                states.push(marker);
+            }
+        }
+
+        states
+    }
+
+    /// Extract the blockquote prefix from a nested context.
+    fn blockquote_prefix(&self, context: &LineMarkers) -> String {
+        let mut result = String::new();
+        for marker in &context.markers {
+            if matches!(marker.kind, MarkerKind::BlockQuote) {
+                result.push_str(&self.buffer.slice_cow(marker.range.clone()));
+            }
+        }
+        result
+    }
+
+    /// Set the line prefix, replacing current markers.
+    fn set_line_prefix(&mut self, new_prefix: &str) {
         let Some(ctx) = self.line_context() else {
             return;
         };
 
-        // Blockquote-only lines: tab does nothing (don't nest blockquotes)
-        if ctx.line.is_blockquote_only() {
-            return;
-        }
-
         let line_start = ctx.line.range.start;
+        let current_prefix_end = if ctx.line.markers.is_empty() {
+            line_start
+        } else {
+            // Find the marker that ends furthest into the line
+            ctx.line.markers.iter().map(|m| m.range.end).max().unwrap()
+        };
 
-        if !ctx.line.markers.is_empty() {
-            // Check if we can nest deeper (only one level beyond previous content line)
-            // Look back up to 2 lines to skip over empty continuation lines
-            if let Some(prev) = self.prev_content_line(ctx.line_idx, 2)
-                && ctx.line.marker_width() >= prev.marker_width() + 2
-            {
-                return;
-            }
-            self.insert_at(line_start, "  ");
-        } else if ctx.line_idx > 0 {
-            // Find the nearest container to nest under
-            let lines = self.buffer.lines();
-            let mut container_line = None;
-            for i in (0..ctx.line_idx).rev() {
-                let line = &lines[i];
-                if !line.markers.is_empty() {
-                    container_line = Some(line);
-                    break;
-                }
-                if !self.buffer.slice_cow(line.range.clone()).trim().is_empty() {
-                    break;
-                }
-            }
-
-            if let Some(container) = container_line {
-                let prev_line = &lines[ctx.line_idx - 1];
-                let is_after_blank = self
-                    .buffer
-                    .slice_cow(prev_line.range.clone())
-                    .trim()
-                    .is_empty();
-
-                if is_after_blank {
-                    // After blank line - indent as nested block.
-                    // Use nested_paragraph_indent which handles ordered vs unordered lists.
-                    let indent = container.nested_paragraph_indent(self.buffer.rope());
-                    self.insert_at(line_start, &indent);
-                } else {
-                    // Adjacent to container - add list marker
-                    let continuation = container.continuation_rope(self.buffer.rope());
-                    if !continuation.is_empty() {
-                        self.insert_at(line_start, &continuation);
-                    }
-                }
-            }
+        // Delete current prefix and insert new one
+        if current_prefix_end > line_start {
+            self.buffer
+                .delete(line_start..current_prefix_end, self.cursor().offset);
         }
+
+        if !new_prefix.is_empty() {
+            self.buffer.insert(line_start, new_prefix, line_start);
+        }
+
+        // Update cursor position
+        let new_cursor = line_start + new_prefix.len();
+        self.selection = Selection::new(new_cursor, new_cursor);
     }
 
     /// Smart enter: creates paragraph break or exits container on empty line.
+    /// Enter: just insert a raw newline. No magic.
     pub fn enter(&mut self) {
-        self.do_enter(true);
+        self.insert_text("\n");
     }
 
-    /// Core enter logic. If `allow_exit` is true, empty container lines will exit.
-    /// If false, they create a paragraph break instead (shift+enter behavior).
-    fn do_enter(&mut self, allow_exit: bool) {
-        if self.is_pending_marker(self.cursor().offset) {
-            self.complete_pending_marker();
-            let text = self.compute_enter_text(self.cursor().offset);
-            self.insert_text(&text);
-            return;
-        }
-
+    /// Shift+Enter: continue container (add markers from current line).
+    pub fn shift_enter(&mut self) {
         let Some(ctx) = self.line_context() else {
             self.insert_text("\n");
             return;
         };
 
-        // Check if line has an opening code fence marker
-        let has_opening_fence = ctx.line.markers.iter().any(|m| {
-            matches!(
-                m.kind,
-                MarkerKind::CodeBlockFence {
-                    is_opening: true,
-                    ..
-                }
-            )
-        });
-
-        // Check if line has a closing code fence marker
-        let has_closing_fence = ctx.line.markers.iter().any(|m| {
-            matches!(
-                m.kind,
-                MarkerKind::CodeBlockFence {
-                    is_opening: false,
-                    ..
-                }
-            )
-        });
-
-        // Check if we're inside a code block (between fences)
-        let in_code_block = self.cursor_in_code_block();
-
-        // Fallback: if parser thinks we're in a code block but line content looks like
-        // a closing fence, treat it as such (parser may not recognize closing fence
-        // inside blockquotes without trailing content)
-        let content_start = ctx
-            .line
-            .marker_range()
-            .map(|r| r.end)
-            .unwrap_or(ctx.line.range.start);
-        let line_content = self.buffer.slice_cow(content_start..ctx.line.range.end);
-        let looks_like_closing_fence =
-            in_code_block && !has_opening_fence && line_content.trim().starts_with("```");
-
-        if has_closing_fence || looks_like_closing_fence {
-            // Closing fence: create paragraph break to start new content
-            let continuation = ctx.line.continuation_without_fence();
-            if continuation.is_empty() {
-                self.insert_text("\n\n");
-            } else {
-                self.insert_text(&format!("\n{}\n{}", continuation.trim_end(), continuation));
-            }
-        } else if has_opening_fence || in_code_block {
-            // Opening fence or inside code block: just insert newline with any outer container
-            // continuations (e.g., blockquote markers), but not the fence itself
-            let continuation = ctx.line.continuation_without_fence();
-            if continuation.is_empty() {
-                self.insert_text("\n");
-            } else {
-                self.insert_text(&format!("\n{}", continuation));
-            }
-        } else if !ctx.has_container {
-            // Paragraph
-            if allow_exit && ctx.is_empty && !ctx.line.markers.is_empty() {
-                // Empty nested paragraph - exit by removing indent
-                self.delete_and_adjust(ctx.line.markers[0].range.clone());
-            } else if ctx.is_empty {
-                // Already on empty line - just add one newline
-                self.insert_text("\n");
-            } else {
-                // Create paragraph break
-                // Only preserve Indent markers as indent, not other single markers like CodeBlockFence
-                let indent = ctx.line.indent_only_rope(self.buffer.rope());
-                self.insert_text(&format!("\n\n{}", indent));
-            }
-        } else if allow_exit && ctx.is_empty {
-            // Empty container line - exit by removing markers.
-            // Also clean up preceding empty lines (lines with markers but no content)
-            // by removing their markers too.
-            //
-            // Example: "> > hey\n> >\n> > |" -> Enter -> "> > hey\n\n|"
-            // We remove markers from current line and the empty "> >" line above.
-
-            let current_marker_range = ctx.line.marker_range().unwrap_or(ctx.line.range.clone());
-
-            // First, delete current line's markers
-            self.delete_and_adjust(current_marker_range);
-
-            // Now clean up preceding empty lines by removing their markers
-            loop {
-                let cursor_pos = self.cursor().offset;
-                let line_idx = self.buffer.byte_to_line(cursor_pos);
-
-                if line_idx == 0 {
-                    break;
-                }
-
-                let lines = self.buffer.lines();
-                let Some(prev_line) = lines.get(line_idx - 1) else {
-                    break;
-                };
-
-                // Check if previous line is empty (has markers but no content)
-                if prev_line.markers.is_empty() {
-                    // Previous line is truly blank - stop here
-                    break;
-                }
-
-                let prev_content_start = prev_line
-                    .marker_range()
-                    .map(|r| r.end)
-                    .unwrap_or(prev_line.range.start);
-                let prev_has_content = !self
-                    .buffer
-                    .slice_cow(prev_content_start..prev_line.range.end)
-                    .trim()
-                    .is_empty();
-
-                if prev_has_content {
-                    // Previous line has content - stop here
-                    break;
-                }
-
-                // Previous line is empty (markers only) - remove its markers
-                let prev_marker_range = prev_line.marker_range().unwrap_or(prev_line.range.clone());
-                self.delete_and_adjust(prev_marker_range);
-            }
-
-            // Add newline for paragraph break, but only if we don't already have a blank line above
-            let cursor_pos = self.cursor().offset;
-            let line_idx = self.buffer.byte_to_line(cursor_pos);
-            let needs_newline = if line_idx > 0 {
-                let lines = self.buffer.lines();
-                if let Some(prev_line) = lines.get(line_idx - 1) {
-                    // Check if prev line has content
-                    !self
-                        .buffer
-                        .slice_cow(prev_line.range.clone())
-                        .trim()
-                        .is_empty()
-                } else {
-                    true
-                }
-            } else {
-                true
-            };
-
-            if needs_newline {
-                self.insert_at(self.cursor().offset, "\n");
-            }
+        // Get the continuation (all markers) for this line
+        let continuation = ctx.line.continuation_rope(self.buffer.rope());
+        if continuation.is_empty() {
+            self.insert_text("\n");
         } else {
-            // Line has content (or is empty but not exiting) - create paragraph break
-            let has_list_marker = ctx.line.markers.iter().any(|m| {
-                matches!(
-                    m.kind,
-                    MarkerKind::ListItem { .. } | MarkerKind::TaskList { .. }
-                )
-            });
+            self.insert_text(&format!("\n{}", continuation));
+        }
+    }
 
-            if !allow_exit && has_list_marker {
-                // Shift+Enter on list item: create nested paragraph (indent without list marker)
-                let empty_line = ctx.line.continuation_without_list_rope(self.buffer.rope());
-                let indent = ctx.line.nested_paragraph_indent(self.buffer.rope());
-                self.insert_text(&format!("\n{}\n{}", empty_line.trim_end(), indent));
+    /// Shift+Alt+Enter: create indented continuation (for nested paragraphs).
+    /// For lists: newline + indent (no list marker)
+    /// For blockquotes alone: newline + indent (exits blockquote)
+    /// For nested (e.g. `> - item`): newline + outer markers + indent
+    pub fn shift_alt_enter(&mut self) {
+        let Some(ctx) = self.line_context() else {
+            self.insert_text("\n");
+            return;
+        };
+
+        // Check if line has only blockquote markers (no list markers)
+        let has_list = ctx.line.markers.iter().any(|m| {
+            matches!(
+                m.kind,
+                MarkerKind::ListItem { .. } | MarkerKind::TaskList { .. }
+            )
+        });
+        let has_blockquote = ctx
+            .line
+            .markers
+            .iter()
+            .any(|m| matches!(m.kind, MarkerKind::BlockQuote));
+
+        if has_blockquote && !has_list {
+            // Pure blockquote: exit with just indent
+            self.insert_text("\n  ");
+        } else {
+            // Lists or nested: use nested_paragraph_indent which keeps outer containers
+            let indent = ctx.line.nested_paragraph_indent(self.buffer.rope());
+            if indent.is_empty() {
+                self.insert_text("\n");
             } else {
-                // Regular Enter: create new list item
-                let empty_line = ctx.line.continuation_without_list_rope(self.buffer.rope());
-                let continuation = ctx.line.continuation_rope(self.buffer.rope());
-                self.insert_text(&format!("\n{}\n{}", empty_line.trim_end(), continuation));
+                self.insert_text(&format!("\n{}", indent));
             }
         }
     }
 
-    /// Smart shift-tab: removes one level of nesting (innermost marker).
-    /// Also removes matching marker from the empty line above (if it exists).
+    /// Shift+Tab: cycle backward through nesting states.
     pub fn shift_tab(&mut self) {
-        let Some(ctx) = self.line_context() else {
-            return;
-        };
-
-        if ctx.line.markers.is_empty() {
-            return;
-        }
-
-        let line_text = self.buffer.slice_cow(ctx.line.range.clone());
-        let original_marker_count = ctx.line.markers.len();
-
-        // Determine which marker to remove and its index
-        let (marker_to_remove, marker_idx) = if line_text.starts_with("  ") {
-            // Nested - remove indentation
-            (None, 0) // Special case for indent
-        } else {
-            // Remove the innermost marker (first in array)
-            (Some(ctx.line.markers[0].kind.clone()), 0)
-        };
-
-        // Remove the marker from current line
-        if line_text.starts_with("  ") {
-            let delete_start = ctx.line.range.start;
-            self.delete_and_adjust(delete_start..delete_start + 2);
-        } else {
-            self.delete_and_adjust(ctx.line.markers[0].range.clone());
-        }
-
-        // Now check if the line above is empty and has a matching marker at same level
-        self.remove_matching_marker_from_empty_line_above(
-            marker_to_remove,
-            marker_idx,
-            original_marker_count,
-        );
+        self.shift_tab_cycle();
     }
 
     /// Remove a marker at cursor position (innermost) and matching marker from line above.
@@ -815,12 +791,6 @@ impl EditorState {
         }
     }
 
-    /// Shift+Enter: same as Enter, but never exits containers.
-    /// Use this to add more items without exiting the container.
-    pub fn shift_enter(&mut self) {
-        self.do_enter(false);
-    }
-
     fn backspace_range_with_type(
         &self,
         cursor_pos: usize,
@@ -837,176 +807,32 @@ impl EditorState {
         None
     }
 
-    /// Delete backward (backspace). Joins lines when appropriate.
+    /// Delete backward (backspace). Simple: delete one unit.
+    /// Markers and indents are atomic - deleted as a whole.
     pub fn delete_backward(&mut self) {
         if !self.selection.is_collapsed() {
             self.delete_selection();
-        } else if self.cursor().offset > 0 {
-            let cursor_pos = self.cursor().offset;
-
-            // Check if we're at a marker position
-            if self.backspace_range_with_type(cursor_pos).is_some() {
-                // At marker position - remove the marker at cursor (innermost)
-                // and matching marker from empty line above (same as shift-tab)
-                self.remove_marker_at_cursor();
-
-                // After removing markers, if current line is now blank with no markers,
-                // check if we should join to content above.
-                // - If immediate prev line has content → join
-                // - If immediate prev line is also blank (no markers) → find content above and join
-                // - If immediate prev line has markers but no content → don't join (need more backspaces)
-                let cursor_pos = self.cursor().offset;
-                let line_idx = self.buffer.byte_to_line(cursor_pos);
-                let lines = self.buffer.lines();
-
-                if line_idx > 0
-                    && let Some(current_line) = lines.get(line_idx)
-                    // Current line must be blank with no markers
-                    && current_line.markers.is_empty()
-                    && self
-                        .buffer
-                        .slice_cow(current_line.range.clone())
-                        .trim()
-                        .is_empty()
-                {
-                    let prev_line = &lines[line_idx - 1];
-                    let prev_content_start = prev_line
-                        .marker_range()
-                        .map(|r| r.end)
-                        .unwrap_or(prev_line.range.start);
-                    let prev_is_blank_no_markers = prev_line.markers.is_empty()
-                        && self
-                            .buffer
-                            .slice_cow(prev_line.range.clone())
-                            .trim()
-                            .is_empty();
-                    let prev_has_content = !prev_line.is_fence()
-                        && !self
-                            .buffer
-                            .slice_cow(prev_content_start..prev_line.range.end)
-                            .trim()
-                            .is_empty();
-
-                    if prev_has_content {
-                        // Immediate prev line has content → join directly
-                        let join_pos = prev_line.range.end;
-                        let current_pos = self.cursor().offset;
-                        self.buffer.delete(join_pos..current_pos, current_pos);
-                        self.selection = Selection::new(join_pos, join_pos);
-                    } else if prev_is_blank_no_markers {
-                        // Prev line is also blank with no markers → find content above
-                        let mut target_idx = line_idx - 1;
-                        while target_idx > 0 {
-                            let line = &lines[target_idx];
-                            let content_start = line
-                                .marker_range()
-                                .map(|r| r.end)
-                                .unwrap_or(line.range.start);
-                            let has_content = !line.is_fence()
-                                && !self
-                                    .buffer
-                                    .slice_cow(content_start..line.range.end)
-                                    .trim()
-                                    .is_empty();
-                            if has_content {
-                                break;
-                            }
-                            // Stop if we hit a line with markers (don't skip over them)
-                            if !line.markers.is_empty() {
-                                target_idx = line_idx; // Reset to prevent join
-                                break;
-                            }
-                            target_idx -= 1;
-                        }
-
-                        if target_idx < line_idx {
-                            let target_line = &lines[target_idx];
-                            let join_pos = target_line.range.end;
-                            let current_pos = self.cursor().offset;
-                            self.buffer.delete(join_pos..current_pos, current_pos);
-                            self.selection = Selection::new(join_pos, join_pos);
-                        }
-                    }
-                    // If prev line has markers but no content, don't join
-                }
-            } else {
-                let char_before = if cursor_pos > 0 {
-                    self.buffer.byte_at(cursor_pos - 1).map(|b| b as char)
-                } else {
-                    None
-                };
-
-                if char_before == Some('\n') {
-                    let line_idx = self.buffer.byte_to_line(cursor_pos);
-                    let lines = self.buffer.lines();
-                    if let Some(current_line) = lines.get(line_idx) {
-                        let line_text = self.buffer.slice_cow(current_line.range.clone());
-
-                        // Check if we're at the start of the line content (after any markers)
-                        let content_start = current_line
-                            .marker_range()
-                            .map(|r| r.end)
-                            .unwrap_or(current_line.range.start);
-                        let at_content_start = cursor_pos == content_start;
-
-                        if line_text.trim().is_empty() {
-                            let has_content_after = lines.get(line_idx + 1).is_some_and(|next| {
-                                !self.buffer.slice_cow(next.range.clone()).trim().is_empty()
-                            });
-
-                            if has_content_after {
-                                self.buffer.delete(cursor_pos - 1..cursor_pos, cursor_pos);
-                                self.selection = Selection::new(cursor_pos - 1, cursor_pos - 1);
-                                return;
-                            }
-
-                            // Collapse all trailing newlines
-                            let mut delete_start = cursor_pos;
-                            while delete_start > 0
-                                && self.buffer.byte_at(delete_start - 1) == Some(b'\n')
-                            {
-                                delete_start -= 1;
-                            }
-                            self.buffer.delete(delete_start..cursor_pos, cursor_pos);
-                            self.selection = Selection::new(delete_start, delete_start);
-                            return;
-                        }
-
-                        // At start of a line with content - check if previous line is empty
-                        // If so, find the last content line and join to it
-                        if at_content_start && line_idx > 0 {
-                            let prev_line_idx = line_idx - 1;
-                            if self.buffer.is_line_empty(prev_line_idx) {
-                                // Find the last non-empty line before us
-                                let mut target_idx = prev_line_idx;
-                                while target_idx > 0 && self.buffer.is_line_empty(target_idx) {
-                                    target_idx -= 1;
-                                }
-
-                                // If we found a content line, join to it
-                                if !self.buffer.is_line_empty(target_idx) {
-                                    let target_line = &lines[target_idx];
-                                    // Find end of content on target line (before trailing newline/whitespace)
-                                    let target_text =
-                                        self.buffer.slice_cow(target_line.range.clone());
-                                    let trimmed_len = target_text.trim_end().len();
-                                    let join_pos = target_line.range.start + trimmed_len;
-                                    self.buffer.delete(join_pos..cursor_pos, cursor_pos);
-                                    self.selection = Selection::new(join_pos, join_pos);
-                                    return;
-                                }
-                            }
-                        }
-                    }
-                }
-
-                // Normal backspace
-                let new_cursor = self.cursor().move_left(&self.buffer);
-                self.buffer
-                    .delete(new_cursor.offset..cursor_pos, cursor_pos);
-                self.selection = Selection::new(new_cursor.offset, new_cursor.offset);
-            }
+            return;
         }
+
+        if self.cursor().offset == 0 {
+            return;
+        }
+
+        let cursor_pos = self.cursor().offset;
+
+        // Check if we're at a marker position - if so, delete the marker atomically
+        if let Some((marker_range, _is_indent)) = self.backspace_range_with_type(cursor_pos) {
+            self.buffer.delete(marker_range.clone(), cursor_pos);
+            self.selection = Selection::new(marker_range.start, marker_range.start);
+            return;
+        }
+
+        // Otherwise, just delete one character (including newlines)
+        // Use move_left to handle atomic marker jumping for cursor
+        let new_pos = cursor_pos - 1;
+        self.buffer.delete(new_pos..cursor_pos, cursor_pos);
+        self.selection = Selection::new(new_pos, new_pos);
     }
 
     fn delete_selection(&mut self) {
@@ -1271,11 +1097,14 @@ impl Editor {
                 cx.notify();
             }
             "enter" => {
-                if keystroke.modifiers.shift {
-                    // Shift+Enter: always create sibling (maintain continuation)
+                if keystroke.modifiers.shift && keystroke.modifiers.alt {
+                    // Shift+Alt+Enter: indented continuation (nested paragraph)
+                    self.state.shift_alt_enter();
+                } else if keystroke.modifiers.shift {
+                    // Shift+Enter: continue container (add markers)
                     self.state.shift_enter();
                 } else {
-                    // Enter: create sibling or exit container if empty
+                    // Enter: raw newline
                     self.state.enter();
                 }
                 cx.notify();
@@ -1509,6 +1338,9 @@ impl Editor {
             }
             EditorAction::ShiftEnter => {
                 self.state.shift_enter();
+            }
+            EditorAction::ShiftAltEnter => {
+                self.state.shift_alt_enter();
             }
             EditorAction::Tab => {
                 self.tab();
@@ -1810,1651 +1642,6 @@ mod tests {
         assert_eq!(actual, expected);
     }
 
-    mod enter_tests {
-        use super::*;
-
-        #[test]
-        fn enter_on_list_item_creates_paragraph_break() {
-            let mut state = editor_with_cursor(
-                r#"
-- item one|"#,
-            );
-            state.enter();
-            assert_editor_eq(
-                &state,
-                r#"
-- item one
-
-- |"#,
-            );
-        }
-
-        #[test]
-        fn enter_in_middle_of_list_item_splits() {
-            let mut state = editor_with_cursor(
-                r#"
-- item o|ne"#,
-            );
-            state.enter();
-            assert_editor_eq(
-                &state,
-                r#"
-- item o
-
-- |ne"#,
-            );
-        }
-
-        #[test]
-        fn enter_on_blockquote_creates_paragraph_break() {
-            let mut state = editor_with_cursor(
-                r#"
-> quote one|"#,
-            );
-            state.enter();
-            assert_editor_eq(
-                &state,
-                r#"
-> quote one
->
-> |"#,
-            );
-        }
-
-        #[test]
-        fn enter_on_nested_blockquote_continues_at_same_level() {
-            let mut state = editor_with_cursor("> > text|");
-            state.enter();
-            assert_editor_eq(&state, "> > text\n> >\n> > |");
-        }
-
-        #[test]
-        fn enter_on_triple_nested_blockquote_continues_at_same_level() {
-            // Verify arbitrary nesting works - code iterates through all markers
-            let mut state = editor_with_cursor("> > > text|");
-            state.enter();
-            assert_editor_eq(&state, "> > > text\n> > >\n> > > |");
-        }
-
-        #[test]
-        fn enter_on_list_inside_nested_blockquote() {
-            let mut state = editor_with_cursor("> > - item|");
-            state.enter();
-            assert_editor_eq(&state, "> > - item\n> >\n> > - |");
-        }
-
-        #[test]
-        fn enter_on_task_list_inside_nested_blockquote() {
-            let mut state = editor_with_cursor("> > - [ ] task|");
-            state.enter();
-            assert_editor_eq(&state, "> > - [ ] task\n> >\n> > - [ ] |");
-        }
-
-        #[test]
-        fn double_enter_on_list_inside_nested_blockquote_exits_all() {
-            let mut state = editor_with_cursor("> > - item|");
-            state.enter();
-            state.enter();
-            assert_editor_eq(&state, "> > - item\n\n|");
-        }
-
-        #[test]
-        fn enter_on_blockquote_inside_list_nested_paragraph() {
-            let mut state = editor_with_cursor("1. item\n\n   > quote|");
-            state.enter();
-            assert_editor_eq(&state, "1. item\n\n   > quote\n   >\n   > |");
-        }
-
-        #[test]
-        fn triple_enter_on_blockquote_inside_list_nested_paragraph_exits_all() {
-            // Blockquote inside list nested paragraph requires 3 enters to exit:
-            // 1st: creates continuation
-            // 2nd: exits blockquote, stays in indent
-            // 3rd: exits indent to root
-            let mut state = editor_with_cursor("1. item\n\n   > quote|");
-            state.enter();
-            state.enter();
-            state.enter();
-            assert_editor_eq(&state, "1. item\n\n   > quote\n\n|");
-        }
-
-        #[test]
-        fn enter_on_list_inside_blockquote_inside_list_nested_paragraph() {
-            let mut state = editor_with_cursor("1. item\n\n   > - nested list|");
-            state.enter();
-            assert_editor_eq(&state, "1. item\n\n   > - nested list\n   >\n   > - |");
-        }
-
-        #[test]
-        fn shift_enter_on_list_inside_blockquote_inside_list_creates_nested_paragraph() {
-            let mut state = editor_with_cursor("1. item\n\n   > - nested list|");
-            state.shift_enter();
-            assert_editor_eq(&state, "1. item\n\n   > - nested list\n   >\n   >   |");
-        }
-
-        #[test]
-        fn enter_on_empty_nested_blockquote_exits_all() {
-            let mut state = editor_with_cursor("> > text\n> >\n> > |");
-            state.enter();
-            assert_editor_eq(&state, "> > text\n\n|");
-        }
-
-        #[test]
-        fn enter_on_nested_list_in_blockquote() {
-            let mut state = editor_with_cursor(
-                r#"
-> - item|"#,
-            );
-            state.enter();
-            assert_editor_eq(
-                &state,
-                r#"
-> - item
->
-> - |"#,
-            );
-        }
-
-        #[test]
-        fn enter_on_plain_text_creates_paragraph_break() {
-            // Paragraphs get a blank line (paragraph break) on Enter
-            let mut state = editor_with_cursor(
-                r#"
-hello world|"#,
-            );
-            state.enter();
-            assert_editor_eq(
-                &state,
-                r#"
-hello world
-
-|"#,
-            );
-        }
-
-        #[test]
-        fn enter_on_heading_creates_paragraph_break() {
-            // Headings get a blank line (paragraph break) on Enter
-            let mut state = editor_with_cursor(
-                r#"
-# Hello|"#,
-            );
-            state.enter();
-            assert_editor_eq(
-                &state,
-                r#"
-# Hello
-
-|"#,
-            );
-        }
-
-        #[test]
-        fn enter_on_nested_paragraph_creates_paragraph_break_with_indent() {
-            // Nested paragraph under list item: Enter creates paragraph break but keeps indent
-            let mut state = editor_with_cursor(
-                r#"
-- item
-
-  paragraph|"#,
-            );
-            state.enter();
-            assert_editor_eq(
-                &state,
-                r#"
-- item
-
-  paragraph
-
-  |"#,
-            );
-        }
-
-        #[test]
-        fn enter_on_nested_paragraph_under_ordered_list_keeps_indent() {
-            // Nested paragraph under ordered list: Enter creates paragraph break with marker-width indent
-            let mut state = editor_with_cursor(
-                r#"
-1. item
-
-   paragraph|"#,
-            );
-            state.enter();
-            assert_editor_eq(
-                &state,
-                r#"
-1. item
-
-   paragraph
-
-   |"#,
-            );
-        }
-
-        #[test]
-        fn enter_on_empty_nested_paragraph_exits_indent() {
-            // Empty nested paragraph line: Enter removes indent and exits
-            let mut state = editor_with_cursor(
-                r#"
-- item
-
-  paragraph
-
-  |"#,
-            );
-            state.enter();
-            assert_editor_eq(
-                &state,
-                r#"
-- item
-
-  paragraph
-
-|"#,
-            );
-        }
-
-        #[test]
-        fn enter_on_empty_nested_paragraph_under_ordered_list_exits_indent() {
-            // Empty nested paragraph line under ordered list: Enter removes indent and exits
-            let mut state = editor_with_cursor(
-                r#"
-1. item
-
-   paragraph
-
-   |"#,
-            );
-            state.enter();
-            assert_editor_eq(
-                &state,
-                r#"
-1. item
-
-   paragraph
-
-|"#,
-            );
-        }
-
-        #[test]
-        fn shift_enter_on_empty_list_item_creates_nested_paragraph() {
-            // Shift+Enter on empty list item creates nested paragraph
-            let mut state = editor_with_cursor(
-                r#"
-- item one
-- |"#,
-            );
-            state.shift_enter();
-            assert_editor_eq(&state, "- item one\n- \n\n  |");
-        }
-
-        #[test]
-        fn shift_enter_on_list_item_creates_nested_paragraph() {
-            // Shift+Enter on list item creates nested paragraph (indented continuation)
-            // rather than a new list item
-            let mut state = editor_with_cursor(
-                r#"
-- item one|"#,
-            );
-            state.shift_enter();
-            assert_editor_eq(
-                &state,
-                r#"
-- item one
-
-  |"#,
-            );
-        }
-
-        #[test]
-        fn shift_enter_on_list_in_blockquote_creates_nested_paragraph() {
-            // Shift+Enter on list item in blockquote: nested paragraph with blockquote continuation
-            let mut state = editor_with_cursor(
-                r#"
-> - item one|"#,
-            );
-            state.shift_enter();
-            assert_editor_eq(
-                &state,
-                r#"
-> - item one
->
->   |"#,
-            );
-        }
-
-        #[test]
-        fn shift_enter_on_ordered_list_in_blockquote_creates_nested_paragraph() {
-            // Shift+Enter on ordered list in blockquote: nested paragraph with blockquote
-            // continuation and marker-width indent (3 spaces for "1. ")
-            let mut state = editor_with_cursor(
-                r#"
-> 1. item|"#,
-            );
-            state.shift_enter();
-            assert_editor_eq(
-                &state,
-                r#"
-> 1. item
->
->    |"#,
-            );
-        }
-
-        #[test]
-        fn shift_enter_on_task_list_in_blockquote_creates_nested_paragraph() {
-            // Shift+Enter on task list in blockquote: nested paragraph with blockquote
-            // continuation and 2-space indent (not 6, to avoid code block)
-            let mut state = editor_with_cursor(
-                r#"
-> - [ ] task|"#,
-            );
-            state.shift_enter();
-            assert_editor_eq(
-                &state,
-                r#"
-> - [ ] task
->
->   |"#,
-            );
-        }
-
-        #[test]
-        fn shift_enter_on_list_inside_nested_blockquote_creates_nested_paragraph() {
-            let mut state = editor_with_cursor("> > - item|");
-            state.shift_enter();
-            assert_editor_eq(&state, "> > - item\n> >\n> >   |");
-        }
-
-        #[test]
-        fn shift_enter_on_task_list_creates_nested_paragraph() {
-            // Shift+Enter on task list: nested paragraph with 2-space indent
-            // (not 6-space, because 4+ spaces triggers indented code block)
-            let mut state = editor_with_cursor(
-                r#"
-- [ ] task one|"#,
-            );
-            state.shift_enter();
-            assert_editor_eq(
-                &state,
-                r#"
-- [ ] task one
-
-  |"#,
-            );
-        }
-
-        #[test]
-        fn shift_enter_on_ordered_list_creates_nested_paragraph() {
-            // Shift+Enter on ordered list: nested paragraph with marker-width indent
-            // (3 spaces for "1. ") to stay nested in the list
-            let mut state = editor_with_cursor(
-                r#"
-1. item one|"#,
-            );
-            state.shift_enter();
-            assert_editor_eq(
-                &state,
-                r#"
-1. item one
-
-   |"#,
-            );
-        }
-
-        #[test]
-        fn shift_enter_on_double_digit_ordered_list_creates_nested_paragraph() {
-            // Shift+Enter on double-digit ordered list: nested paragraph with marker-width indent
-            // (4 spaces for "10. ") to stay nested in the list
-            let mut state = editor_with_cursor(
-                r#"
-1. one
-2. two
-3. three
-4. four
-5. five
-6. six
-7. seven
-8. eight
-9. nine
-10. ten|"#,
-            );
-            state.shift_enter();
-            assert_editor_eq(
-                &state,
-                r#"
-1. one
-2. two
-3. three
-4. four
-5. five
-6. six
-7. seven
-8. eight
-9. nine
-10. ten
-
-    |"#,
-            );
-        }
-
-        #[test]
-        fn enter_on_pending_marker_completes_it() {
-            // `*|` should become `* \n* |`
-            let mut state = editor_with_cursor(
-                r#"
-*|"#,
-            );
-            state.enter();
-            assert_editor_eq(&state, "* \n* |");
-        }
-
-        #[test]
-        fn enter_on_pending_ordered_marker_completes_it() {
-            // `1.|` should become `1. \n1. |`
-            let mut state = editor_with_cursor(
-                r#"
-1.|"#,
-            );
-            state.enter();
-            assert_editor_eq(&state, "1. \n1. |");
-        }
-
-        #[test]
-        fn enter_on_empty_list_item_exits_list() {
-            let mut state = editor_with_cursor(
-                r#"
-- item
-- |"#,
-            );
-            state.enter();
-            assert_editor_eq(
-                &state,
-                r#"
-- item
-
-|"#,
-            );
-        }
-
-        #[test]
-        fn enter_on_empty_nested_list_exits_all() {
-            // Empty container line exits ALL markers
-            let mut state = editor_with_cursor(
-                r#"
-> - item
-> - |"#,
-            );
-            state.enter();
-            assert_editor_eq(&state, "> - item\n\n|");
-        }
-
-        #[test]
-        fn enter_on_empty_blockquote_exits_blockquote() {
-            let mut state = editor_with_cursor(
-                r#"
-> quote
-> |"#,
-            );
-            state.enter();
-            assert_editor_eq(
-                &state,
-                r#"
-> quote
-
-|"#,
-            );
-        }
-
-        #[test]
-        fn double_enter_on_blockquote_exits_and_cleans_up() {
-            // First enter creates paragraph break, second enter exits and removes empty continuation
-            let mut state = editor_with_cursor("> hey|");
-            state.enter();
-            assert_editor_eq(&state, "> hey\n>\n> |");
-            state.enter();
-            assert_editor_eq(&state, "> hey\n\n|");
-        }
-
-        #[test]
-        fn double_enter_on_list_exits_and_cleans_up() {
-            // First enter creates new list item, second enter exits and removes empty item
-            let mut state = editor_with_cursor("- hey|");
-            state.enter();
-            assert_editor_eq(&state, "- hey\n\n- |");
-            state.enter();
-            assert_editor_eq(&state, "- hey\n\n|");
-        }
-
-        #[test]
-        fn double_enter_on_list_in_blockquote_exits_all() {
-            // First enter creates new list item, second enter exits all containers
-            let mut state = editor_with_cursor("> - item|");
-            state.enter();
-            assert_editor_eq(&state, "> - item\n>\n> - |");
-            state.enter();
-            assert_editor_eq(&state, "> - item\n\n|");
-        }
-
-        #[test]
-        fn enter_on_code_fence_inserts_single_newline() {
-            // Opening fence: just insert newline, not paragraph break
-            let mut state = editor_with_cursor(
-                r#"
-```rust|"#,
-            );
-            state.enter();
-            assert_editor_eq(
-                &state,
-                r#"
-```rust
-|"#,
-            );
-        }
-
-        #[test]
-        fn enter_on_closing_code_fence_creates_paragraph_break() {
-            // Closing fence: create paragraph break to start new content
-            // The closing fence needs trailing content for tree-sitter to parse it
-            let mut state = editor_with_cursor(
-                r#"
-```rust
-code
-```|
-after"#,
-            );
-            state.enter();
-            assert_editor_eq(
-                &state,
-                r#"
-```rust
-code
-```
-
-|
-after"#,
-            );
-        }
-
-        #[test]
-        fn enter_on_closing_code_fence_without_trailing_content() {
-            // Closing fence without trailing content - should still create paragraph break
-            let mut state = editor_with_cursor(
-                r#"
-```rust
-code
-```|"#,
-            );
-            state.enter();
-            assert_editor_eq(
-                &state,
-                r#"
-```rust
-code
-```
-
-|"#,
-            );
-        }
-
-        #[test]
-        fn enter_on_opening_fence_in_blockquote_continues_blockquote() {
-            // Opening fence inside blockquote: continue the blockquote but not the fence
-            let mut state = editor_with_cursor(
-                r#"
-> ```rust|"#,
-            );
-            state.enter();
-            assert_editor_eq(
-                &state,
-                r#"
-> ```rust
-> |"#,
-            );
-        }
-
-        #[test]
-        fn enter_on_closing_fence_in_blockquote_creates_paragraph_break() {
-            // Closing fence inside blockquote: create paragraph break with blockquote continuation
-            let mut state = editor_with_cursor(
-                r#"
-> ```
-> code
-> ```|"#,
-            );
-            state.enter();
-            assert_editor_eq(
-                &state,
-                r#"
-> ```
-> code
-> ```
->
-> |"#,
-            );
-        }
-
-        #[test]
-        fn enter_inside_code_block_inserts_single_newline() {
-            // Inside code block: just insert newline, not paragraph break
-            // Need trailing newline after closing fence for tree-sitter to detect it
-            let mut state = editor_with_cursor(
-                r#"
-```rust
-let x = 1;|
-```
-"#,
-            );
-            state.enter();
-            assert_editor_eq(
-                &state,
-                r#"
-```rust
-let x = 1;
-|
-```
-"#,
-            );
-        }
-
-        #[test]
-        fn enter_after_code_block_creates_paragraph_break() {
-            // After a complete code block, Enter should create paragraph break
-            let mut state = editor_with_cursor(
-                r#"
-```rust
-```
-|"#,
-            );
-            // Debug
-            println!("Text before: {:?}", state.text());
-            println!("Lines: {:?}", state.buffer.lines());
-            println!("cursor_in_code_block: {}", state.cursor_in_code_block());
-
-            state.enter();
-            assert_editor_eq(
-                &state,
-                r#"
-```rust
-```
-
-|"#,
-            );
-        }
-
-        // TODO: Test for code block nested inside list inside blockquote
-        // Currently the closing fence logic doesn't preserve nested indentation context.
-        // See: enter_on_closing_fence_in_nested_list_in_blockquote
-    }
-
-    mod tab_tests {
-        use super::*;
-
-        #[test]
-        fn tab_on_empty_line_after_list_item_adds_marker() {
-            let mut state = editor_with_cursor(
-                r#"
-- item
-|"#,
-            );
-            state.tab();
-            assert_editor_eq(
-                &state,
-                r#"
-- item
-- |"#,
-            );
-        }
-
-        #[test]
-        fn tab_twice_on_empty_line_after_list_item_nests() {
-            let mut state = editor_with_cursor(
-                r#"
-- item
-|"#,
-            );
-            state.tab();
-            state.tab();
-            assert_editor_eq(
-                &state,
-                r#"
-- item
-  - |"#,
-            );
-        }
-
-        #[test]
-        fn tab_on_list_item_increases_nesting() {
-            let mut state = editor_with_cursor(
-                r#"
-- item|"#,
-            );
-            state.tab();
-            assert_editor_eq(
-                &state,
-                r#"
-  - item|"#,
-            );
-        }
-
-        #[test]
-        fn tab_on_empty_line_after_blockquote_adds_marker() {
-            let mut state = editor_with_cursor(
-                r#"
-> quote
-|"#,
-            );
-            state.tab();
-            assert_editor_eq(
-                &state,
-                r#"
-> quote
-> |"#,
-            );
-        }
-
-        #[test]
-        fn tab_on_empty_line_after_nested_list_in_blockquote() {
-            let mut state = editor_with_cursor(
-                r#"
-> - item
-|"#,
-            );
-            state.tab();
-            assert_editor_eq(
-                &state,
-                r#"
-> - item
-> - |"#,
-            );
-        }
-
-        #[test]
-        fn tab_on_plain_text_adjacent_to_list_adds_marker() {
-            let mut state = editor_with_cursor(
-                r#"
-- item
-text|"#,
-            );
-            state.tab();
-            assert_editor_eq(
-                &state,
-                r#"
-- item
-- text|"#,
-            );
-        }
-
-        #[test]
-        fn tab_on_empty_list_item_nests_it() {
-            let mut state = editor_with_cursor(
-                r#"
-- item one
-- |"#,
-            );
-            state.tab();
-            assert_editor_eq(
-                &state,
-                r#"
-- item one
-  - |"#,
-            );
-        }
-
-        #[test]
-        fn tab_on_already_nested_item_does_nothing() {
-            // Can only nest one level deeper than previous line
-            let mut state = editor_with_cursor(
-                r#"
-- item
-  - nested|"#,
-            );
-            state.tab();
-            // Should not change - already at max nesting
-            assert_editor_eq(
-                &state,
-                r#"
-- item
-  - nested|"#,
-            );
-        }
-
-        #[test]
-        fn tab_on_sibling_can_nest() {
-            // Sibling at same level can nest once
-            let mut state = editor_with_cursor(
-                r#"
-- item
-- sibling|"#,
-            );
-            state.tab();
-            assert_editor_eq(
-                &state,
-                r#"
-- item
-  - sibling|"#,
-            );
-            // But not twice
-            state.tab();
-            assert_editor_eq(
-                &state,
-                r#"
-- item
-  - sibling|"#,
-            );
-        }
-
-        #[test]
-        fn tab_on_sibling_with_paragraph_break_can_nest() {
-            // Sibling with paragraph break between can still nest
-            let mut state = editor_with_cursor(
-                r#"
-- item
-
-- sibling|"#,
-            );
-            state.tab();
-            assert_editor_eq(
-                &state,
-                r#"
-- item
-
-  - sibling|"#,
-            );
-        }
-
-        #[test]
-        fn tab_after_blank_line_indents_as_block() {
-            // After blank line, tab should indent as nested block, not add marker
-            let mut state = editor_with_cursor(
-                r#"
-- item
-
-|"#,
-            );
-            state.tab();
-            assert_editor_eq(
-                &state,
-                r#"
-- item
-
-  |"#,
-            );
-        }
-
-        #[test]
-        fn tab_after_blank_line_under_task_list_indents_as_block() {
-            // After blank line under task list, tab should indent 2 spaces
-            // (not 6, because 4+ spaces triggers indented code block)
-            let mut state = editor_with_cursor(
-                r#"
-- [ ] task
-
-|"#,
-            );
-            state.tab();
-            assert_editor_eq(
-                &state,
-                r#"
-- [ ] task
-
-  |"#,
-            );
-        }
-
-        #[test]
-        fn tab_after_blank_line_under_ordered_list_indents_as_block() {
-            // After blank line under ordered list, tab should indent by marker width
-            // (3 spaces for "1. ") to stay nested in the list
-            let mut state = editor_with_cursor(
-                r#"
-1. item
-
-|"#,
-            );
-            state.tab();
-            assert_editor_eq(
-                &state,
-                r#"
-1. item
-
-   |"#,
-            );
-        }
-
-        #[test]
-        fn tab_on_blockquote_line_does_nothing() {
-            // Blockquotes shouldn't nest via tab
-            let mut state = editor_with_cursor(
-                r#"
-> |"#,
-            );
-            state.tab();
-            assert_editor_eq(
-                &state, r#"
-> |"#,
-            );
-        }
-
-        #[test]
-        fn tab_on_blockquote_with_content_does_nothing() {
-            let mut state = editor_with_cursor(
-                r#"
-> some text|"#,
-            );
-            state.tab();
-            assert_editor_eq(
-                &state,
-                r#"
-> some text|"#,
-            );
-        }
-    }
-
-    mod space_tests {
-        use super::*;
-
-        #[test]
-        fn space_at_blockquote_content_start_does_nothing() {
-            let mut state = editor_with_cursor(
-                r#"
-> |"#,
-            );
-            let inserted = state.try_insert_space();
-            assert!(!inserted);
-            assert_editor_eq(
-                &state, r#"
-> |"#,
-            );
-        }
-
-        #[test]
-        fn space_after_blockquote_content_works() {
-            let mut state = editor_with_cursor(
-                r#"
-> a|"#,
-            );
-            let inserted = state.try_insert_space();
-            assert!(inserted);
-            assert_editor_eq(
-                &state,
-                r#"
-> a |"#,
-            );
-        }
-
-        #[test]
-        fn space_at_line_start_does_nothing() {
-            let mut state = editor_with_cursor(
-                r#"
-|text"#,
-            );
-            let inserted = state.try_insert_space();
-            assert!(!inserted);
-            assert_editor_eq(
-                &state,
-                r#"
-|text"#,
-            );
-        }
-
-        #[test]
-        fn space_in_middle_of_line_works() {
-            let mut state = editor_with_cursor(
-                r#"
-hello|world"#,
-            );
-            let inserted = state.try_insert_space();
-            assert!(inserted);
-            assert_editor_eq(
-                &state,
-                r#"
-hello |world"#,
-            );
-        }
-    }
-
-    mod shift_tab_tests {
-        use super::*;
-
-        #[test]
-        fn shift_tab_on_nested_list_item_unnests() {
-            let mut state = editor_with_cursor(
-                r#"
-  - nested item|"#,
-            );
-            state.shift_tab();
-            assert_editor_eq(
-                &state,
-                r#"
-- nested item|"#,
-            );
-        }
-
-        #[test]
-        fn shift_tab_on_list_item_removes_marker() {
-            let mut state = editor_with_cursor(
-                r#"
-- item|"#,
-            );
-            state.shift_tab();
-            assert_editor_eq(
-                &state,
-                r#"
-item|"#,
-            );
-        }
-
-        #[test]
-        fn shift_tab_on_nested_list_in_blockquote_removes_list() {
-            let mut state = editor_with_cursor(
-                r#"
-> - item|"#,
-            );
-            state.shift_tab();
-            assert_editor_eq(
-                &state,
-                r#"
-> item|"#,
-            );
-        }
-
-        #[test]
-        fn shift_tab_on_blockquote_removes_marker() {
-            let mut state = editor_with_cursor(
-                r#"
-> item|"#,
-            );
-            state.shift_tab();
-            assert_editor_eq(
-                &state,
-                r#"
-item|"#,
-            );
-        }
-
-        #[test]
-        fn shift_tab_on_nested_blockquote_removes_one_level() {
-            let mut state = editor_with_cursor("> > text|");
-            state.shift_tab();
-            assert_editor_eq(&state, "> text|");
-        }
-
-        #[test]
-        fn shift_tab_on_nested_blockquote_cursor_at_start() {
-            let mut state = editor_with_cursor("> > |text");
-            state.shift_tab();
-            assert_editor_eq(&state, "> |text");
-        }
-
-        #[test]
-        fn shift_tab_on_list_inside_nested_blockquote_removes_list() {
-            let mut state = editor_with_cursor("> > - item|");
-            state.shift_tab();
-            assert_editor_eq(&state, "> > item|");
-        }
-
-        #[test]
-        fn double_shift_tab_on_list_inside_nested_blockquote() {
-            let mut state = editor_with_cursor("> > - item|");
-            state.shift_tab();
-            state.shift_tab();
-            assert_editor_eq(&state, "> item|");
-        }
-
-        #[test]
-        fn shift_tab_on_empty_list_item_removes_marker() {
-            // Empty list item: shift-tab removes the marker, leaving empty line
-            let mut state = editor_with_cursor(
-                r#"
-- item
-- |"#,
-            );
-            state.shift_tab();
-            assert_editor_eq(
-                &state,
-                r#"
-- item
-|"#,
-            );
-        }
-
-        #[test]
-        fn shift_tab_on_empty_list_in_blockquote_removes_list() {
-            // Empty list item in blockquote: shift-tab should remove list marker, keep blockquote
-            let mut state = editor_with_cursor(
-                r#"
-> - |"#,
-            );
-            state.shift_tab();
-            assert_editor_eq(
-                &state, r#"
-> |"#,
-            );
-        }
-
-        #[test]
-        fn shift_tab_on_empty_nested_list_item_unnests() {
-            // Unnesting is valid - becomes sibling, not empty line
-            let mut state = editor_with_cursor(
-                r#"
-- item
-  - |"#,
-            );
-            state.shift_tab();
-            assert_editor_eq(
-                &state,
-                r#"
-- item
-- |"#,
-            );
-        }
-
-        #[test]
-        fn shift_tab_on_plain_text_does_nothing() {
-            let mut state = editor_with_cursor(
-                r#"
-plain text|"#,
-            );
-            state.shift_tab();
-            assert_editor_eq(
-                &state,
-                r#"
-plain text|"#,
-            );
-        }
-    }
-
-    mod blockquote_auto_space_tests {
-        use super::*;
-
-        #[test]
-        fn typing_blockquote_marker_auto_inserts_space() {
-            let mut state = editor_with_cursor(
-                r#"
-|"#,
-            );
-            // Simulate typing ">"
-            state.insert_text(">");
-            state.maybe_complete_blockquote_marker();
-            assert_editor_eq(
-                &state, r#"
-> |"#,
-            );
-        }
-
-        #[test]
-        fn blockquote_marker_with_existing_space_no_double_space() {
-            let mut state = editor_with_cursor(
-                r#"
-> |"#,
-            );
-            // Already has space, should not add another
-            let inserted = state.maybe_complete_blockquote_marker();
-            assert!(!inserted);
-            assert_editor_eq(
-                &state, r#"
-> |"#,
-            );
-        }
-
-        #[test]
-        fn nested_blockquote_auto_inserts_space() {
-            let mut state = editor_with_cursor(
-                r#"
-> |"#,
-            );
-            // Simulate typing another ">"
-            state.insert_text(">");
-            state.maybe_complete_blockquote_marker();
-            assert_editor_eq(
-                &state,
-                r#"
-> > |"#,
-            );
-        }
-
-        #[test]
-        fn greater_than_in_text_no_auto_space() {
-            // If > is typed in the middle of text, don't auto-space
-            let mut state = editor_with_cursor(
-                r#"
-5 |"#,
-            );
-            state.insert_text(">");
-            let inserted = state.maybe_complete_blockquote_marker();
-            assert!(!inserted);
-            assert_editor_eq(
-                &state, r#"
-5 >|"#,
-            );
-        }
-    }
-
-    mod backspace_tests {
-        use super::*;
-
-        #[test]
-        fn backspace_on_empty_list_item_joins_to_previous() {
-            let mut state = editor_with_cursor(
-                r#"
-- item one
-- |"#,
-            );
-            // Single backspace should join to previous line's content
-            state.delete_backward();
-            assert_editor_eq(
-                &state,
-                r#"
-- item one|"#,
-            );
-        }
-
-        #[test]
-        fn backspace_after_enter_on_list_item_joins_to_content() {
-            // Scenario: "- item one|" -> Enter -> "- item one\n\n- |" -> Backspace
-            // Should go directly back to "- item one|"
-            let mut state = editor_with_cursor(
-                r#"
-- item one|"#,
-            );
-            state.enter();
-            assert_editor_eq(
-                &state,
-                r#"
-- item one
-
-- |"#,
-            );
-            // Backspace removes the list marker and blank line, joining to content
-            state.delete_backward();
-            assert_editor_eq(
-                &state,
-                r#"
-- item one|"#,
-            );
-        }
-
-        #[test]
-        fn backspace_after_exit_container_joins_to_content() {
-            // Scenario: "- item one\n- |" -> Enter (exit) -> "- item one\n\n|" -> Backspace
-            // One backspace should join directly to content
-            let mut state = editor_with_cursor(
-                r#"
-- item one
-- |"#,
-            );
-            state.enter();
-            assert_editor_eq(
-                &state,
-                r#"
-- item one
-
-|"#,
-            );
-            // One backspace joins directly to content
-            state.delete_backward();
-            assert_editor_eq(
-                &state,
-                r#"
-- item one|"#,
-            );
-        }
-
-        #[test]
-        fn backspace_from_blank_line_after_list() {
-            // Direct test: cursor on blank line after list item
-            // One backspace should join directly to content
-            let mut state = editor_with_cursor(
-                r#"
-- item one
-
-|"#,
-            );
-            state.delete_backward();
-            assert_editor_eq(
-                &state,
-                r#"
-- item one|"#,
-            );
-        }
-
-        #[test]
-        fn backspace_on_nested_paragraph_deletes_one_newline() {
-            // When on indented paragraph after blank line, backspace should only
-            // delete one newline, not collapse all the way to the list item
-            let mut state = editor_with_cursor(
-                r#"
-- item
-
-  |paragraph"#,
-            );
-
-            state.delete_backward();
-
-            assert_editor_eq(
-                &state,
-                r#"
-- item
-
-|paragraph"#,
-            );
-        }
-
-        #[test]
-        fn backspace_on_empty_nested_paragraph_under_ordered_list_joins_to_content() {
-            // Backspace on empty indented line under ordered list
-            // The indent marker is removed + matching marker from empty line above,
-            // then join to content
-            let mut state = editor_with_cursor(
-                r#"
-1. item
-
-   paragraph
-
-   |"#,
-            );
-            // Backspace removes indent and joins to paragraph content
-            state.delete_backward();
-            assert_editor_eq(
-                &state,
-                r#"
-1. item
-
-   paragraph|"#,
-            );
-        }
-
-        #[test]
-        fn backspace_on_blank_line_before_nested_paragraph() {
-            // Backspace on blank line between list and paragraph should
-            // only delete one newline
-            let mut state = editor_with_cursor(
-                r#"
-- item
-
-|
-  paragraph"#,
-            );
-            state.delete_backward();
-            assert_editor_eq(
-                &state,
-                r#"
-- item
-|
-  paragraph"#,
-            );
-        }
-
-        #[test]
-        fn backspace_on_empty_task_list_deletes_entire_marker() {
-            // Task list marker "- [ ] " is a single marker, so backspace
-            // should delete it all at once (not just the checkbox)
-            let mut state = editor_with_cursor("- [ ] |");
-            state.delete_backward();
-            assert_editor_eq(&state, "|");
-        }
-
-        #[test]
-        fn backspace_on_task_list_with_content_joins_to_previous() {
-            let mut state = editor_with_cursor(
-                r#"
-- [ ] task one
-- [ ] |"#,
-            );
-            state.delete_backward();
-            assert_editor_eq(
-                &state,
-                r#"
-- [ ] task one|"#,
-            );
-        }
-
-        #[test]
-        fn backspace_on_empty_blockquote_joins_to_previous() {
-            let mut state = editor_with_cursor(
-                r#"
-> hey
-> |"#,
-            );
-            state.delete_backward();
-            assert_editor_eq(
-                &state,
-                r#"
-> hey|"#,
-            );
-        }
-
-        #[test]
-        fn backspace_on_single_empty_blockquote_deletes_marker() {
-            let mut state = editor_with_cursor("> |");
-            state.delete_backward();
-            assert_editor_eq(&state, "|");
-        }
-
-        #[test]
-        fn backspace_on_blockquote_after_empty_continuation_joins_to_content() {
-            // "> paraga\n>\n> |" -> backspace collapses through empty line to content
-            let mut state = editor_with_cursor(
-                r#"
-> paraga
->
-> |"#,
-            );
-            state.delete_backward();
-            assert_editor_eq(
-                &state,
-                r#"
-> paraga|"#,
-            );
-        }
-
-        #[test]
-        fn backspace_on_empty_nested_blockquote_joins_to_content() {
-            let mut state = editor_with_cursor("> > text\n> >\n> > |");
-            // 1st backspace: remove inner blockquote and matching from line above
-            state.delete_backward();
-            assert_editor_eq(&state, "> > text\n> \n> |");
-            // 2nd backspace: remove outer blockquote and matching from line above,
-            // then join to content since both lines become blank
-            state.delete_backward();
-            assert_editor_eq(&state, "> > text|");
-        }
-
-        #[test]
-        fn backspace_on_empty_list_inside_nested_blockquote_joins_to_content() {
-            let mut state = editor_with_cursor("> > - item\n> >\n> > - |");
-            // 1st backspace: remove list marker
-            state.delete_backward();
-            assert_editor_eq(&state, "> > - item\n> >\n> > |");
-            // 2nd backspace: remove inner blockquote and matching from line above
-            state.delete_backward();
-            assert_editor_eq(&state, "> > - item\n> \n> |");
-            // 3rd backspace: remove outer blockquote and matching from line above,
-            // then join to content since both lines become blank
-            state.delete_backward();
-            assert_editor_eq(&state, "> > - item|");
-        }
-
-        #[test]
-        fn backspace_after_closing_fence_in_blockquote() {
-            // Closing fence should not be treated as empty - step by step behavior
-            let mut state = editor_with_cursor(
-                r#"
-> ```
-> code
-> ```
-> |"#,
-            );
-
-            // First backspace: removes "> " marker from current line
-            // (no matching marker removed from above because fence line has content)
-            state.delete_backward();
-            assert_editor_eq(
-                &state,
-                r#"
-> ```
-> code
-> ```
-|"#,
-            );
-
-            // Second backspace: join to fence line
-            state.delete_backward();
-            assert_editor_eq(
-                &state,
-                r#"
-> ```
-> code
-> ```|"#,
-            );
-        }
-
-        #[test]
-        fn backspace_after_exiting_list_in_blockquote() {
-            // After double-enter exits list in blockquote: "> - item\n\n|"
-            // Backspace should join back to the list item content
-            let mut state = editor_with_cursor(
-                r#"
-> - item
-
-|"#,
-            );
-            state.delete_backward();
-            assert_editor_eq(
-                &state,
-                r#"
-> - item|"#,
-            );
-        }
-
-        #[test]
-        fn backspace_joins_content_across_empty_line() {
-            // "line 1\n\n|line 3" -> backspace -> "line 1|line 3"
-            let mut state = editor_with_cursor("line 1\n\n|line 3");
-            state.delete_backward();
-            assert_editor_eq(&state, "line 1|line 3");
-        }
-
-        #[test]
-        fn backspace_joins_content_across_multiple_empty_lines() {
-            // "content\n\n\n\n|more" -> backspace -> "content|more"
-            let mut state = editor_with_cursor("content\n\n\n\n|more");
-            state.delete_backward();
-            assert_editor_eq(&state, "content|more");
-        }
-
-        #[test]
-        fn backspace_strips_markers_when_joining_to_previous_content() {
-            // "> - item\n\n|hey" -> backspace -> "> - item|hey"
-            let mut state = editor_with_cursor(
-                r#"
-> - item
-
-|hey"#,
-            );
-            state.delete_backward();
-            assert_editor_eq(
-                &state,
-                r#"
-> - item|hey"#,
-            );
-        }
-
-        #[test]
-        fn backspace_on_list_in_blockquote_removes_list_marker_first() {
-            // Step-by-step: remove innermost marker first, then work outward
-            let mut state = editor_with_cursor(
-                r#"
-> 1. hey
->
-> 2. |hey"#,
-            );
-
-            // First backspace: remove "2. " list marker (innermost)
-            state.delete_backward();
-            assert_editor_eq(
-                &state,
-                r#"
-> 1. hey
->
-> |hey"#,
-            );
-
-            // Second backspace: remove "> " from current line + matching ">" from empty line above
-            state.delete_backward();
-            assert_editor_eq(
-                &state,
-                r#"
-> 1. hey
-
-|hey"#,
-            );
-
-            // Third backspace: on blank line with no markers, join to content above
-            state.delete_backward();
-            assert_editor_eq(
-                &state,
-                r#"
-> 1. hey|hey"#,
-            );
-        }
-
-        #[test]
-        fn backspace_with_content_after_cursor_collapses_through_empty_line() {
-            // Cursor is at "> |hey" with content after cursor
-            // Previous line ">" is empty (has marker, no content)
-            // Step-by-step: remove markers first, then join
-            let mut state = editor_with_cursor(
-                r#"
-> 1. hey
->
-> |hey"#,
-            );
-
-            // First backspace: remove "> " from current line and matching ">" from empty line above
-            state.delete_backward();
-            assert_editor_eq(
-                &state,
-                r#"
-> 1. hey
-
-|hey"#,
-            );
-
-            // Second backspace: on blank line with no markers, join to content above
-            state.delete_backward();
-            assert_editor_eq(
-                &state,
-                r#"
-> 1. hey|hey"#,
-            );
-        }
-
-        #[test]
-        fn backspace_on_nested_blockquote_does_not_remove_from_shallower_line_above() {
-            // Current line has more markers than prev line
-            // Should NOT remove marker from prev line (nesting levels don't match)
-            let mut state = editor_with_cursor(
-                r#"
-> 1. hey
->
->    > |"#,
-            );
-
-            // Backspace: remove inner "> " from current line only
-            // Prev line ">" has fewer markers, so don't touch it
-            state.delete_backward();
-            assert_editor_eq(
-                &state,
-                r#"
-> 1. hey
->
->    |"#,
-            );
-        }
-    }
 
     mod cursor_movement_tests {
         use super::*;
@@ -3474,55 +1661,6 @@ plain text|"#,
         }
 
         #[test]
-        fn move_left_skips_empty_line() {
-            let mut state = editor_with_cursor("line 1\n\n|line 3");
-            state.move_left();
-            assert_editor_eq(&state, "line 1|\n\nline 3");
-        }
-
-        #[test]
-        fn move_left_skips_multiple_empty_lines() {
-            let mut state = editor_with_cursor("content\n\n\n\n|more");
-            state.move_left();
-            assert_editor_eq(&state, "content|\n\n\n\nmore");
-        }
-
-        #[test]
-        fn move_left_skips_empty_blockquote_line() {
-            // "> " is an empty line (marker only, no content)
-            let mut state = editor_with_cursor("> hey\n> \n|> > hey");
-            state.move_left();
-            assert_editor_eq(&state, "> hey|\n> \n> > hey");
-        }
-
-        #[test]
-        fn move_left_from_inside_empty_blockquote_line() {
-            // When cursor is inside an empty blockquote line (on the > or space),
-            // moving left should skip to the previous content line
-            let mut state = editor_with_cursor("> hey\n>| \n> > hey");
-            state.move_left();
-            assert_editor_eq(&state, "> hey|\n> \n> > hey");
-        }
-
-        #[test]
-        fn move_right_from_inside_empty_blockquote_line() {
-            // When cursor is inside an empty blockquote line,
-            // moving right should skip to the next content line
-            let mut state = editor_with_cursor("> hey\n>| \n> > hey");
-            state.move_right();
-            assert_editor_eq(&state, "> hey\n> \n> > |hey");
-        }
-
-        #[test]
-        fn move_right_across_empty_blockquote_line() {
-            // Moving right from end of line 1 should skip the empty line 2
-            // and land at the start of content on line 3
-            let mut state = editor_with_cursor("> hey|\n> \n> > hey");
-            state.move_right();
-            assert_editor_eq(&state, "> hey\n> \n> > |hey");
-        }
-
-        #[test]
         fn move_right() {
             let mut state = editor_with_cursor("he|llo");
             state.move_right();
@@ -3530,33 +1668,10 @@ plain text|"#,
         }
 
         #[test]
-        fn move_right_skips_empty_line() {
-            let mut state = editor_with_cursor("line 1|\n\nline 3");
-            state.move_right();
-            assert_editor_eq(&state, "line 1\n\n|line 3");
-        }
-
-        #[test]
-        fn move_right_skips_multiple_empty_lines() {
-            let mut state = editor_with_cursor("content|\n\n\n\nmore");
-            state.move_right();
-            assert_editor_eq(&state, "content\n\n\n\n|more");
-        }
-
-        #[test]
         fn move_right_at_end() {
             let mut state = editor_with_cursor("hello|");
             state.move_right();
             assert_editor_eq(&state, "hello|");
-        }
-
-        #[test]
-        fn move_right_lands_on_document_tail() {
-            // End of document is always a valid landing spot
-            let mut state = editor_with_cursor("hello|\n\n\n");
-            state.move_right();
-            // Should land on the last empty line (document tail)
-            assert_editor_eq(&state, "hello\n\n\n|");
         }
 
         #[test]
@@ -3595,60 +1710,6 @@ plain text|"#,
         }
 
         #[test]
-        fn move_up_skips_empty_line() {
-            let mut state = editor_with_cursor("line one\n\nline |three");
-            state.move_up();
-            assert_editor_eq(&state, "line |one\n\nline three");
-        }
-
-        #[test]
-        fn move_up_skips_multiple_empty_lines() {
-            let mut state = editor_with_cursor("line one\n\n\n\nline |five");
-            state.move_up();
-            assert_editor_eq(&state, "line |one\n\n\n\nline five");
-        }
-
-        #[test]
-        fn move_up_stays_when_only_empty_above() {
-            let mut state = editor_with_cursor("\n\nline |three");
-            state.move_up();
-            // Should stay on current line since lines above are all empty
-            assert_editor_eq(&state, "\n\nline |three");
-        }
-
-        #[test]
-        fn move_down_skips_empty_line() {
-            let mut state = editor_with_cursor("line |one\n\nline three");
-            state.move_down();
-            assert_editor_eq(&state, "line one\n\nline |three");
-        }
-
-        #[test]
-        fn move_down_skips_multiple_empty_lines() {
-            let mut state = editor_with_cursor("line |one\n\n\n\nline five");
-            state.move_down();
-            assert_editor_eq(&state, "line one\n\n\n\nline |five");
-        }
-
-        #[test]
-        fn move_down_stays_when_only_empty_below() {
-            // Empty lines in the middle (not at document end) are invalid landing spots
-            let mut state = editor_with_cursor("line |one\n\n\nline four");
-            state.move_down();
-            // Should skip empty lines and land on line four
-            assert_editor_eq(&state, "line one\n\n\nline |four");
-        }
-
-        #[test]
-        fn move_down_lands_on_document_tail() {
-            // End of document is always a valid landing spot
-            let mut state = editor_with_cursor("line |one\n\n\n");
-            state.move_down();
-            // Should land on the last empty line (document tail)
-            assert_editor_eq(&state, "line one\n\n\n|");
-        }
-
-        #[test]
         fn move_to_line_start() {
             let mut state = editor_with_cursor("hello\nwor|ld");
             state.move_to_line_start();
@@ -3660,6 +1721,388 @@ plain text|"#,
             let mut state = editor_with_cursor("hello\nwor|ld");
             state.move_to_line_end();
             assert_editor_eq(&state, "hello\nworld|");
+        }
+    }
+
+    // ========================================================================
+    // New "raw markdown" behavior tests
+    // These test the simplified, non-controlling editing paradigm.
+    // ========================================================================
+
+    mod raw_enter_tests {
+        use super::*;
+
+        // --- Enter: always raw \n ---
+
+        #[test]
+        fn enter_on_paragraph_inserts_newline() {
+            let mut state = editor_with_cursor("Hello world|");
+            state.enter();
+            assert_editor_eq(&state, "Hello world\n|");
+        }
+
+        #[test]
+        fn enter_on_heading_inserts_newline() {
+            let mut state = editor_with_cursor("# Hello|");
+            state.enter();
+            assert_editor_eq(&state, "# Hello\n|");
+        }
+
+        #[test]
+        fn enter_on_list_item_inserts_newline_no_marker() {
+            let mut state = editor_with_cursor("- item one|");
+            state.enter();
+            assert_editor_eq(&state, "- item one\n|");
+        }
+
+        #[test]
+        fn enter_on_blockquote_inserts_newline_no_marker() {
+            let mut state = editor_with_cursor("> quote|");
+            state.enter();
+            assert_editor_eq(&state, "> quote\n|");
+        }
+
+        #[test]
+        fn enter_on_nested_container_inserts_newline_no_markers() {
+            let mut state = editor_with_cursor("> - item|");
+            state.enter();
+            assert_editor_eq(&state, "> - item\n|");
+        }
+
+        #[test]
+        fn enter_on_empty_list_item_inserts_newline_keeps_marker() {
+            let mut state = editor_with_cursor("- item one\n- |");
+            state.enter();
+            assert_editor_eq(&state, "- item one\n- \n|");
+        }
+
+        #[test]
+        fn enter_on_empty_blockquote_inserts_newline_keeps_marker() {
+            let mut state = editor_with_cursor("> quote one\n> |");
+            state.enter();
+            assert_editor_eq(&state, "> quote one\n> \n|");
+        }
+
+        #[test]
+        fn enter_in_code_block_inserts_newline() {
+            let mut state = editor_with_cursor("```rust\nlet x = 1;|");
+            state.enter();
+            assert_editor_eq(&state, "```rust\nlet x = 1;\n|");
+        }
+
+        #[test]
+        fn enter_on_code_fence_inserts_newline() {
+            let mut state = editor_with_cursor("```rust|");
+            state.enter();
+            assert_editor_eq(&state, "```rust\n|");
+        }
+
+        #[test]
+        fn enter_preserves_soft_wrap_style() {
+            // Adjacent lines without blank line between them
+            let mut state = editor_with_cursor("First sentence.\nSecond sentence.|");
+            state.enter();
+            assert_editor_eq(&state, "First sentence.\nSecond sentence.\n|");
+        }
+
+        // --- Shift+Enter: continue container ---
+
+        #[test]
+        fn shift_enter_on_list_item_continues_list() {
+            let mut state = editor_with_cursor("- item one|");
+            state.shift_enter();
+            assert_editor_eq(&state, "- item one\n- |");
+        }
+
+        #[test]
+        fn shift_enter_on_blockquote_continues_blockquote() {
+            let mut state = editor_with_cursor("> quote|");
+            state.shift_enter();
+            assert_editor_eq(&state, "> quote\n> |");
+        }
+
+        #[test]
+        fn shift_enter_on_nested_container_continues_all() {
+            let mut state = editor_with_cursor("> - item|");
+            state.shift_enter();
+            assert_editor_eq(&state, "> - item\n> - |");
+        }
+
+        #[test]
+        fn shift_enter_on_paragraph_just_inserts_newline() {
+            let mut state = editor_with_cursor("Hello world|");
+            state.shift_enter();
+            assert_editor_eq(&state, "Hello world\n|");
+        }
+
+        #[test]
+        fn shift_enter_on_heading_just_inserts_newline() {
+            let mut state = editor_with_cursor("# Hello|");
+            state.shift_enter();
+            assert_editor_eq(&state, "# Hello\n|");
+        }
+
+        // --- Shift+Alt+Enter: indented continuation ---
+
+        #[test]
+        fn shift_alt_enter_on_list_item_creates_indent() {
+            let mut state = editor_with_cursor("- item one|");
+            state.shift_alt_enter();
+            assert_editor_eq(&state, "- item one\n  |");
+        }
+
+        #[test]
+        fn shift_alt_enter_on_blockquote_creates_indent_outside() {
+            let mut state = editor_with_cursor("> quote|");
+            state.shift_alt_enter();
+            assert_editor_eq(&state, "> quote\n  |");
+        }
+
+        #[test]
+        fn shift_alt_enter_on_nested_container_creates_indent_inside() {
+            let mut state = editor_with_cursor("> - item|");
+            state.shift_alt_enter();
+            assert_editor_eq(&state, "> - item\n>   |");
+        }
+
+        #[test]
+        fn shift_alt_enter_on_paragraph_just_inserts_newline() {
+            let mut state = editor_with_cursor("Hello world|");
+            state.shift_alt_enter();
+            assert_editor_eq(&state, "Hello world\n|");
+        }
+    }
+
+    mod raw_backspace_tests {
+        use super::*;
+
+        #[test]
+        fn backspace_deletes_char() {
+            let mut state = editor_with_cursor("hello|");
+            state.delete_backward();
+            assert_editor_eq(&state, "hell|");
+        }
+
+        #[test]
+        fn backspace_at_line_start_joins_lines() {
+            let mut state = editor_with_cursor("line one\n|line two");
+            state.delete_backward();
+            assert_editor_eq(&state, "line one|line two");
+        }
+
+        #[test]
+        fn backspace_deletes_entire_list_marker() {
+            let mut state = editor_with_cursor("- |");
+            state.delete_backward();
+            assert_editor_eq(&state, "|");
+        }
+
+        #[test]
+        fn backspace_deletes_innermost_marker_first() {
+            let mut state = editor_with_cursor("> - |");
+            state.delete_backward();
+            assert_editor_eq(&state, "> |");
+        }
+
+        #[test]
+        fn backspace_then_deletes_outer_marker() {
+            let mut state = editor_with_cursor("> |");
+            state.delete_backward();
+            assert_editor_eq(&state, "|");
+        }
+
+        #[test]
+        fn backspace_deletes_entire_indent() {
+            // Indent after list item is atomic - need context for tree-sitter to recognize it
+            let mut state = editor_with_cursor("- item\n  |text");
+            state.delete_backward();
+            assert_editor_eq(&state, "- item\n|text");
+        }
+
+        #[test]
+        fn backspace_in_middle_of_text_deletes_char() {
+            let mut state = editor_with_cursor("- item o|ne");
+            state.delete_backward();
+            assert_editor_eq(&state, "- item |ne");
+        }
+
+        #[test]
+        fn backspace_on_empty_line_after_list_joins() {
+            let mut state = editor_with_cursor("- item one\n|");
+            state.delete_backward();
+            assert_editor_eq(&state, "- item one|");
+        }
+
+        #[test]
+        fn backspace_sequence_through_markers_and_join() {
+            // Start: "- item one\n- |"
+            // Backspace 1: delete "- " marker -> "- item one\n|"
+            // Backspace 2: join lines -> "- item one|"
+            let mut state = editor_with_cursor("- item one\n- |");
+            state.delete_backward();
+            assert_editor_eq(&state, "- item one\n|");
+            state.delete_backward();
+            assert_editor_eq(&state, "- item one|");
+        }
+
+        #[test]
+        fn backspace_with_content_after_cursor_deletes_marker() {
+            let mut state = editor_with_cursor("- |two");
+            state.delete_backward();
+            assert_editor_eq(&state, "|two");
+        }
+    }
+
+    mod raw_tab_tests {
+        use super::*;
+
+        // --- Tab cycling through states ---
+
+        #[test]
+        fn tab_on_empty_line_after_list_adds_indent() {
+            let mut state = editor_with_cursor("- item\n|");
+            state.tab();
+            assert_editor_eq(&state, "- item\n  |");
+        }
+
+        #[test]
+        fn tab_twice_after_list_adds_marker() {
+            let mut state = editor_with_cursor("- item\n|");
+            state.tab();
+            state.tab();
+            assert_editor_eq(&state, "- item\n  - |");
+        }
+
+        #[test]
+        fn tab_three_times_after_list_cycles_back() {
+            let mut state = editor_with_cursor("- item\n|");
+            state.tab();
+            state.tab();
+            state.tab();
+            assert_editor_eq(&state, "- item\n|");
+        }
+
+        #[test]
+        fn tab_with_blank_line_between_still_works() {
+            let mut state = editor_with_cursor("- item\n\n|");
+            state.tab();
+            assert_editor_eq(&state, "- item\n\n  |");
+        }
+
+        #[test]
+        fn tab_with_two_blank_lines_does_nothing() {
+            let mut state = editor_with_cursor("- item\n\n\n|");
+            state.tab();
+            assert_editor_eq(&state, "- item\n\n\n|");
+        }
+
+        #[test]
+        fn tab_on_blockquote_context_adds_marker() {
+            let mut state = editor_with_cursor("> quote\n|");
+            state.tab();
+            assert_editor_eq(&state, "> quote\n> |");
+        }
+
+        #[test]
+        fn tab_twice_on_blockquote_context_cycles_back() {
+            let mut state = editor_with_cursor("> quote\n|");
+            state.tab();
+            state.tab();
+            assert_editor_eq(&state, "> quote\n|");
+        }
+
+        #[test]
+        fn tab_on_nested_context_cycles_through_all_states() {
+            let mut state = editor_with_cursor("> - item\n|");
+
+            // Tab 1: add outer marker
+            state.tab();
+            assert_editor_eq(&state, "> - item\n> |");
+
+            // Tab 2: add inner marker
+            state.tab();
+            assert_editor_eq(&state, "> - item\n> - |");
+
+            // Tab 3: indent (no inner marker)
+            state.tab();
+            assert_editor_eq(&state, "> - item\n>   |");
+
+            // Tab 4: cycle back to start
+            state.tab();
+            assert_editor_eq(&state, "> - item\n|");
+        }
+
+        // --- Shift+Tab cycling backwards ---
+
+        #[test]
+        fn shift_tab_cycles_backwards() {
+            let mut state = editor_with_cursor("- item\n|");
+            state.shift_tab();
+            // Should go backwards: empty -> marker+indent -> indent -> empty
+            // First shift_tab goes to "  - |"
+            assert_editor_eq(&state, "- item\n  - |");
+        }
+
+        #[test]
+        fn shift_tab_from_indent_removes_indent() {
+            let mut state = editor_with_cursor("- item\n  |");
+            state.shift_tab();
+            assert_editor_eq(&state, "- item\n|");
+        }
+
+        #[test]
+        fn shift_tab_from_nested_marker_goes_to_indent() {
+            let mut state = editor_with_cursor("- item\n  - |");
+            state.shift_tab();
+            assert_editor_eq(&state, "- item\n  |");
+        }
+    }
+
+    mod raw_cursor_movement_tests {
+        use super::*;
+
+        #[test]
+        fn move_left_through_marker_is_atomic() {
+            let mut state = editor_with_cursor("- |item");
+            state.move_left();
+            assert_editor_eq(&state, "|- item");
+        }
+
+        #[test]
+        fn move_right_through_marker_is_atomic() {
+            let mut state = editor_with_cursor("|- item");
+            state.move_right();
+            assert_editor_eq(&state, "- |item");
+        }
+
+        #[test]
+        fn move_left_through_nested_markers_one_at_a_time() {
+            let mut state = editor_with_cursor("> - |item");
+            state.move_left();
+            assert_editor_eq(&state, "> |- item");
+            state.move_left();
+            assert_editor_eq(&state, "|> - item");
+        }
+
+        #[test]
+        fn move_left_does_not_skip_blank_lines() {
+            let mut state = editor_with_cursor("line one\n\n|line three");
+            state.move_left();
+            assert_editor_eq(&state, "line one\n|\nline three");
+        }
+
+        #[test]
+        fn move_left_from_blank_line_goes_to_previous() {
+            let mut state = editor_with_cursor("line one\n|\nline three");
+            state.move_left();
+            assert_editor_eq(&state, "line one|\n\nline three");
+        }
+
+        #[test]
+        fn move_up_maintains_column_in_content_area() {
+            let mut state = editor_with_cursor("- item one\n- item |two");
+            state.move_up();
+            assert_editor_eq(&state, "- item |one\n- item two");
         }
     }
 }

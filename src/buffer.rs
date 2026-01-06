@@ -173,9 +173,6 @@ impl BufferContent {
         }
         self.tree = self.parser.parse_rope(&self.text, self.tree.as_ref());
 
-        // Normalize ordered list numbering (may re-parse)
-        self.normalize_ordered_lists();
-
         // Update cached lines
         self.update_lines_cache();
 
@@ -865,22 +862,12 @@ impl BufferContent {
     /// Run all normalization passes on the document.
     /// This ensures the document conforms to the editor's canonical markdown format.
     /// Returns true if any changes were made.
+    /// Normalize the document. Currently does nothing - we preserve the file as-is.
     pub fn normalize_document(&mut self) -> bool {
-        let mut changed = false;
-
-        // Order matters: soft wraps first (may affect line structure),
-        // then blockquote spacing, task checkmarks, and trailing newlines
-        changed |= self.normalize_soft_wraps();
-        changed |= self.normalize_blockquote_spacing();
-        changed |= self.normalize_task_checkmarks();
-        changed |= self.normalize_trailing_newline();
-
-        if changed {
-            // Re-parse to ensure tree is up to date
-            self.tree = self.parser.parse_rope(&self.text, None);
-        }
-
-        changed
+        // Normalization has been removed. We now support both soft-wrap style
+        // (single newlines) and hard-wrap style (blank lines between paragraphs).
+        // The file is loaded exactly as-is.
+        false
     }
 }
 
@@ -982,28 +969,19 @@ impl Buffer {
     /// Load a file, normalize its content, and save it back.
     /// Returns the buffer and whether any normalization changes were made.
     /// If the file doesn't exist or can't be read, returns a buffer with empty content.
+    /// Load a buffer from a file. Returns the buffer and whether the file was modified.
+    /// Currently always returns false for modified since we don't normalize on load.
     pub fn from_file(path: &std::path::Path) -> std::io::Result<(Self, bool)> {
         let content = std::fs::read_to_string(path).unwrap_or_default();
 
-        // Parse without normalization first
+        // Parse the file exactly as-is - no normalization
         let mut buffer: Buffer = content.parse().expect("Buffer parsing is infallible");
 
-        // Run normalization
-        let changed = buffer.content.normalize_document();
-
-        // If changes were made, re-parse and update caches
-        if changed {
-            buffer.content.tree = buffer.content.parser.parse_rope(&buffer.content.text, None);
-            buffer.content.update_lines_cache();
-
-            // Save the normalized content back to the file
-            std::fs::write(path, buffer.content.text())?;
-        }
-
-        // Mark as clean since we just saved (or no changes were needed)
+        // Mark as clean since we just loaded
         buffer.history.set_saved();
 
-        Ok((buffer, changed))
+        // Second return value is false - we never modify the file on load
+        Ok((buffer, false))
     }
 }
 
@@ -1031,7 +1009,6 @@ impl FromStr for Buffer {
             inline_styles: Vec::new(),
         };
 
-        content.normalize_ordered_lists();
         content.update_lines_cache();
 
         let mut history = Record::new();
@@ -1218,28 +1195,17 @@ mod tests {
     }
 
     #[test]
-    fn test_ordered_list_normalization_on_load() {
+    fn test_ordered_list_no_normalization() {
+        // Numbers are preserved as-is (no renumbering)
         let buf: Buffer = "1. First\n5. Second\n9. Third\n".parse().unwrap();
-        assert_eq!(buf.text(), "1. First\n2. Second\n3. Third\n");
+        assert_eq!(buf.text(), "1. First\n5. Second\n9. Third\n");
     }
 
     #[test]
-    fn test_ordered_list_correct_numbers_unchanged() {
-        let buf: Buffer = "1. First\n2. Second\n3. Third\n".parse().unwrap();
-        assert_eq!(buf.text(), "1. First\n2. Second\n3. Third\n");
-    }
-
-    #[test]
-    fn test_ordered_list_parenthesis_normalization() {
-        // Parenthesis style should be preserved when renumbering
+    fn test_ordered_list_parenthesis_no_normalization() {
+        // Parenthesis style numbers are preserved as-is
         let buf: Buffer = "1) First\n5) Second\n9) Third\n".parse().unwrap();
-        assert_eq!(buf.text(), "1) First\n2) Second\n3) Third\n");
-    }
-
-    #[test]
-    fn test_ordered_list_parenthesis_correct_numbers_unchanged() {
-        let buf: Buffer = "1) First\n2) Second\n3) Third\n".parse().unwrap();
-        assert_eq!(buf.text(), "1) First\n2) Second\n3) Third\n");
+        assert_eq!(buf.text(), "1) First\n5) Second\n9) Third\n");
     }
 
     #[test]
@@ -1489,191 +1455,6 @@ mod tests {
 
         assert!(lines[0].is_fence());
         assert!(lines[0].has_border());
-    }
-
-    // ========================================================================
-    // Normalization tests
-    // ========================================================================
-
-    #[test]
-    fn test_normalize_removes_single_trailing_newline() {
-        let mut buf: Buffer = "content\n".parse().unwrap();
-        let changed = buf.normalize_trailing_newline();
-        assert!(changed);
-        assert_eq!(buf.text(), "content");
-    }
-
-    #[test]
-    fn test_normalize_removes_multiple_trailing_newlines() {
-        let mut buf: Buffer = "content\n\n\n".parse().unwrap();
-        let changed = buf.normalize_trailing_newline();
-        assert!(changed);
-        assert_eq!(buf.text(), "content");
-    }
-
-    #[test]
-    fn test_normalize_no_trailing_newline_unchanged() {
-        let mut buf: Buffer = "content".parse().unwrap();
-        let changed = buf.normalize_trailing_newline();
-        assert!(!changed);
-        assert_eq!(buf.text(), "content");
-    }
-
-    #[test]
-    fn test_normalize_empty_file() {
-        let mut buf: Buffer = "".parse().unwrap();
-        let changed = buf.normalize_trailing_newline();
-        assert!(!changed);
-        assert_eq!(buf.text(), "");
-    }
-
-    #[test]
-    fn test_normalize_only_newlines() {
-        let mut buf: Buffer = "\n\n\n".parse().unwrap();
-        let changed = buf.normalize_trailing_newline();
-        assert!(changed);
-        assert_eq!(buf.text(), "");
-    }
-
-    #[test]
-    fn test_normalize_uppercase_x() {
-        let mut buf: Buffer = "- [X] task".parse().unwrap();
-        let changed = buf.normalize_task_checkmarks();
-        assert!(changed);
-        assert_eq!(buf.text(), "- [x] task");
-    }
-
-    #[test]
-    fn test_normalize_preserves_lowercase_x() {
-        let mut buf: Buffer = "- [x] task".parse().unwrap();
-        let changed = buf.normalize_task_checkmarks();
-        assert!(!changed);
-        assert_eq!(buf.text(), "- [x] task");
-    }
-
-    #[test]
-    fn test_normalize_preserves_unchecked() {
-        let mut buf: Buffer = "- [ ] task".parse().unwrap();
-        let changed = buf.normalize_task_checkmarks();
-        assert!(!changed);
-        assert_eq!(buf.text(), "- [ ] task");
-    }
-
-    #[test]
-    fn test_normalize_multiple_uppercase_x() {
-        let mut buf: Buffer = "- [X] task1\n- [X] task2\n- [x] task3".parse().unwrap();
-        let changed = buf.normalize_task_checkmarks();
-        assert!(changed);
-        assert_eq!(buf.text(), "- [x] task1\n- [x] task2\n- [x] task3");
-    }
-
-    #[test]
-    fn test_normalize_blockquote_adds_space() {
-        let mut buf: Buffer = ">text".parse().unwrap();
-        let changed = buf.normalize_blockquote_spacing();
-        assert!(changed);
-        assert_eq!(buf.text(), "> text");
-    }
-
-    #[test]
-    fn test_normalize_blockquote_preserves_existing_space() {
-        let mut buf: Buffer = "> text".parse().unwrap();
-        let changed = buf.normalize_blockquote_spacing();
-        assert!(!changed);
-        assert_eq!(buf.text(), "> text");
-    }
-
-    #[test]
-    fn test_normalize_nested_blockquote_spacing() {
-        let mut buf: Buffer = "> >text".parse().unwrap();
-        let changed = buf.normalize_blockquote_spacing();
-        assert!(changed);
-        assert_eq!(buf.text(), "> > text");
-    }
-
-    #[test]
-    fn test_normalize_blockquote_multiple_lines() {
-        let mut buf: Buffer = ">line1\n>line2".parse().unwrap();
-        let changed = buf.normalize_blockquote_spacing();
-        assert!(changed);
-        assert_eq!(buf.text(), "> line1\n> line2");
-    }
-
-    #[test]
-    fn test_normalize_soft_wrap_in_list() {
-        // "- First line\n  continuation" → "- First line continuation"
-        let mut buf: Buffer = "- First line\n  continuation".parse().unwrap();
-        let changed = buf.normalize_soft_wraps();
-        assert!(changed);
-        assert_eq!(buf.text(), "- First line continuation");
-    }
-
-    #[test]
-    fn test_normalize_soft_wrap_preserves_nested_paragraph() {
-        // Blank line before indent means intentional nested paragraph - preserve it
-        let mut buf: Buffer = "- item\n\n  paragraph".parse().unwrap();
-        let changed = buf.normalize_soft_wraps();
-        assert!(!changed);
-        assert_eq!(buf.text(), "- item\n\n  paragraph");
-    }
-
-    #[test]
-    fn test_normalize_soft_wrap_multiple_continuations() {
-        // Multiple continuation lines should all be joined
-        let mut buf: Buffer = "- line1\n  line2\n  line3".parse().unwrap();
-        let changed = buf.normalize_soft_wraps();
-        assert!(changed);
-        assert_eq!(buf.text(), "- line1 line2 line3");
-    }
-
-    #[test]
-    fn test_normalize_soft_wrap_nested_list_preserved() {
-        // Nested list items should NOT be joined (they have ListItem marker, not just Indent)
-        let mut buf: Buffer = "- outer\n  - inner".parse().unwrap();
-        let changed = buf.normalize_soft_wraps();
-        assert!(!changed);
-        assert_eq!(buf.text(), "- outer\n  - inner");
-    }
-
-    #[test]
-    fn test_normalize_soft_wrap_no_continuation() {
-        // Regular list without continuation - unchanged
-        let mut buf: Buffer = "- item1\n- item2".parse().unwrap();
-        let changed = buf.normalize_soft_wraps();
-        assert!(!changed);
-        assert_eq!(buf.text(), "- item1\n- item2");
-    }
-
-    #[test]
-    fn test_normalize_soft_wrap_blockquote_preserved() {
-        // Blockquote lines should NOT be joined (they have BlockQuote marker)
-        let mut buf: Buffer = "> line1\n> line2".parse().unwrap();
-        let changed = buf.normalize_soft_wraps();
-        assert!(!changed);
-        assert_eq!(buf.text(), "> line1\n> line2");
-    }
-
-    #[test]
-    fn test_normalize_document_full_pipeline() {
-        // Test that normalize_document applies all normalization rules
-        let mut buf: Buffer = ">text\n- [X] item\n  continuation\n\n".parse().unwrap();
-        let changed = buf.normalize_document();
-        assert!(changed);
-        // Should have:
-        // - Added space after > (blockquote spacing)
-        // - Lowercased [X] to [x] (task checkmarks)
-        // - Joined continuation line (soft wraps)
-        // - Removed trailing newlines
-        assert_eq!(buf.text(), "> text\n- [x] item continuation");
-    }
-
-    #[test]
-    fn test_normalize_document_no_changes_needed() {
-        // Test that normalize_document returns false when no changes needed
-        let mut buf: Buffer = "> text\n- [x] item".parse().unwrap();
-        let changed = buf.normalize_document();
-        assert!(!changed);
-        assert_eq!(buf.text(), "> text\n- [x] item");
     }
 }
 

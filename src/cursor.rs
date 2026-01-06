@@ -28,7 +28,8 @@ impl Cursor {
         }
     }
 
-    /// Move cursor left, skipping over markers and empty lines.
+    /// Move cursor left. Markers are atomic - cursor jumps over entire marker.
+    /// Blank lines are not skipped.
     pub fn move_left(&self, buffer: &Buffer) -> Self {
         if self.offset == 0 {
             return *self;
@@ -36,24 +37,29 @@ impl Cursor {
 
         let current_line_idx = buffer.byte_to_line(self.offset);
 
-        // If we're on an empty line, skip to the previous content line
-        if buffer.is_line_empty(current_line_idx) {
-            return self.skip_to_prev_content_line(buffer, current_line_idx);
-        }
+        // Check if we're at the end of a marker - if so, jump to start of that marker
+        if let Some(line) = buffer.lines().get(current_line_idx) {
+            // Find if cursor is at the end of any marker
+            for marker in &line.markers {
+                if self.offset == marker.range.end {
+                    // Jump to start of this marker
+                    return Self {
+                        offset: marker.range.start,
+                    };
+                }
+            }
 
-        // Check if we're within a marker range - if so, skip to previous line
-        if let Some(line) = buffer.lines().get(current_line_idx)
-            && let Some(marker_range) = line.marker_range()
-            && self.offset <= marker_range.end
-        {
-            // We're in the marker area - skip to previous content line
-            if current_line_idx > 0 {
-                return self.skip_to_prev_content_line(buffer, current_line_idx - 1);
-            } else {
-                // On first line, stay at marker end
-                return Self {
-                    offset: marker_range.end,
-                };
+            // If we're at line start (after markers or at absolute start),
+            // go to end of previous line
+            if self.offset == line.range.start {
+                if current_line_idx > 0 {
+                    let prev_line_range = buffer.line_byte_range(current_line_idx - 1);
+                    // Position at end of previous line (before the newline)
+                    return Self {
+                        offset: prev_line_range.end.saturating_sub(1),
+                    };
+                }
+                return *self;
             }
         }
 
@@ -63,18 +69,13 @@ impl Cursor {
         if char_idx == 0 {
             return *self;
         }
-        let new_offset = rope.char_to_byte(char_idx - 1);
-        let new_line_idx = buffer.byte_to_line(new_offset);
-
-        // If we crossed into an empty line, skip it
-        if buffer.is_line_empty(new_line_idx) {
-            return self.skip_to_prev_content_line(buffer, new_line_idx);
+        Self {
+            offset: rope.char_to_byte(char_idx - 1),
         }
-
-        Self { offset: new_offset }
     }
 
-    /// Move cursor right, skipping over markers and empty lines.
+    /// Move cursor right. Markers are atomic - cursor jumps over entire marker.
+    /// Blank lines are not skipped.
     pub fn move_right(&self, buffer: &Buffer) -> Self {
         let len = buffer.len_bytes();
         if self.offset >= len {
@@ -83,20 +84,17 @@ impl Cursor {
 
         let current_line_idx = buffer.byte_to_line(self.offset);
 
-        // If we're on an empty line, skip to the next content line
-        if buffer.is_line_empty(current_line_idx) {
-            return self.skip_to_next_content_line(buffer, current_line_idx);
-        }
-
-        // Check if we're at line start or within a marker - skip to end of marker
-        if let Some(line) = buffer.lines().get(current_line_idx)
-            && let Some(marker_range) = line.marker_range()
-            && (self.offset == line.range.start
-                || (self.offset > marker_range.start && self.offset < marker_range.end))
-        {
-            return Self {
-                offset: marker_range.end,
-            };
+        // Check if we're at the start of a marker - if so, jump to end of that marker
+        if let Some(line) = buffer.lines().get(current_line_idx) {
+            // Find if cursor is at the start of any marker (checking from outermost to innermost)
+            for marker in line.markers.iter().rev() {
+                if self.offset == marker.range.start {
+                    // Jump to end of this marker
+                    return Self {
+                        offset: marker.range.end,
+                    };
+                }
+            }
         }
 
         // Normal character movement
@@ -106,15 +104,9 @@ impl Cursor {
         if char_idx >= char_count {
             return *self;
         }
-        let new_offset = rope.char_to_byte(char_idx + 1);
-        let new_line_idx = buffer.byte_to_line(new_offset);
-
-        // If we crossed into an empty line, skip it
-        if buffer.is_line_empty(new_line_idx) {
-            return self.skip_to_next_content_line(buffer, new_line_idx);
+        Self {
+            offset: rope.char_to_byte(char_idx + 1),
         }
-
-        Self { offset: new_offset }
     }
 
     /// Helper: skip backwards to find the previous content line and position at its end.
@@ -166,6 +158,7 @@ impl Cursor {
         *self
     }
 
+    /// Move cursor up. Blank lines are not skipped.
     pub fn move_up(&self, buffer: &Buffer) -> Self {
         let current_line = buffer.byte_to_line(self.offset);
         if current_line == 0 {
@@ -173,16 +166,7 @@ impl Cursor {
             return Self::start();
         }
 
-        // Find previous non-empty line
-        let mut target_line = current_line - 1;
-        while target_line > 0 && buffer.is_line_empty(target_line) {
-            target_line -= 1;
-        }
-
-        // If target is still empty (line 0 is empty), stay on current line
-        if buffer.is_line_empty(target_line) {
-            return *self;
-        }
+        let target_line = current_line - 1;
 
         // Get column offset within current line
         let line_start = buffer.line_to_byte(current_line);
@@ -200,6 +184,7 @@ impl Cursor {
         }
     }
 
+    /// Move cursor down. Blank lines are not skipped.
     pub fn move_down(&self, buffer: &Buffer) -> Self {
         let current_line = buffer.byte_to_line(self.offset);
         let line_count = buffer.line_count();
@@ -209,20 +194,7 @@ impl Cursor {
             return Self::end(buffer);
         }
 
-        // Find next non-empty line
-        let mut target_line = current_line + 1;
-        while target_line < line_count - 1 && buffer.is_line_empty(target_line) {
-            target_line += 1;
-        }
-
-        // If target is still empty, check if it's the last line (document tail)
-        // The end of the document is always a valid place to land
-        if buffer.is_line_empty(target_line) {
-            let is_last_line = target_line == line_count - 1;
-            if !is_last_line {
-                return *self;
-            }
-        }
+        let target_line = current_line + 1;
 
         // Get column offset within current line
         let line_start = buffer.line_to_byte(current_line);
