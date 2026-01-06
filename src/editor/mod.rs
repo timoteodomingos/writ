@@ -671,6 +671,7 @@ impl EditorState {
         }
 
         let line_text = self.buffer.slice_cow(ctx.line.range.clone());
+        let original_marker_count = ctx.line.markers.len();
 
         // Determine which marker to remove and its index
         let (marker_to_remove, marker_idx) = if line_text.starts_with("  ") {
@@ -690,7 +691,11 @@ impl EditorState {
         }
 
         // Now check if the line above is empty and has a matching marker at same level
-        self.remove_matching_marker_from_empty_line_above(marker_to_remove, marker_idx);
+        self.remove_matching_marker_from_empty_line_above(
+            marker_to_remove,
+            marker_idx,
+            original_marker_count,
+        );
     }
 
     /// Remove a marker at cursor position (innermost) and matching marker from line above.
@@ -704,6 +709,7 @@ impl EditorState {
         let line_idx = self.buffer.byte_to_line(cursor_pos);
         let lines = self.buffer.lines();
         let current_line = &lines[line_idx];
+        let original_marker_count = current_line.markers.len();
 
         // Find which marker we're removing (by matching the range)
         let mut marker_idx = None;
@@ -721,7 +727,11 @@ impl EditorState {
 
         // Now check if the line above is empty and has a matching marker at same level
         if let (Some(kind), Some(idx)) = (marker_kind, marker_idx) {
-            self.remove_matching_marker_from_empty_line_above(Some(kind), idx);
+            self.remove_matching_marker_from_empty_line_above(
+                Some(kind),
+                idx,
+                original_marker_count,
+            );
         }
     }
 
@@ -731,6 +741,7 @@ impl EditorState {
         &mut self,
         marker_kind: Option<MarkerKind>,
         marker_idx: usize,
+        original_marker_count: usize,
     ) {
         let cursor_pos = self.cursor().offset;
         let line_idx = self.buffer.byte_to_line(cursor_pos);
@@ -763,7 +774,23 @@ impl EditorState {
             return;
         }
 
-        // Check if prev line has a marker at the same index with same kind
+        // Only remove from above if prev line has at least as many markers as
+        // current line had before removal. This ensures we're comparing markers
+        // at the same nesting depth.
+        //
+        // Example where we should NOT remove:
+        //   Current: ">    > |" has 3 markers [inner_bq, indent, outer_bq]
+        //   Prev:    ">"       has 1 marker [outer_bq]
+        //   We removed inner_bq (idx 0), but prev only has 1 marker.
+        //   1 < 3, so we don't remove - the nesting levels don't match.
+        //
+        // Example where we SHOULD remove:
+        //   Current: "> |" has 1 marker [bq]
+        //   Prev:    ">"   has 1 marker [bq]
+        //   We removed bq (idx 0), prev has 1 >= 1 markers, and bq at idx 0 matches.
+        if prev_line.markers.len() < original_marker_count {
+            return;
+        }
         if marker_idx >= prev_line.markers.len() {
             return;
         }
@@ -3402,6 +3429,29 @@ plain text|"#,
                 &state,
                 r#"
 > 1. hey|hey"#,
+            );
+        }
+
+        #[test]
+        fn backspace_on_nested_blockquote_does_not_remove_from_shallower_line_above() {
+            // Current line has more markers than prev line
+            // Should NOT remove marker from prev line (nesting levels don't match)
+            let mut state = editor_with_cursor(
+                r#"
+> 1. hey
+>
+>    > |"#,
+            );
+
+            // Backspace: remove inner "> " from current line only
+            // Prev line ">" has fewer markers, so don't touch it
+            state.delete_backward();
+            assert_editor_eq(
+                &state,
+                r#"
+> 1. hey
+>
+>    |"#,
             );
         }
     }
