@@ -1268,44 +1268,8 @@ impl Render for Editor {
         let lines = self.state.buffer.lines().to_vec();
         let cursor_line = self.state.buffer.byte_to_line(cursor_offset);
 
-        // Determine which lines should be collapsed (hidden empty lines between list items)
-        let is_collapsed: Vec<bool> = lines
-            .iter()
-            .enumerate()
-            .map(|(idx, line)| {
-                // Never collapse if cursor is on this line or selection includes it
-                if idx == cursor_line {
-                    return false;
-                }
-                if let Some(ref range) = selection_range
-                    && line.range.start < range.end
-                    && line.range.end > range.start
-                {
-                    return false;
-                }
-                // Collapse single empty line between sibling list items
-                if !self.state.buffer.is_line_empty(idx) || idx == 0 || idx >= lines.len() - 1 {
-                    return false;
-                }
-                let prev = &lines[idx - 1];
-                let next = &lines[idx + 1];
-                // Both adjacent lines must have list markers
-                if !prev.has_list_marker() || !next.has_list_marker() {
-                    return false;
-                }
-                // They must be related (siblings or parent-child) in the list structure
-                self.state.buffer.are_related_list_items(idx - 1, idx + 1)
-            })
-            .collect();
-
-        // Compute cursor_child_index accounting for collapsed lines
-        // +1 for the top spacer, then count non-collapsed lines before cursor
-        let cursor_line_clamped = cursor_line.min(is_collapsed.len());
-        let collapsed_before_cursor = is_collapsed[..cursor_line_clamped]
-            .iter()
-            .filter(|&&c| c)
-            .count();
-        let cursor_child_index = Some(cursor_line_clamped - collapsed_before_cursor + 1);
+        // +1 for the top spacer
+        let cursor_child_index = Some(cursor_line + 1);
 
         // Pre-compute inline styles and code highlights for each line
         let line_data: Vec<_> = lines
@@ -1328,9 +1292,7 @@ impl Render for Editor {
         let line_views: Vec<_> = lines
             .iter()
             .zip(line_data)
-            .zip(is_collapsed.iter())
-            .filter(|&(_, &collapsed)| !collapsed)
-            .map(|((line, (inline_styles, code_highlights)), _)| {
+            .map(|(line, (inline_styles, code_highlights))| {
                 Line::new(
                     line,
                     rope.clone(),
