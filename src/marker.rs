@@ -175,14 +175,24 @@ impl LineMarkers {
     /// E.g., "> " for blockquote, "- " for list, "  " for indent.
     /// Markers are stored innermost to outermost, but continuation should be
     /// in text order (outermost to innermost), so we reverse.
+    /// For ordered lists, the number is incremented (e.g., "2. " becomes "3. ").
     pub fn continuation_rope(&self, rope: &Rope) -> String {
         self.markers
             .iter()
             .rev()
             .map(|m| match &m.kind {
+                // For ordered lists, increment the number
+                MarkerKind::ListItem {
+                    ordered: true,
+                    ordered_marker,
+                    ..
+                } => {
+                    let text = rope_slice_cow(rope, m.range.start, m.range.end);
+                    increment_ordered_marker(&text, *ordered_marker)
+                }
                 // Extract actual text from rope to preserve exact formatting
                 MarkerKind::Indent
-                | MarkerKind::ListItem { .. }
+                | MarkerKind::ListItem { ordered: false, .. }
                 | MarkerKind::BlockQuote
                 | MarkerKind::TaskList { .. } => {
                     rope_slice_cow(rope, m.range.start, m.range.end).into_owned()
@@ -482,6 +492,27 @@ fn rope_slice_cow(rope: &Rope, start: usize, end: usize) -> std::borrow::Cow<'_,
         Some(s) => std::borrow::Cow::Borrowed(s),
         None => std::borrow::Cow::Owned(slice.to_string()),
     }
+}
+
+/// Parse an ordered list marker (e.g., "2. " or "10) ") and return the next number.
+/// Returns the incremented marker string, preserving the style (dot vs parenthesis).
+fn increment_ordered_marker(text: &str, ordered_marker: Option<OrderedMarker>) -> String {
+    // Parse the number from the beginning of the text
+    let num_end = text
+        .find(|c: char| !c.is_ascii_digit())
+        .unwrap_or(text.len());
+    let num_str = &text[..num_end];
+
+    let num: u32 = num_str.parse().unwrap_or(0);
+    let next_num = num + 1;
+
+    // Determine the suffix based on marker style
+    let suffix = match ordered_marker {
+        Some(OrderedMarker::Parenthesis) => ") ",
+        _ => ". ", // Default to dot style
+    };
+
+    format!("{}{}", next_num, suffix)
 }
 
 /// Extract a marker from a tree-sitter node.
@@ -2064,5 +2095,67 @@ mod tests {
         // Check that both are recognized as ordered lists
         assert!(is_ordered_list(&buf_dot.lines()[0].markers[0].kind));
         assert!(is_ordered_list(&buf_paren.lines()[0].markers[0].kind));
+    }
+
+    #[test]
+    fn test_increment_ordered_marker() {
+        // Dot style
+        assert_eq!(
+            increment_ordered_marker("1. ", Some(OrderedMarker::Dot)),
+            "2. "
+        );
+        assert_eq!(
+            increment_ordered_marker("9. ", Some(OrderedMarker::Dot)),
+            "10. "
+        );
+        assert_eq!(
+            increment_ordered_marker("99. ", Some(OrderedMarker::Dot)),
+            "100. "
+        );
+
+        // Parenthesis style
+        assert_eq!(
+            increment_ordered_marker("1) ", Some(OrderedMarker::Parenthesis)),
+            "2) "
+        );
+        assert_eq!(
+            increment_ordered_marker("5) ", Some(OrderedMarker::Parenthesis)),
+            "6) "
+        );
+
+        // Default to dot if no marker specified
+        assert_eq!(increment_ordered_marker("3. ", None), "4. ");
+    }
+
+    #[test]
+    fn test_ordered_list_continuation_increments() {
+        let buf: Buffer = "1. First\n2. Second".parse().unwrap();
+        let lines = buf.lines();
+
+        // Line 1 (index 1) has "2. Second", continuation should be "3. "
+        let continuation = lines[1].continuation_rope(buf.rope());
+        assert_eq!(continuation, "3. ");
+    }
+
+    #[test]
+    fn test_ordered_list_in_blockquote_continuation() {
+        let buf: Buffer = "> 1. First\n> 2. Second".parse().unwrap();
+        let lines = buf.lines();
+
+        // Continuation should be "> 3. "
+        let continuation = lines[1].continuation_rope(buf.rope());
+        assert_eq!(continuation, "> 3. ");
+    }
+
+    #[test]
+    fn debug_ordered_list_tree_structure() {
+        let buf: Buffer = "1. First\n2. Second\n3. Third".parse().unwrap();
+        let text = buf.text();
+        let tree = buf.tree().unwrap();
+        let root = tree.block_tree().root_node();
+
+        println!("\n=== Ordered list ===");
+        println!("Text: {:?}", text);
+        print_tree(&root, &text, 0);
     }
 }

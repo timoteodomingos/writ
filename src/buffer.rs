@@ -173,11 +173,139 @@ impl BufferContent {
         }
         self.tree = self.parser.parse_rope(&self.text, self.tree.as_ref());
 
+        // Normalize ordered list numbering (may re-parse)
+        self.normalize_ordered_lists();
+
         // Update cached lines
         self.update_lines_cache();
 
         // Invalidate code highlight cache
         self.code_highlight_cache.valid = false;
+    }
+
+    /// Normalize ordered list numbering - ensure sequential numbers (1, 2, 3...).
+    /// Modifies the rope directly and re-parses if changes were made.
+    fn normalize_ordered_lists(&mut self) -> bool {
+        let Some(tree) = &self.tree else {
+            return false;
+        };
+
+        let corrections = self.find_ordered_list_corrections(tree.block_tree().root_node());
+
+        if corrections.is_empty() {
+            return false;
+        }
+
+        // Apply corrections in reverse order to preserve byte offsets
+        for (marker_range, correct_number, is_parenthesis) in corrections.into_iter().rev() {
+            let new_marker = if is_parenthesis {
+                format!("{}) ", correct_number)
+            } else {
+                format!("{}. ", correct_number)
+            };
+
+            let char_start = self.text.byte_to_char(marker_range.start);
+            let char_end = self.text.byte_to_char(marker_range.end);
+            self.text.remove(char_start..char_end);
+
+            let char_offset = self.text.byte_to_char(marker_range.start);
+            self.text.insert(char_offset, &new_marker);
+        }
+
+        self.tree = self.parser.parse_rope(&self.text, None);
+        true
+    }
+
+    /// Returns corrections as (range, correct_number, is_parenthesis_style)
+    fn find_ordered_list_corrections(
+        &self,
+        root: tree_sitter::Node,
+    ) -> Vec<(Range<usize>, usize, bool)> {
+        let mut corrections = Vec::new();
+        self.collect_list_corrections(&root, &mut corrections);
+        corrections
+    }
+
+    fn collect_list_corrections(
+        &self,
+        node: &tree_sitter::Node,
+        corrections: &mut Vec<(Range<usize>, usize, bool)>,
+    ) {
+        if node.kind() == "list" {
+            let is_ordered = self.is_ordered_list(node);
+
+            if is_ordered {
+                let mut item_number = 1;
+                for i in 0..node.child_count() {
+                    if let Some(child) = node.child(i as u32)
+                        && child.kind() == "list_item"
+                        && let Some((marker_range, current_number, is_parenthesis)) =
+                            self.extract_ordered_marker(&child)
+                    {
+                        if current_number != item_number {
+                            corrections.push((marker_range, item_number, is_parenthesis));
+                        }
+                        item_number += 1;
+                    }
+                }
+            }
+        }
+
+        for i in 0..node.child_count() {
+            if let Some(child) = node.child(i as u32) {
+                self.collect_list_corrections(&child, corrections);
+            }
+        }
+    }
+
+    fn is_ordered_list(&self, list_node: &tree_sitter::Node) -> bool {
+        for i in 0..list_node.child_count() {
+            if let Some(child) = list_node.child(i as u32)
+                && child.kind() == "list_item"
+            {
+                for j in 0..child.child_count() {
+                    if let Some(marker) = child.child(j as u32) {
+                        return marker.kind().starts_with("list_marker_decimal")
+                            || marker.kind() == "list_marker_dot"
+                            || marker.kind() == "list_marker_parenthesis";
+                    }
+                }
+            }
+        }
+        false
+    }
+
+    /// Extract ordered list marker info: (range, current_number, is_parenthesis_style)
+    fn extract_ordered_marker(
+        &self,
+        list_item: &tree_sitter::Node,
+    ) -> Option<(Range<usize>, usize, bool)> {
+        for i in 0..list_item.child_count() {
+            if let Some(marker) = list_item.child(i as u32)
+                && (marker.kind().starts_with("list_marker_decimal")
+                    || marker.kind() == "list_marker_dot"
+                    || marker.kind() == "list_marker_parenthesis")
+            {
+                let start = marker.start_byte();
+                let end = marker.end_byte();
+                let is_parenthesis = marker.kind() == "list_marker_parenthesis";
+
+                // Extract digits from the marker using rope slice
+                let char_start = self.text.byte_to_char(start);
+                let char_end = self.text.byte_to_char(end);
+                let slice = self.text.slice(char_start..char_end);
+
+                let number: usize = slice
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit())
+                    .collect::<String>()
+                    .parse()
+                    .unwrap_or(1);
+
+                return Some((start..end, number, is_parenthesis));
+            }
+        }
+        None
     }
 
     fn byte_to_point(&self, byte_offset: usize) -> Point {
@@ -522,341 +650,6 @@ impl BufferContent {
         }
 
         self.code_highlight_cache.valid = true;
-    }
-
-    /// Normalize ordered list numbering. Returns true if any changes were made.
-    pub fn normalize_ordered_lists(&mut self) -> bool {
-        let Some(tree) = &self.tree else {
-            return false;
-        };
-
-        let corrections = self.find_ordered_list_corrections(tree.block_tree().root_node());
-
-        if corrections.is_empty() {
-            return false;
-        }
-
-        for (marker_range, correct_number, is_parenthesis) in corrections.into_iter().rev() {
-            let new_marker = if is_parenthesis {
-                format!("{}) ", correct_number)
-            } else {
-                format!("{}. ", correct_number)
-            };
-
-            let char_start = self.text.byte_to_char(marker_range.start);
-            let char_end = self.text.byte_to_char(marker_range.end);
-            self.text.remove(char_start..char_end);
-
-            let char_offset = self.text.byte_to_char(marker_range.start);
-            self.text.insert(char_offset, &new_marker);
-        }
-
-        self.tree = self.parser.parse_rope(&self.text, None);
-        true
-    }
-
-    /// Returns corrections as (range, correct_number, is_parenthesis_style)
-    fn find_ordered_list_corrections(
-        &self,
-        root: tree_sitter::Node,
-    ) -> Vec<(Range<usize>, usize, bool)> {
-        let mut corrections = Vec::new();
-        self.collect_list_corrections(&root, &mut corrections);
-        corrections
-    }
-
-    fn collect_list_corrections(
-        &self,
-        node: &tree_sitter::Node,
-        corrections: &mut Vec<(Range<usize>, usize, bool)>,
-    ) {
-        if node.kind() == "list" {
-            let is_ordered = self.is_ordered_list(node);
-
-            if is_ordered {
-                let mut item_number = 1;
-                for i in 0..node.child_count() {
-                    if let Some(child) = node.child(i as u32)
-                        && child.kind() == "list_item"
-                        && let Some((marker_range, current_number, is_parenthesis)) =
-                            self.extract_ordered_marker(&child)
-                    {
-                        if current_number != item_number {
-                            corrections.push((marker_range, item_number, is_parenthesis));
-                        }
-                        item_number += 1;
-                    }
-                }
-            }
-        }
-
-        for i in 0..node.child_count() {
-            if let Some(child) = node.child(i as u32) {
-                self.collect_list_corrections(&child, corrections);
-            }
-        }
-    }
-
-    fn is_ordered_list(&self, list_node: &tree_sitter::Node) -> bool {
-        for i in 0..list_node.child_count() {
-            if let Some(child) = list_node.child(i as u32)
-                && child.kind() == "list_item"
-            {
-                for j in 0..child.child_count() {
-                    if let Some(marker) = child.child(j as u32) {
-                        return marker.kind().starts_with("list_marker_decimal")
-                            || marker.kind() == "list_marker_dot"
-                            || marker.kind() == "list_marker_parenthesis";
-                    }
-                }
-            }
-        }
-        false
-    }
-
-    /// Extract ordered list marker info: (range, current_number, is_parenthesis_style)
-    fn extract_ordered_marker(
-        &self,
-        list_item: &tree_sitter::Node,
-    ) -> Option<(Range<usize>, usize, bool)> {
-        for i in 0..list_item.child_count() {
-            if let Some(marker) = list_item.child(i as u32)
-                && (marker.kind().starts_with("list_marker_decimal")
-                    || marker.kind() == "list_marker_dot"
-                    || marker.kind() == "list_marker_parenthesis")
-            {
-                let start = marker.start_byte();
-                let end = marker.end_byte();
-                let is_parenthesis = marker.kind() == "list_marker_parenthesis";
-
-                // Extract digits from the marker using rope slice
-                let char_start = self.text.byte_to_char(start);
-                let char_end = self.text.byte_to_char(end);
-                let slice = self.text.slice(char_start..char_end);
-
-                let number: usize = slice
-                    .chars()
-                    .take_while(|c| c.is_ascii_digit())
-                    .collect::<String>()
-                    .parse()
-                    .unwrap_or(1);
-
-                return Some((start..end, number, is_parenthesis));
-            }
-        }
-        None
-    }
-
-    /// Normalize blockquote spacing - ensure space after `>`.
-    /// `>text` → `> text`
-    pub fn normalize_blockquote_spacing(&mut self) -> bool {
-        let mut any_changed = false;
-
-        loop {
-            let Some(tree) = &self.tree else {
-                return any_changed;
-            };
-
-            // Find all blockquote markers missing a trailing space
-            let mut insertions: Vec<usize> = Vec::new();
-            self.find_blockquote_missing_space(&tree.block_tree().root_node(), &mut insertions);
-
-            if insertions.is_empty() {
-                return any_changed;
-            }
-
-            any_changed = true;
-
-            // Apply insertions in reverse order to maintain byte offsets
-            for pos in insertions.into_iter().rev() {
-                let char_pos = self.text.byte_to_char(pos);
-                self.text.insert_char(char_pos, ' ');
-            }
-
-            // Re-parse and continue - tree structure may have changed
-            self.tree = self.parser.parse_rope(&self.text, None);
-        }
-    }
-
-    fn find_blockquote_missing_space(&self, node: &tree_sitter::Node, insertions: &mut Vec<usize>) {
-        // Check both block_quote_marker (first line) and block_continuation (subsequent lines)
-        if node.kind() == "block_quote_marker" || node.kind() == "block_continuation" {
-            let start = node.start_byte();
-            let end = node.end_byte();
-
-            // Get the content to check if it contains '>' (block_continuation might be indent)
-            let char_start = self.text.byte_to_char(start);
-            let char_end = self.text.byte_to_char(end);
-            let content: String = self.text.slice(char_start..char_end).chars().collect();
-
-            // Only process if this is a blockquote marker (contains >)
-            if content.contains('>') {
-                // Check if the marker itself ends with a space
-                let last_byte = if end > start {
-                    self.text.get_byte(end - 1)
-                } else {
-                    None
-                };
-
-                if last_byte != Some(b' ') {
-                    // No trailing space in marker - insert one after it
-                    insertions.push(end);
-                }
-            }
-        }
-
-        for i in 0..node.child_count() {
-            if let Some(child) = node.child(i as u32) {
-                self.find_blockquote_missing_space(&child, insertions);
-            }
-        }
-    }
-
-    /// Normalize task list checkmarks to lowercase x.
-    /// `- [X] task` → `- [x] task`
-    pub fn normalize_task_checkmarks(&mut self) -> bool {
-        let Some(tree) = &self.tree else {
-            return false;
-        };
-
-        // Find all task_list_marker_checked nodes with uppercase X
-        let mut corrections: Vec<Range<usize>> = Vec::new();
-        self.find_uppercase_checkmarks(&tree.block_tree().root_node(), &mut corrections);
-
-        if corrections.is_empty() {
-            return false;
-        }
-
-        // Apply corrections in reverse order to maintain byte offsets
-        for range in corrections.into_iter().rev() {
-            let char_start = self.text.byte_to_char(range.start);
-            let char_end = self.text.byte_to_char(range.end);
-            self.text.remove(char_start..char_end);
-            self.text.insert(char_start, "[x]");
-        }
-
-        self.tree = self.parser.parse_rope(&self.text, None);
-        true
-    }
-
-    fn find_uppercase_checkmarks(
-        &self,
-        node: &tree_sitter::Node,
-        corrections: &mut Vec<Range<usize>>,
-    ) {
-        if node.kind() == "task_list_marker_checked" {
-            let start = node.start_byte();
-            let end = node.end_byte();
-            let char_start = self.text.byte_to_char(start);
-            let char_end = self.text.byte_to_char(end);
-            let text: String = self.text.slice(char_start..char_end).chars().collect();
-
-            // Check if it contains uppercase X
-            if text.contains('X') {
-                corrections.push(start..end);
-            }
-        }
-
-        for i in 0..node.child_count() {
-            if let Some(child) = node.child(i as u32) {
-                self.find_uppercase_checkmarks(&child, corrections);
-            }
-        }
-    }
-
-    /// Remove trailing newlines from the document.
-    /// The file should end with actual content, not newlines.
-    pub fn normalize_trailing_newline(&mut self) -> bool {
-        let len = self.text.len_bytes();
-        if len == 0 {
-            return false;
-        }
-
-        // Find where trailing newlines start
-        let mut trim_from = len;
-        while trim_from > 0 && self.text.get_byte(trim_from - 1) == Some(b'\n') {
-            trim_from -= 1;
-        }
-
-        if trim_from == len {
-            return false; // No trailing newlines
-        }
-
-        // Remove trailing newlines
-        let char_start = self.text.byte_to_char(trim_from);
-        let char_end = self.text.len_chars();
-        self.text.remove(char_start..char_end);
-        true
-    }
-
-    /// Remove soft-wrapped continuation lines by joining them to the previous line.
-    /// `- item\n  continuation` → `- item continuation`
-    /// A soft-wrap continuation is a line with ONLY Indent marker(s) and no container markers.
-    pub fn normalize_soft_wraps(&mut self) -> bool {
-        let mut any_changed = false;
-
-        loop {
-            // Update lines cache from current tree
-            self.update_lines_cache();
-
-            // Find the first soft-wrap continuation line (iterating from end)
-            let mut join_info: Option<(usize, usize)> = None; // (newline_pos, indent_end)
-
-            for i in (1..self.lines.len()).rev() {
-                let line = &self.lines[i];
-
-                // Skip empty lines (blank lines are intentional paragraph breaks)
-                if line.range.start == line.range.end {
-                    continue;
-                }
-
-                // Check if previous line is empty - if so, this is an intentional
-                // nested paragraph, not a soft-wrap continuation
-                let prev_line = &self.lines[i - 1];
-                if prev_line.range.start == prev_line.range.end {
-                    continue;
-                }
-
-                // A soft-wrap continuation has ONLY Indent markers (no containers)
-                let has_only_indent = !line.markers.is_empty()
-                    && line
-                        .markers
-                        .iter()
-                        .all(|m| matches!(m.kind, MarkerKind::Indent));
-
-                if has_only_indent {
-                    // This is a soft-wrap continuation - join it to the previous line
-                    // The newline is at previous_line.range.end (or line.range.start - 1)
-                    let newline_pos = line.range.start - 1;
-                    // The indent ends at the end of the last Indent marker
-                    let indent_end = line
-                        .markers
-                        .iter()
-                        .filter(|m| matches!(m.kind, MarkerKind::Indent))
-                        .map(|m| m.range.end)
-                        .max()
-                        .unwrap_or(line.range.start);
-
-                    join_info = Some((newline_pos, indent_end));
-                    break;
-                }
-            }
-
-            let Some((newline_pos, indent_end)) = join_info else {
-                return any_changed;
-            };
-
-            any_changed = true;
-
-            // Replace "\n" + indent with a single space
-            let char_start = self.text.byte_to_char(newline_pos);
-            let char_end = self.text.byte_to_char(indent_end);
-            self.text.remove(char_start..char_end);
-            self.text.insert_char(char_start, ' ');
-
-            // Re-parse
-            self.tree = self.parser.parse_rope(&self.text, None);
-        }
     }
 
     /// Run all normalization passes on the document.
