@@ -512,10 +512,10 @@ impl EditorState {
         if line.markers.is_empty() {
             String::new()
         } else {
-            // Find the marker that ends furthest into the line
-            let max_end = line.markers.iter().map(|m| m.range.end).max().unwrap();
+            // Markers are innermost-first, so first() has the latest end position
+            let prefix_end = line.markers.first().unwrap().range.end;
             self.buffer
-                .slice_cow(line.range.start..max_end)
+                .slice_cow(line.range.start..prefix_end)
                 .into_owned()
         }
     }
@@ -555,7 +555,8 @@ impl EditorState {
             // For the full nested marker, we need indent + list marker
             let indent = context.nested_paragraph_indent(self.buffer.rope());
             let list_marker = context.continuation_rope(self.buffer.rope());
-            let full = format!("{}{}", indent, list_marker);
+            let mut full = indent.clone();
+            full.push_str(&list_marker);
 
             states.push(indent);
             states.push(full);
@@ -591,8 +592,8 @@ impl EditorState {
         let current_prefix_end = if ctx.line.markers.is_empty() {
             line_start
         } else {
-            // Find the marker that ends furthest into the line
-            ctx.line.markers.iter().map(|m| m.range.end).max().unwrap()
+            // Markers are innermost-first, so first() has the latest end position
+            ctx.line.markers.first().unwrap().range.end
         };
 
         // Delete current prefix and insert new one
@@ -625,10 +626,9 @@ impl EditorState {
 
         // Get the continuation (all markers) for this line
         let continuation = ctx.line.continuation_rope(self.buffer.rope());
-        if continuation.is_empty() {
-            self.insert_text("\n");
-        } else {
-            self.insert_text(&format!("\n{}", continuation));
+        self.insert_text("\n");
+        if !continuation.is_empty() {
+            self.insert_text(&continuation);
         }
     }
 
@@ -637,35 +637,37 @@ impl EditorState {
     /// For blockquotes alone: newline + indent (exits blockquote)
     /// For nested (e.g. `> - item`): newline + outer markers + indent
     pub fn shift_alt_enter(&mut self) {
-        let Some(ctx) = self.line_context() else {
-            self.insert_text("\n");
-            return;
+        let indent = {
+            let Some(ctx) = self.line_context() else {
+                self.insert_text("\n");
+                return;
+            };
+
+            // Check if line has only blockquote markers (no list markers)
+            let has_list = ctx.line.markers.iter().any(|m| {
+                matches!(
+                    m.kind,
+                    MarkerKind::ListItem { .. } | MarkerKind::TaskList { .. }
+                )
+            });
+            let has_blockquote = ctx
+                .line
+                .markers
+                .iter()
+                .any(|m| matches!(m.kind, MarkerKind::BlockQuote));
+
+            if has_blockquote && !has_list {
+                // Pure blockquote: exit with just indent
+                "  ".to_string()
+            } else {
+                // Lists or nested: use nested_paragraph_indent which keeps outer containers
+                ctx.line.nested_paragraph_indent(self.buffer.rope())
+            }
         };
 
-        // Check if line has only blockquote markers (no list markers)
-        let has_list = ctx.line.markers.iter().any(|m| {
-            matches!(
-                m.kind,
-                MarkerKind::ListItem { .. } | MarkerKind::TaskList { .. }
-            )
-        });
-        let has_blockquote = ctx
-            .line
-            .markers
-            .iter()
-            .any(|m| matches!(m.kind, MarkerKind::BlockQuote));
-
-        if has_blockquote && !has_list {
-            // Pure blockquote: exit with just indent
-            self.insert_text("\n  ");
-        } else {
-            // Lists or nested: use nested_paragraph_indent which keeps outer containers
-            let indent = ctx.line.nested_paragraph_indent(self.buffer.rope());
-            if indent.is_empty() {
-                self.insert_text("\n");
-            } else {
-                self.insert_text(&format!("\n{}", indent));
-            }
+        self.insert_text("\n");
+        if !indent.is_empty() {
+            self.insert_text(&indent);
         }
     }
 
@@ -1641,7 +1643,6 @@ mod tests {
         actual.push_str(&text[cursor..]);
         assert_eq!(actual, expected);
     }
-
 
     mod cursor_movement_tests {
         use super::*;
