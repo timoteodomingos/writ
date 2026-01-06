@@ -545,20 +545,35 @@ pub fn markers_at(nodes: &[Node], rope: &Rope, line_start: usize, line_end: usiz
                 if content.contains('>') {
                     // Split nested blockquote continuations into separate markers
                     // e.g., "> > " should become two BlockQuote markers
+                    // e.g., ">    > " should become BlockQuote, Indent, BlockQuote
                     // Markers must be in innermost-to-outermost order, so collect
                     // and reverse before adding.
-                    let mut blockquote_markers = Vec::new();
+                    let mut segment_markers = Vec::new();
                     let mut last_marker_end = start;
+                    let mut first_gt_seen = false;
                     for (i, c) in content.char_indices() {
                         if c == '>' {
                             let gt_pos = start + i;
+                            // Check for whitespace gap between last marker and this >
+                            // This creates Indent markers for spaces BETWEEN blockquotes
+                            // (not before the first one - that comes from a separate node)
+                            if first_gt_seen && gt_pos > last_marker_end {
+                                let gap = rope_slice_cow(rope, last_marker_end, gt_pos);
+                                if !gap.is_empty() && gap.chars().all(|c| c.is_whitespace()) {
+                                    segment_markers.push(Marker {
+                                        kind: MarkerKind::Indent,
+                                        range: last_marker_end..gt_pos,
+                                    });
+                                }
+                            }
+                            first_gt_seen = true;
                             // Check for trailing space after >
                             let range_end = if rope.get_byte(gt_pos + 1) == Some(b' ') {
                                 gt_pos + 2
                             } else {
                                 gt_pos + 1
                             };
-                            blockquote_markers.push(Marker {
+                            segment_markers.push(Marker {
                                 kind: MarkerKind::BlockQuote,
                                 range: gt_pos..range_end,
                             });
@@ -566,13 +581,13 @@ pub fn markers_at(nodes: &[Node], rope: &Rope, line_start: usize, line_end: usiz
                         }
                     }
                     // Reverse so innermost (last >) is first, outermost (first >) is last
-                    blockquote_markers.reverse();
-                    let num_blockquotes = blockquote_markers.len();
-                    markers.extend(blockquote_markers);
+                    segment_markers.reverse();
+                    let num_segments = segment_markers.len();
+                    markers.extend(segment_markers);
 
                     // If there's trailing whitespace after the last "> ", create an Indent marker
                     // e.g., ">    " has "> " as BlockQuote and "   " as Indent
-                    // Insert before the blockquote markers we just added (they're at the end)
+                    // Insert before the markers we just added (they're at the end)
                     if last_marker_end < end {
                         let trailing = rope_slice_cow(rope, last_marker_end, end);
                         if !trailing.is_empty() && trailing.chars().all(|c| c.is_whitespace()) {
@@ -580,8 +595,8 @@ pub fn markers_at(nodes: &[Node], rope: &Rope, line_start: usize, line_end: usiz
                                 kind: MarkerKind::Indent,
                                 range: last_marker_end..end,
                             };
-                            // Insert before the blockquotes we just added
-                            let insert_pos = markers.len() - num_blockquotes;
+                            // Insert before the markers we just added
+                            let insert_pos = markers.len() - num_segments;
                             markers.insert(insert_pos, indent_marker);
                         }
                     }
@@ -1284,6 +1299,22 @@ mod tests {
         assert_eq!(lines[2].markers[0].range, 16..18); // inner "> "
         assert_eq!(lines[2].markers[1].range, 13..16); // "   "
         assert_eq!(lines[2].markers[2].range, 11..13); // outer "> "
+    }
+
+    #[test]
+    fn test_nested_list_in_nested_blockquote() {
+        // Nested blockquote with list inside ordered list paragraph
+        // Line 2 and Line 4 should have matching markers (both are ">    > - hey")
+        let buf: Buffer = "> 1. item 1\n>\n>    > - hey\n>    >\n>    > - hey\n"
+            .parse()
+            .unwrap();
+        let lines = buf.lines();
+
+        // Both list item lines should have 4 markers:
+        // [ListItem, BlockQuote(inner), Indent, BlockQuote(outer)]
+        assert_eq!(lines[2].markers.len(), 4);
+        assert_eq!(lines[4].markers.len(), 4);
+        assert_eq!(kinds(&lines[2].markers), kinds(&lines[4].markers));
     }
 
     #[test]
