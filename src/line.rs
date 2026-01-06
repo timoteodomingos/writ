@@ -177,18 +177,8 @@ impl<'a> Line<'a> {
         let range = &self.line.range;
 
         if let Some(marker_range) = self.line.marker_range() {
-            // For code fences, show the fence markers (```) in content
-            if let Some(fence_marker) = self
-                .line
-                .markers
-                .iter()
-                .find(|m| matches!(m.kind, MarkerKind::CodeBlockFence { .. }))
-            {
-                fence_marker.range.start..range.end
-            } else {
-                // Content starts after all markers (they're rendered as spacers)
-                marker_range.end..range.end
-            }
+            // Content starts after all markers (they're rendered as spacers)
+            marker_range.end..range.end
         } else {
             range.clone()
         }
@@ -616,8 +606,21 @@ impl<'a> Line<'a> {
         hidden
     }
 
+    /// Returns true if the cursor is in the marker area (before content starts)
+    fn cursor_in_marker_area(&self) -> bool {
+        if !self.cursor_on_line() {
+            return false;
+        }
+        let content_range = self.content_range();
+        self.cursor_offset < content_range.start
+    }
+
     fn compute_visual_cursor_pos(&self, display_text: &str) -> Option<usize> {
         if !self.cursor_on_line() {
+            return None;
+        }
+        // If cursor is in marker area, it will be rendered in the spacers
+        if self.cursor_in_marker_area() {
             return None;
         }
         Some(self.buffer_to_visual_pos(self.cursor_offset, display_text))
@@ -625,17 +628,16 @@ impl<'a> Line<'a> {
 
     fn buffer_to_visual_pos(&self, buffer_offset: usize, display_text: &str) -> usize {
         let content_range = self.content_range();
-        let prefix_len = self.get_substitution().map(|s| s.len()).unwrap_or(0);
 
         if content_range.start >= content_range.end {
-            return prefix_len;
+            return 0;
         }
 
-        let clamped_offset = buffer_offset.clamp(content_range.start, content_range.end);
+        let clamped_offset = buffer_offset.min(content_range.end);
 
         let hidden = self.hidden_bytes_before(clamped_offset, &content_range);
         let buffer_pos_in_content = clamped_offset.saturating_sub(content_range.start);
-        let visual_pos = prefix_len + buffer_pos_in_content.saturating_sub(hidden);
+        let visual_pos = buffer_pos_in_content.saturating_sub(hidden);
 
         visual_pos.min(display_text.len())
     }
@@ -700,6 +702,56 @@ impl<'a> Line<'a> {
         )
         .absolute()
         .size_full()
+    }
+
+    /// Render a cursor at a specific character position within a spacer.
+    /// `char_offset` is how many characters into the spacer the cursor should be.
+    fn render_spacer_cursor(&self, char_offset: usize) -> impl IntoElement {
+        let cursor_color = self.theme.cursor_color;
+        let cursor_font = self.theme.text_font.clone();
+        let char_width = self.theme.monospace_char_width;
+        let x_pos = char_width * char_offset as f32;
+
+        // Use canvas to match exact same rendering as render_cursor
+        canvas(
+            move |_bounds, _window, _cx| (),
+            move |bounds, _, window: &mut Window, cx| {
+                let text_style = window.text_style();
+                let font_size = text_style.font_size.to_pixels(window.rem_size());
+                let line_height = text_style
+                    .line_height
+                    .to_pixels(font_size.into(), window.rem_size());
+
+                let cursor_char: SharedString = "\u{258F}".into();
+                let cursor_font_size = font_size * 1.4;
+                let cursor_run = TextRun {
+                    len: cursor_char.len(),
+                    font: cursor_font.clone(),
+                    color: cursor_color.into(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+
+                let shaped_cursor = window.text_system().shape_line(
+                    cursor_char,
+                    cursor_font_size,
+                    &[cursor_run],
+                    None,
+                );
+
+                let cursor_height = cursor_font_size * 1.2;
+                let y_offset = (line_height - cursor_height) / 2.0;
+                // Paint relative to canvas bounds origin
+                let cursor_pos = point(bounds.origin.x + x_pos, bounds.origin.y + y_offset);
+                let _ = shaped_cursor.paint(cursor_pos, cursor_height, window, cx);
+            },
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .w(char_width * (char_offset as f32 + 2.0))
+        .h(rems(1.6))
     }
 }
 
@@ -795,7 +847,21 @@ impl IntoElement for Line<'_> {
         // so iterate in reverse for left-to-right visual layout
         let mut spacers: Vec<gpui::Div> = Vec::new();
 
+        // Check if cursor is in the marker area
+        let cursor_in_markers = self.cursor_in_marker_area();
+
         for marker in self.line.markers.iter().rev() {
+            // Check if cursor is within this specific marker's range
+            // Use exclusive end so cursor at boundary belongs to the next marker
+            let cursor_in_this_marker = cursor_in_markers
+                && self.cursor_offset >= marker.range.start
+                && self.cursor_offset < marker.range.end;
+            let cursor_char_offset = if cursor_in_this_marker {
+                self.cursor_offset - marker.range.start
+            } else {
+                0
+            };
+
             match &marker.kind {
                 MarkerKind::Heading(level) => {
                     line_div = line_div.font_weight(FontWeight::BOLD);
@@ -809,14 +875,18 @@ impl IntoElement for Line<'_> {
                     };
                 }
                 MarkerKind::BlockQuote => {
-                    // Create a spacer with left border for each blockquote level
+                    // Create a spacer with left border for wrap indentation
                     let marker_chars = marker.range.len();
                     let spacer_width = self.theme.monospace_char_width * marker_chars as f32;
-                    let spacer = div()
+                    let mut spacer = div()
+                        .relative()
                         .w(spacer_width)
                         .min_h_full()
                         .border_l_2()
                         .border_color(self.theme.border_color);
+                    if cursor_in_this_marker {
+                        spacer = spacer.child(self.render_spacer_cursor(cursor_char_offset));
+                    }
                     spacers.push(spacer);
                 }
                 MarkerKind::CodeBlockFence { .. } | MarkerKind::CodeBlockContent => {
@@ -878,10 +948,13 @@ impl IntoElement for Line<'_> {
                     }
                 }
                 MarkerKind::Indent => {
-                    // Create a spacer for indent (nested paragraph under list item)
+                    // Create empty spacer for indent (nested paragraph under list item)
                     let indent_chars = marker.range.len();
                     let spacer_width = self.theme.monospace_char_width * indent_chars as f32;
-                    let spacer = div().w(spacer_width).min_h_full();
+                    let mut spacer = div().relative().w(spacer_width).min_h_full();
+                    if cursor_in_this_marker {
+                        spacer = spacer.child(self.render_spacer_cursor(cursor_char_offset));
+                    }
                     spacers.push(spacer);
                 }
                 MarkerKind::ListItem {
@@ -890,24 +963,27 @@ impl IntoElement for Line<'_> {
                     ..
                 } => {
                     // Create a spacer containing the list marker (bullet or number)
-                    // This ensures wrapped text indents past the marker
                     let marker_chars = marker.range.len();
                     let spacer_width = self.theme.monospace_char_width * marker_chars as f32;
 
                     let marker_text = if *ordered {
-                        // For ordered lists, get the actual number from the buffer
                         self.slice(marker.range.clone()).into_owned()
                     } else {
-                        // For unordered lists, use the bullet substitution
                         unordered_marker.map_or("• ", |m| m.bullet()).to_string()
                     };
 
-                    let marker_label = div()
+                    let mut marker_label = div()
+                        .relative()
                         .w(spacer_width)
                         .min_h_full()
                         .font_family(self.theme.code_font.family.clone())
                         .text_color(self.theme.text_color)
                         .child(marker_text);
+
+                    if cursor_in_this_marker {
+                        marker_label =
+                            marker_label.child(self.render_spacer_cursor(cursor_char_offset));
+                    }
 
                     spacers.push(marker_label);
                 }
@@ -922,7 +998,8 @@ impl IntoElement for Line<'_> {
                     let checkbox_str = if *checked { "[x] " } else { "[ ] " };
                     let bullet = unordered_marker.map_or("• ", |m| m.bullet());
 
-                    let marker_label = div()
+                    let mut marker_label = div()
+                        .relative()
                         .w(spacer_width)
                         .min_h_full()
                         .flex()
@@ -940,6 +1017,11 @@ impl IntoElement for Line<'_> {
                                 .child(checkbox_str.to_string()),
                         );
 
+                    if cursor_in_this_marker {
+                        marker_label =
+                            marker_label.child(self.render_spacer_cursor(cursor_char_offset));
+                    }
+
                     spacers.push(marker_label);
                 }
             }
@@ -956,7 +1038,7 @@ impl IntoElement for Line<'_> {
                 text_container.child(self.render_cursor(cursor_pos, text_layout.clone()));
         }
 
-        // Add all spacers first, then the text container
+        // Add all spacers, then the text container
         for spacer in spacers {
             line_div = line_div.child(spacer);
         }

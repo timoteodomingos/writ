@@ -1696,6 +1696,21 @@ mod tests {
             state.delete_backward();
             assert_editor_eq(&state, "|two");
         }
+
+        #[test]
+        fn backspace_deletes_entire_task_list_marker() {
+            // Task list marker "- [ ] " should be atomic
+            let mut state = editor_with_cursor("- [ ] |");
+            state.delete_backward();
+            assert_editor_eq(&state, "|");
+        }
+
+        #[test]
+        fn backspace_deletes_checked_task_list_marker() {
+            let mut state = editor_with_cursor("- [x] |");
+            state.delete_backward();
+            assert_editor_eq(&state, "|");
+        }
     }
 
     mod raw_tab_tests {
@@ -1848,6 +1863,15 @@ mod tests {
             let mut state = editor_with_cursor("- item one\n- item |two");
             state.move_up();
             assert_editor_eq(&state, "- item |one\n- item two");
+        }
+
+        #[test]
+        fn move_left_through_blockquote_ordered_list() {
+            let mut state = editor_with_cursor("> 1. |");
+            state.move_left();
+            assert_editor_eq(&state, "> |1. ");
+            state.move_left();
+            assert_editor_eq(&state, "|> 1. ");
         }
     }
 }
