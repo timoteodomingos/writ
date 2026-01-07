@@ -741,6 +741,8 @@ pub struct Editor {
     focus_handle: FocusHandle,
     list_state: ListState,
     scroll_to_cursor_pending: bool,
+    /// Last known cursor line, used to detect cursor movement for auto-scroll.
+    last_cursor_line: Option<usize>,
     input_blocked: bool,
     streaming_mode: bool,
     config: EditorConfig,
@@ -770,6 +772,7 @@ impl Editor {
             focus_handle,
             list_state,
             scroll_to_cursor_pending: false,
+            last_cursor_line: None,
             input_blocked: false,
             streaming_mode: false,
             config,
@@ -908,9 +911,23 @@ impl Editor {
     }
 
     /// Update list state to match current buffer line count.
-    fn sync_list_state(&self) {
+    /// Uses splice() to add/remove lines while preserving scroll position.
+    fn sync_list_state(&mut self) {
         let line_count = self.state.buffer.lines().len();
-        self.list_state.reset(line_count);
+        let current_count = self.list_state.item_count();
+        if line_count != current_count {
+            if line_count > current_count {
+                // Lines were added - splice at the end
+                let added = line_count - current_count;
+                eprintln!("SPLICE add {} lines at {}", added, current_count);
+                self.list_state.splice(current_count..current_count, added);
+            } else {
+                // Lines were removed - splice to remove from end
+                let removed = current_count - line_count;
+                eprintln!("SPLICE remove {} lines", removed);
+                self.list_state.splice(line_count..current_count, 0);
+            }
+        }
     }
 
     fn move_in_direction(&mut self, direction: Direction, extend: bool) {
@@ -1383,35 +1400,42 @@ impl Render for Editor {
         // Clone line_theme for the closure since we also use it for outer div styling
         let line_theme_for_list = line_theme.clone();
 
-        // Build the virtualized list - only visible lines will be rendered
-        let line_list = list(self.list_state.clone(), move |ix, _window, _cx| {
-            let line = &lines[ix];
-            let (inline_styles, code_highlights) = line_data[ix].clone();
-
-            Line::new(
-                line,
-                rope.clone(),
-                cursor_offset,
-                inline_styles,
-                line_theme_for_list.clone(),
-                selection_range.clone(),
-                code_highlights,
-                base_path.clone(),
-            )
-            .on_click(on_click.clone())
-            .on_drag(on_drag.clone())
-            .on_checkbox(on_checkbox.clone())
-            .on_hover(on_hover.clone())
-            .into_any_element()
-        })
-        .size_full();
-
-        // Handle scroll-to-cursor
+        // Handle scroll-to-cursor BEFORE building the list element
         let cursor_line = self.state.buffer.byte_to_line(cursor_offset);
-        if self.scroll_to_cursor_pending {
+        let cursor_moved = self.last_cursor_line != Some(cursor_line);
+        self.last_cursor_line = Some(cursor_line);
+
+        if cursor_moved || self.scroll_to_cursor_pending {
+            eprintln!("SCROLL to line {}", cursor_line);
             self.list_state.scroll_to_reveal_item(cursor_line);
             self.scroll_to_cursor_pending = false;
         }
+
+        // Build the virtualized list - only visible lines will be rendered
+        // Wrap in a div with stable id to maintain scroll state between renders
+        let line_list = div().id("line-list").size_full().child(
+            list(self.list_state.clone(), move |ix, _window, _cx| {
+                let line = &lines[ix];
+                let (inline_styles, code_highlights) = line_data[ix].clone();
+
+                Line::new(
+                    line,
+                    rope.clone(),
+                    cursor_offset,
+                    inline_styles,
+                    line_theme_for_list.clone(),
+                    selection_range.clone(),
+                    code_highlights,
+                    base_path.clone(),
+                )
+                .on_click(on_click.clone())
+                .on_drag(on_drag.clone())
+                .on_checkbox(on_checkbox.clone())
+                .on_hover(on_hover.clone())
+                .into_any_element()
+            })
+            .size_full(),
+        );
 
         div()
             .id("editor")
