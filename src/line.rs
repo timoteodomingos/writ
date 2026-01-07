@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 
 use gpui::{
-    App, Font, FontStyle, FontWeight, Hsla, IntoElement, MouseButton, MouseDownEvent,
+    App, CursorStyle, Font, FontStyle, FontWeight, Hsla, IntoElement, MouseButton, MouseDownEvent,
     MouseMoveEvent, Rgba, ScrollAnchor, SharedString, StyledText, TextRun, Window, canvas, div,
     img, point, prelude::*, px, rems,
 };
@@ -1004,6 +1004,25 @@ impl IntoElement for Line<'_> {
                     let checkbox_str = if *checked { "[x] " } else { "[ ] " };
                     let bullet = unordered_marker.map_or("• ", |m| m.bullet());
 
+                    // Build checkbox div with click handler
+                    let mut checkbox_div = div()
+                        .font_family(self.theme.code_font.family.clone())
+                        .text_color(self.theme.link_color)
+                        .cursor(CursorStyle::PointingHand)
+                        .child(checkbox_str.to_string());
+
+                    if let Some(ref on_checkbox) = self.on_checkbox {
+                        let on_checkbox = on_checkbox.clone();
+                        let line_number = self.line.line_number;
+                        checkbox_div = checkbox_div.on_mouse_down(
+                            MouseButton::Left,
+                            move |_event, window, cx| {
+                                cx.stop_propagation();
+                                on_checkbox(line_number, window, cx);
+                            },
+                        );
+                    }
+
                     let mut marker_label = div()
                         .relative()
                         .w(spacer_width)
@@ -1016,12 +1035,7 @@ impl IntoElement for Line<'_> {
                                 .text_color(self.theme.text_color)
                                 .child(bullet.to_string()),
                         )
-                        .child(
-                            div()
-                                .font_family(self.theme.code_font.family.clone())
-                                .text_color(self.theme.link_color)
-                                .child(checkbox_str.to_string()),
-                        );
+                        .child(checkbox_div);
 
                     if cursor_in_this_marker {
                         marker_label =
