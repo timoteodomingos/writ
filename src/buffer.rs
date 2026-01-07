@@ -1,5 +1,6 @@
 use ropey::Rope;
 use std::ops::{Deref, DerefMut, Range};
+use std::rc::Rc;
 use std::str::FromStr;
 use tree_sitter::{InputEdit, Point};
 use undo::Record;
@@ -9,10 +10,56 @@ use crate::inline::{StyledRegion, extract_all_inline_styles, styles_in_range};
 use crate::marker::{LineMarkers, MarkerKind, collect_nodes, markers_at};
 use crate::parser::{MarkdownParser, MarkdownTree};
 
-#[derive(Clone, Debug, Default)]
+/// A snapshot of buffer data for rendering. All fields use Rc for O(1) cloning.
+#[derive(Clone)]
+pub struct RenderSnapshot {
+    pub lines: Rc<Vec<LineMarkers>>,
+    pub rope: Rope,
+    pub inline_styles: Rc<Vec<StyledRegion>>,
+    pub code_highlights: Rc<Vec<(Range<usize>, Vec<HighlightSpan>)>>,
+}
+
+impl RenderSnapshot {
+    /// Get inline styles for a specific line. O(log n) binary search.
+    pub fn inline_styles_for_line(&self, line_idx: usize) -> Vec<StyledRegion> {
+        let line = &self.lines[line_idx];
+        styles_in_range(&self.inline_styles, &line.range)
+            .into_iter()
+            .cloned()
+            .collect()
+    }
+
+    /// Get code highlights for a specific line. O(code_blocks) scan.
+    pub fn code_highlights_for_line(&self, line_idx: usize) -> Vec<HighlightSpan> {
+        let line = &self.lines[line_idx];
+        let range = &line.range;
+        let mut result = Vec::new();
+        for (block_range, highlights) in self.code_highlights.iter() {
+            if range.start < block_range.end && range.end > block_range.start {
+                for span in highlights {
+                    if span.range.start < range.end && span.range.end > range.start {
+                        result.push(span.clone());
+                    }
+                }
+            }
+        }
+        result
+    }
+}
+
+#[derive(Clone, Debug)]
 struct CodeHighlightCache {
-    highlights: Vec<(Range<usize>, Vec<HighlightSpan>)>,
+    highlights: Rc<Vec<(Range<usize>, Vec<HighlightSpan>)>>,
     valid: bool,
+}
+
+impl Default for CodeHighlightCache {
+    fn default() -> Self {
+        Self {
+            highlights: Rc::new(Vec::new()),
+            valid: false,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -64,10 +111,12 @@ pub struct BufferContent {
     highlighter: Highlighter,
     code_highlight_cache: CodeHighlightCache,
     /// Cached line info, updated when tree changes.
-    lines: Vec<LineMarkers>,
+    /// Wrapped in Rc for O(1) cloning in render snapshots.
+    lines: Rc<Vec<LineMarkers>>,
     /// Cached inline styles, updated when tree changes.
     /// Sorted by start position for efficient binary search lookup.
-    inline_styles: Vec<StyledRegion>,
+    /// Wrapped in Rc for O(1) cloning in render snapshots.
+    inline_styles: Rc<Vec<StyledRegion>>,
 }
 
 impl BufferContent {
@@ -78,8 +127,8 @@ impl BufferContent {
             highlighter: Highlighter::new(),
             tree: None,
             code_highlight_cache: CodeHighlightCache::default(),
-            lines: Vec::new(),
-            inline_styles: Vec::new(),
+            lines: Rc::new(Vec::new()),
+            inline_styles: Rc::new(Vec::new()),
         }
     }
 
@@ -91,42 +140,43 @@ impl BufferContent {
             .map(|t| collect_nodes(&t.block_tree().root_node()));
 
         let mut byte_offset = 0;
-        self.lines = self
-            .text
-            .lines()
-            .enumerate()
-            .map(|(line_idx, line_slice)| {
-                let start_byte = byte_offset;
-                let len = line_slice.len_bytes();
-                byte_offset += len;
-                // Rope's lines() includes trailing newline; exclude it from range
-                let has_newline = line_slice.get_byte(len.saturating_sub(1)) == Some(b'\n');
-                let end_byte = if has_newline {
-                    start_byte + len - 1
-                } else {
-                    start_byte + len
-                };
+        self.lines = Rc::new(
+            self.text
+                .lines()
+                .enumerate()
+                .map(|(line_idx, line_slice)| {
+                    let start_byte = byte_offset;
+                    let len = line_slice.len_bytes();
+                    byte_offset += len;
+                    // Rope's lines() includes trailing newline; exclude it from range
+                    let has_newline = line_slice.get_byte(len.saturating_sub(1)) == Some(b'\n');
+                    let end_byte = if has_newline {
+                        start_byte + len - 1
+                    } else {
+                        start_byte + len
+                    };
 
-                let markers = if let Some(ref nodes) = nodes {
-                    markers_at(nodes, &self.text, start_byte, end_byte)
-                } else {
-                    Vec::new()
-                };
+                    let markers = if let Some(ref nodes) = nodes {
+                        markers_at(nodes, &self.text, start_byte, end_byte)
+                    } else {
+                        Vec::new()
+                    };
 
-                LineMarkers {
-                    range: start_byte..end_byte,
-                    line_number: line_idx,
-                    markers,
-                }
-            })
-            .collect();
+                    LineMarkers {
+                        range: start_byte..end_byte,
+                        line_number: line_idx,
+                        markers,
+                    }
+                })
+                .collect(),
+        );
 
         // Update inline styles cache
-        self.inline_styles = if let Some(ref tree) = self.tree {
+        self.inline_styles = Rc::new(if let Some(ref tree) = self.tree {
             extract_all_inline_styles(tree, &self.text)
         } else {
             Vec::new()
-        };
+        });
     }
 
     fn apply_edit(&mut self, offset: usize, to_delete: &str, to_insert: &str) {
@@ -368,6 +418,23 @@ impl BufferContent {
         &self.lines
     }
 
+    /// Create a render snapshot for efficient virtualized rendering.
+    /// Ensures code highlight cache is valid before creating the snapshot.
+    /// All Rc clones are O(1).
+    pub fn render_snapshot(&mut self) -> RenderSnapshot {
+        // Ensure code highlight cache is valid
+        if !self.code_highlight_cache.valid {
+            self.rebuild_code_highlight_cache();
+        }
+
+        RenderSnapshot {
+            lines: Rc::clone(&self.lines),
+            rope: self.text.clone(),
+            inline_styles: Rc::clone(&self.inline_styles),
+            code_highlights: Rc::clone(&self.code_highlight_cache.highlights),
+        }
+    }
+
     /// Get inline styles that overlap with a byte range.
     /// Uses binary search for efficient O(log n) lookup.
     pub fn inline_styles_for_range(&self, range: &Range<usize>) -> Vec<StyledRegion> {
@@ -465,7 +532,7 @@ impl BufferContent {
 
         // Find highlights that overlap with the range
         let mut result = Vec::new();
-        for (block_range, highlights) in &self.code_highlight_cache.highlights {
+        for (block_range, highlights) in self.code_highlight_cache.highlights.iter() {
             if range.start < block_range.end && range.end > block_range.start {
                 for span in highlights {
                     if span.range.start < range.end && span.range.end > range.start {
@@ -478,7 +545,8 @@ impl BufferContent {
     }
 
     fn rebuild_code_highlight_cache(&mut self) {
-        self.code_highlight_cache.highlights.clear();
+        let highlights = Rc::make_mut(&mut self.code_highlight_cache.highlights);
+        highlights.clear();
 
         let lines = &self.lines;
 
@@ -532,9 +600,7 @@ impl BufferContent {
                         span.range.start += start_offset;
                         span.range.end += start_offset;
                     }
-                    self.code_highlight_cache
-                        .highlights
-                        .push((block_start..block_end, spans));
+                    highlights.push((block_start..block_end, spans));
                 }
             } else {
                 i += 1;
@@ -690,8 +756,8 @@ impl FromStr for Buffer {
             highlighter: Highlighter::new(),
             tree,
             code_highlight_cache: CodeHighlightCache::default(),
-            lines: Vec::new(),
-            inline_styles: Vec::new(),
+            lines: Rc::new(Vec::new()),
+            inline_styles: Rc::new(Vec::new()),
         };
 
         content.update_lines_cache();

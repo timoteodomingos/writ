@@ -1389,29 +1389,14 @@ impl Render for Editor {
             },
         );
 
-        // Pre-compute line data for all lines
-        let lines = self.state.buffer.lines().to_vec();
-        let rope = self.state.buffer.rope().clone();
+        // Create render snapshot - O(n) clone but avoids O(n) computation
+        // Style/highlight lookups only happen for visible lines
+        let snapshot = self.state.buffer.render_snapshot();
         let base_path = self.config.base_path.clone();
-
-        // Pre-compute inline styles and code highlights for each line
-        let line_data: Vec<_> = lines
-            .iter()
-            .map(|line| {
-                let inline_styles = self.state.buffer.inline_styles_for_range(&line.range);
-                let code_highlights: Vec<_> = self
-                    .state
-                    .buffer
-                    .code_highlights_for_range(line.range.clone())
-                    .iter()
-                    .map(|span| (span.clone(), theme.color_for_highlight(span.highlight_id)))
-                    .collect();
-                (inline_styles, code_highlights)
-            })
-            .collect();
 
         // Clone line_theme for the closure since we also use it for outer div styling
         let line_theme_for_list = line_theme.clone();
+        let theme_for_list = theme.clone();
 
         // Handle scroll-to-cursor BEFORE building the list element
         let cursor_line = self.state.buffer.byte_to_line(cursor_offset);
@@ -1440,12 +1425,23 @@ impl Render for Editor {
         // Wrap in a div with stable id to maintain scroll state between renders
         let line_list = div().id("line-list").size_full().child(
             list(self.list_state.clone(), move |ix, _window, _cx| {
-                let line = &lines[ix];
-                let (inline_styles, code_highlights) = line_data[ix].clone();
+                let line = &snapshot.lines[ix];
+                // Compute styles/highlights only for visible lines
+                let inline_styles = snapshot.inline_styles_for_line(ix);
+                let code_highlights: Vec<_> = snapshot
+                    .code_highlights_for_line(ix)
+                    .iter()
+                    .map(|span| {
+                        (
+                            span.clone(),
+                            theme_for_list.color_for_highlight(span.highlight_id),
+                        )
+                    })
+                    .collect();
 
                 Line::new(
                     line,
-                    rope.clone(),
+                    snapshot.rope.clone(),
                     cursor_offset,
                     inline_styles,
                     line_theme_for_list.clone(),
