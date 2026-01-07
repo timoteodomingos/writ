@@ -144,6 +144,14 @@ impl<'a> Line<'a> {
         }
     }
 
+    fn marker_in_selection(&self, marker_range: &Range<usize>) -> bool {
+        if let Some(ref sel) = self.selection_range {
+            sel.start < marker_range.end && sel.end > marker_range.start
+        } else {
+            false
+        }
+    }
+
     fn is_code_block_line(&self) -> bool {
         !self.code_highlights.is_empty() || self.line.is_fence()
     }
@@ -890,8 +898,40 @@ impl IntoElement for Line<'_> {
                         .w(spacer_width)
                         .min_h_full()
                         .child(border_element);
+                    if self.marker_in_selection(&marker.range) {
+                        spacer = spacer.bg(self.theme.selection_color);
+                    }
                     if cursor_in_this_marker {
                         spacer = spacer.child(self.render_spacer_cursor(cursor_char_offset));
+                    }
+                    // Add click handler to snap cursor to start of marker
+                    if let Some(ref on_click) = self.on_click {
+                        let on_click = on_click.clone();
+                        let marker_start = marker.range.start;
+                        spacer = spacer.on_mouse_down(
+                            MouseButton::Left,
+                            move |event: &MouseDownEvent, window, cx| {
+                                cx.stop_propagation();
+                                on_click(
+                                    marker_start,
+                                    event.modifiers.shift,
+                                    event.click_count,
+                                    window,
+                                    cx,
+                                );
+                            },
+                        );
+                    }
+                    // Add drag handler for selection
+                    if let Some(ref on_drag) = self.on_drag {
+                        let on_drag = on_drag.clone();
+                        let marker_start = marker.range.start;
+                        spacer = spacer.on_mouse_move(move |event: &MouseMoveEvent, window, cx| {
+                            if event.pressed_button == Some(MouseButton::Left) {
+                                cx.stop_propagation();
+                                on_drag(marker_start, window, cx);
+                            }
+                        });
                     }
                     spacers.push(spacer);
                 }
@@ -958,8 +998,40 @@ impl IntoElement for Line<'_> {
                     let indent_chars = marker.range.len();
                     let spacer_width = self.theme.monospace_char_width * indent_chars as f32;
                     let mut spacer = div().relative().w(spacer_width).min_h_full();
+                    if self.marker_in_selection(&marker.range) {
+                        spacer = spacer.bg(self.theme.selection_color);
+                    }
                     if cursor_in_this_marker {
                         spacer = spacer.child(self.render_spacer_cursor(cursor_char_offset));
+                    }
+                    // Add click handler to snap cursor to start of marker
+                    if let Some(ref on_click) = self.on_click {
+                        let on_click = on_click.clone();
+                        let marker_start = marker.range.start;
+                        spacer = spacer.on_mouse_down(
+                            MouseButton::Left,
+                            move |event: &MouseDownEvent, window, cx| {
+                                cx.stop_propagation();
+                                on_click(
+                                    marker_start,
+                                    event.modifiers.shift,
+                                    event.click_count,
+                                    window,
+                                    cx,
+                                );
+                            },
+                        );
+                    }
+                    // Add drag handler for selection
+                    if let Some(ref on_drag) = self.on_drag {
+                        let on_drag = on_drag.clone();
+                        let marker_start = marker.range.start;
+                        spacer = spacer.on_mouse_move(move |event: &MouseMoveEvent, window, cx| {
+                            if event.pressed_button == Some(MouseButton::Left) {
+                                cx.stop_propagation();
+                                on_drag(marker_start, window, cx);
+                            }
+                        });
                     }
                     spacers.push(spacer);
                 }
@@ -986,9 +1058,44 @@ impl IntoElement for Line<'_> {
                         .text_color(self.theme.text_color)
                         .child(marker_text);
 
+                    if self.marker_in_selection(&marker.range) {
+                        marker_label = marker_label.bg(self.theme.selection_color);
+                    }
                     if cursor_in_this_marker {
                         marker_label =
                             marker_label.child(self.render_spacer_cursor(cursor_char_offset));
+                    }
+
+                    // Add click handler to snap cursor to start of marker
+                    if let Some(ref on_click) = self.on_click {
+                        let on_click = on_click.clone();
+                        let marker_start = marker.range.start;
+                        marker_label = marker_label.on_mouse_down(
+                            MouseButton::Left,
+                            move |event: &MouseDownEvent, window, cx| {
+                                cx.stop_propagation();
+                                on_click(
+                                    marker_start,
+                                    event.modifiers.shift,
+                                    event.click_count,
+                                    window,
+                                    cx,
+                                );
+                            },
+                        );
+                    }
+                    // Add drag handler for selection
+                    if let Some(ref on_drag) = self.on_drag {
+                        let on_drag = on_drag.clone();
+                        let marker_start = marker.range.start;
+                        marker_label = marker_label.on_mouse_move(
+                            move |event: &MouseMoveEvent, window, cx| {
+                                if event.pressed_button == Some(MouseButton::Left) {
+                                    cx.stop_propagation();
+                                    on_drag(marker_start, window, cx);
+                                }
+                            },
+                        );
                     }
 
                     spacers.push(marker_label);
@@ -1004,7 +1111,31 @@ impl IntoElement for Line<'_> {
                     let checkbox_str = if *checked { "[x] " } else { "[ ] " };
                     let bullet = unordered_marker.map_or("• ", |m| m.bullet());
 
-                    // Build checkbox div with click handler
+                    // Build bullet div with click handler to position cursor at marker start
+                    let mut bullet_div = div()
+                        .font_family(self.theme.code_font.family.clone())
+                        .text_color(self.theme.text_color)
+                        .child(bullet.to_string());
+
+                    if let Some(ref on_click) = self.on_click {
+                        let on_click = on_click.clone();
+                        let marker_start = marker.range.start;
+                        bullet_div = bullet_div.on_mouse_down(
+                            MouseButton::Left,
+                            move |event: &MouseDownEvent, window, cx| {
+                                cx.stop_propagation();
+                                on_click(
+                                    marker_start,
+                                    event.modifiers.shift,
+                                    event.click_count,
+                                    window,
+                                    cx,
+                                );
+                            },
+                        );
+                    }
+
+                    // Build checkbox div with click handler (keep stop_propagation for toggle)
                     let mut checkbox_div = div()
                         .font_family(self.theme.code_font.family.clone())
                         .text_color(self.theme.link_color)
@@ -1029,17 +1160,28 @@ impl IntoElement for Line<'_> {
                         .min_h_full()
                         .flex()
                         .flex_row()
-                        .child(
-                            div()
-                                .font_family(self.theme.code_font.family.clone())
-                                .text_color(self.theme.text_color)
-                                .child(bullet.to_string()),
-                        )
+                        .child(bullet_div)
                         .child(checkbox_div);
 
+                    if self.marker_in_selection(&marker.range) {
+                        marker_label = marker_label.bg(self.theme.selection_color);
+                    }
                     if cursor_in_this_marker {
                         marker_label =
                             marker_label.child(self.render_spacer_cursor(cursor_char_offset));
+                    }
+                    // Add drag handler for selection
+                    if let Some(ref on_drag) = self.on_drag {
+                        let on_drag = on_drag.clone();
+                        let marker_start = marker.range.start;
+                        marker_label = marker_label.on_mouse_move(
+                            move |event: &MouseMoveEvent, window, cx| {
+                                if event.pressed_button == Some(MouseButton::Left) {
+                                    cx.stop_propagation();
+                                    on_drag(marker_start, window, cx);
+                                }
+                            },
+                        );
                     }
 
                     spacers.push(marker_label);
