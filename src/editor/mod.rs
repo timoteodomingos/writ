@@ -352,8 +352,13 @@ impl EditorState {
             return None;
         }
 
-        let ctx = self.line_context()?;
-        let current_prefix = self.current_line_prefix(ctx.line);
+        // Current prefix is simply the text from line start to cursor
+        let line_idx = self.buffer.byte_to_line(cursor_offset);
+        let line_start = self.buffer.line_to_byte(line_idx);
+        let current_prefix = self
+            .buffer
+            .slice_cow(line_start..cursor_offset)
+            .into_owned();
 
         let current_idx = states
             .iter()
@@ -361,19 +366,6 @@ impl EditorState {
             .unwrap_or(0);
 
         Some((states, current_idx))
-    }
-
-    /// Get the current prefix of a line (markers/indent before content).
-    fn current_line_prefix(&self, line: &LineMarkers) -> String {
-        if line.markers.is_empty() {
-            String::new()
-        } else {
-            // Markers are innermost-first, so first() has the latest end position
-            let prefix_end = line.markers.first().unwrap().range.end;
-            self.buffer
-                .slice_cow(line.range.start..prefix_end)
-                .into_owned()
-        }
     }
 
     /// Build tab cycle states by walking up the tree-sitter parse tree.
@@ -593,22 +585,17 @@ impl EditorState {
 
     /// Set the line prefix, replacing current markers.
     fn set_line_prefix(&mut self, new_prefix: &str) {
-        let Some(ctx) = self.line_context() else {
-            return;
-        };
+        let cursor_offset = self.cursor().offset;
+        let line_idx = self.buffer.byte_to_line(cursor_offset);
+        let line_start = self.buffer.line_to_byte(line_idx);
 
-        let line_start = ctx.line.range.start;
-        let current_prefix_end = if ctx.line.markers.is_empty() {
-            line_start
-        } else {
-            // Markers are innermost-first, so first() has the latest end position
-            ctx.line.markers.first().unwrap().range.end
-        };
+        // Current prefix is everything from line start to cursor
+        let current_prefix_end = cursor_offset;
 
         // Delete current prefix and insert new one
         if current_prefix_end > line_start {
             self.buffer
-                .delete(line_start..current_prefix_end, self.cursor().offset);
+                .delete(line_start..current_prefix_end, cursor_offset);
         }
 
         if !new_prefix.is_empty() {
@@ -1954,6 +1941,44 @@ mod tests {
 
             state.tab();
             assert_editor_eq(&state, "- parent\n  - nested\n\n|"); // back to empty
+        }
+
+        #[test]
+        fn tab_no_blank_line_no_para_indent() {
+            // Without blank line, no para indent in cycle
+            // Cycle: ["- ", "  - ", "    - ", ""]
+            let mut state = editor_with_cursor("- parent item\n  - nested with tab\n|");
+
+            state.tab();
+            assert_editor_eq(&state, "- parent item\n  - nested with tab\n- |");
+
+            state.tab();
+            assert_editor_eq(&state, "- parent item\n  - nested with tab\n  - |");
+
+            state.tab();
+            assert_editor_eq(&state, "- parent item\n  - nested with tab\n    - |");
+
+            state.tab();
+            assert_editor_eq(&state, "- parent item\n  - nested with tab\n|");
+        }
+
+        #[test]
+        fn tab_with_trailing_newline() {
+            // Cursor on line with newline after it - should still cycle correctly
+            // Cycle: ["- ", "  - ", "    - ", ""]
+            let mut state = editor_with_cursor("- parent item\n  - nested with tab\n|\n");
+
+            state.tab();
+            assert_editor_eq(&state, "- parent item\n  - nested with tab\n- |\n");
+
+            state.tab();
+            assert_editor_eq(&state, "- parent item\n  - nested with tab\n  - |\n");
+
+            state.tab();
+            assert_editor_eq(&state, "- parent item\n  - nested with tab\n    - |\n");
+
+            state.tab();
+            assert_editor_eq(&state, "- parent item\n  - nested with tab\n|\n");
         }
     }
 
