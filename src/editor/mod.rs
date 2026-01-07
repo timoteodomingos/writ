@@ -9,8 +9,8 @@ pub use theme::EditorTheme;
 use std::rc::Rc;
 
 use gpui::{
-    App, Context, CursorStyle, FocusHandle, Focusable, IntoElement, KeyDownEvent,
-    ModifiersChangedEvent, ReadGlobal, ScrollHandle, Window, div, font, prelude::*,
+    App, Context, CursorStyle, FocusHandle, Focusable, IntoElement, KeyDownEvent, ListAlignment,
+    ListState, ModifiersChangedEvent, ReadGlobal, Window, div, font, list, prelude::*, px,
 };
 
 use crate::title_bar::FileInfo;
@@ -739,8 +739,7 @@ impl EditorState {
 pub struct Editor {
     state: EditorState,
     focus_handle: FocusHandle,
-    scroll_handle: ScrollHandle,
-    cursor_child_index: Option<usize>,
+    list_state: ListState,
     scroll_to_cursor_pending: bool,
     input_blocked: bool,
     streaming_mode: bool,
@@ -762,13 +761,14 @@ impl Editor {
     /// Create a new editor with the given content and configuration.
     pub fn with_config(content: &str, config: EditorConfig, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
-        let scroll_handle = ScrollHandle::new();
+        let state = EditorState::new(content);
+        let line_count = state.buffer.lines().len();
+        let list_state = ListState::new(line_count, ListAlignment::Top, px(200.0));
 
         Self {
-            state: EditorState::new(content),
+            state,
             focus_handle,
-            scroll_handle,
-            cursor_child_index: None,
+            list_state,
             scroll_to_cursor_pending: false,
             input_blocked: false,
             streaming_mode: false,
@@ -798,6 +798,7 @@ impl Editor {
     pub fn set_text(&mut self, content: &str, cx: &mut Context<Self>) {
         self.state.buffer = content.parse().unwrap_or_default();
         self.state.selection = Selection::new(0, 0);
+        self.sync_list_state();
         cx.notify();
     }
 
@@ -815,13 +816,14 @@ impl Editor {
         self.state.buffer.insert(end, text, end);
         let new_end = self.state.buffer.len_bytes();
         self.state.selection = Selection::new(new_end, new_end);
+        self.sync_list_state();
         cx.notify();
     }
 
     /// Append text and scroll to keep the cursor visible.
     pub fn append_and_scroll(&mut self, text: &str, _window: &mut Window, cx: &mut Context<Self>) {
         self.append(text, cx);
-        self.scroll_handle.scroll_to_bottom();
+        self.request_scroll_to_cursor();
     }
 
     fn cursor(&self) -> Cursor {
@@ -834,20 +836,6 @@ impl Editor {
         } else {
             self.state.selection = Selection::new(new_cursor.offset, new_cursor.offset);
         }
-    }
-
-    fn perform_pending_scroll(&mut self) {
-        if !self.scroll_to_cursor_pending {
-            return;
-        }
-
-        let Some(child_ix) = self.cursor_child_index else {
-            return;
-        };
-
-        // Use scroll_to_item which defers scrolling to prepaint when bounds are known
-        self.scroll_handle.scroll_to_item(child_ix);
-        self.scroll_to_cursor_pending = false;
     }
 
     fn request_scroll_to_cursor(&mut self) {
@@ -906,14 +894,23 @@ impl Editor {
 
     fn insert_text(&mut self, text: &str) {
         self.state.insert_text(text);
+        self.sync_list_state();
     }
 
     fn delete_backward(&mut self) {
         self.state.delete_backward();
+        self.sync_list_state();
     }
 
     fn delete_forward(&mut self) {
         self.state.delete_forward();
+        self.sync_list_state();
+    }
+
+    /// Update list state to match current buffer line count.
+    fn sync_list_state(&self) {
+        let line_count = self.state.buffer.lines().len();
+        self.list_state.reset(line_count);
     }
 
     fn move_in_direction(&mut self, direction: Direction, extend: bool) {
@@ -1362,11 +1359,10 @@ impl Render for Editor {
             },
         );
 
+        // Pre-compute line data for all lines
         let lines = self.state.buffer.lines().to_vec();
-        let cursor_line = self.state.buffer.byte_to_line(cursor_offset);
-
-        // +1 for the top spacer
-        let cursor_child_index = Some(cursor_line + 1);
+        let rope = self.state.buffer.rope().clone();
+        let base_path = self.config.base_path.clone();
 
         // Pre-compute inline styles and code highlights for each line
         let line_data: Vec<_> = lines
@@ -1384,40 +1380,38 @@ impl Render for Editor {
             })
             .collect();
 
-        // Clone the rope once - Rope::clone() is O(1) due to internal Arc sharing
-        let rope = self.state.buffer.rope().clone();
-        let line_views: Vec<_> = lines
-            .iter()
-            .zip(line_data)
-            .map(|(line, (inline_styles, code_highlights))| {
-                Line::new(
-                    line,
-                    rope.clone(),
-                    cursor_offset,
-                    inline_styles,
-                    line_theme.clone(),
-                    selection_range.clone(),
-                    code_highlights,
-                    self.config.base_path.clone(),
-                )
-                .on_click(on_click.clone())
-                .on_drag(on_drag.clone())
-                .on_checkbox(on_checkbox.clone())
-                .on_hover(on_hover.clone())
-            })
-            .collect();
+        // Clone line_theme for the closure since we also use it for outer div styling
+        let line_theme_for_list = line_theme.clone();
 
-        let cursor_moved = self.cursor_child_index != cursor_child_index;
-        self.cursor_child_index = cursor_child_index;
+        // Build the virtualized list - only visible lines will be rendered
+        let line_list = list(self.list_state.clone(), move |ix, _window, _cx| {
+            let line = &lines[ix];
+            let (inline_styles, code_highlights) = line_data[ix].clone();
 
-        if cursor_moved {
-            self.request_scroll_to_cursor();
+            Line::new(
+                line,
+                rope.clone(),
+                cursor_offset,
+                inline_styles,
+                line_theme_for_list.clone(),
+                selection_range.clone(),
+                code_highlights,
+                base_path.clone(),
+            )
+            .on_click(on_click.clone())
+            .on_drag(on_drag.clone())
+            .on_checkbox(on_checkbox.clone())
+            .on_hover(on_hover.clone())
+            .into_any_element()
+        })
+        .size_full();
+
+        // Handle scroll-to-cursor
+        let cursor_line = self.state.buffer.byte_to_line(cursor_offset);
+        if self.scroll_to_cursor_pending {
+            self.list_state.scroll_to_reveal_item(cursor_line);
+            self.scroll_to_cursor_pending = false;
         }
-
-        self.perform_pending_scroll();
-
-        let top_spacer = div().h(self.config.padding_y);
-        let bottom_spacer = div().h(self.config.padding_y);
 
         div()
             .id("editor")
@@ -1426,8 +1420,6 @@ impl Render for Editor {
             .on_key_down(cx.listener(Self::on_key_down))
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
             .size_full()
-            .overflow_scroll()
-            .track_scroll(&self.scroll_handle)
             .px(self.config.padding_x)
             .font(line_theme.text_font.clone())
             .text_color(line_theme.text_color)
@@ -1438,9 +1430,7 @@ impl Render for Editor {
                     CursorStyle::IBeam
                 },
             )
-            .child(top_spacer)
-            .children(line_views)
-            .child(bottom_spacer)
+            .child(line_list)
     }
 }
 
