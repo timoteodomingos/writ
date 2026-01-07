@@ -675,37 +675,40 @@ impl<'a> Line<'a> {
 
         canvas(
             move |_bounds, _window, _cx| text_layout.position_for_index(cursor_pos),
-            move |_bounds, cursor_pos_result, window: &mut Window, cx| {
-                if let Some(pos) = cursor_pos_result {
-                    let text_style = window.text_style();
-                    let font_size = text_style.font_size.to_pixels(window.rem_size());
-                    let line_height = text_style
-                        .line_height
-                        .to_pixels(font_size.into(), window.rem_size());
+            move |bounds, cursor_pos_result, window: &mut Window, cx| {
+                // Fall back to start of bounds if position_for_index returns None
+                // (can happen for empty/single-space lines)
+                let pos =
+                    cursor_pos_result.unwrap_or_else(|| point(bounds.origin.x, bounds.origin.y));
 
-                    let cursor_char: SharedString = "\u{258F}".into();
-                    let cursor_font_size = font_size * 1.4;
-                    let cursor_run = TextRun {
-                        len: cursor_char.len(),
-                        font: text_style.font(),
-                        color: cursor_color.into(),
-                        background_color: None,
-                        underline: None,
-                        strikethrough: None,
-                    };
+                let text_style = window.text_style();
+                let font_size = text_style.font_size.to_pixels(window.rem_size());
+                let line_height = text_style
+                    .line_height
+                    .to_pixels(font_size.into(), window.rem_size());
 
-                    let shaped_cursor = window.text_system().shape_line(
-                        cursor_char,
-                        cursor_font_size,
-                        &[cursor_run],
-                        None,
-                    );
+                let cursor_char: SharedString = "\u{258F}".into();
+                let cursor_font_size = font_size * 1.4;
+                let cursor_run = TextRun {
+                    len: cursor_char.len(),
+                    font: text_style.font(),
+                    color: cursor_color.into(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
 
-                    let cursor_height = cursor_font_size * 1.2;
-                    let y_offset = (line_height - cursor_height) / 2.0;
-                    let cursor_pos = point(pos.x, pos.y + y_offset);
-                    let _ = shaped_cursor.paint(cursor_pos, cursor_height, window, cx);
-                }
+                let shaped_cursor = window.text_system().shape_line(
+                    cursor_char,
+                    cursor_font_size,
+                    &[cursor_run],
+                    None,
+                );
+
+                let cursor_height = cursor_font_size * 1.2;
+                let y_offset = (line_height - cursor_height) / 2.0;
+                let cursor_pos = point(pos.x, pos.y + y_offset);
+                let _ = shaped_cursor.paint(cursor_pos, cursor_height, window, cx);
             },
         )
         .absolute()
@@ -826,14 +829,17 @@ impl IntoElement for Line<'_> {
         }
 
         let (display_text, mut runs) = self.build_styled_content();
-        let visual_cursor_pos = self.compute_visual_cursor_pos(&display_text);
 
+        // For empty lines, use a single space so the line has height and cursor can render
         let display_text = if display_text.is_empty() {
             runs.push(self.text_run(1, self.line_font(), self.theme.text_color));
             " ".to_string()
         } else {
             display_text
         };
+
+        // Compute cursor position after any empty-line substitution
+        let visual_cursor_pos = self.compute_visual_cursor_pos(&display_text);
 
         let visual_selection = self.compute_visual_selection_range(&display_text);
 

@@ -10,7 +10,7 @@ use std::rc::Rc;
 
 use gpui::{
     App, Context, CursorStyle, FocusHandle, Focusable, IntoElement, KeyDownEvent, ListAlignment,
-    ListState, ModifiersChangedEvent, ReadGlobal, Window, div, font, list, prelude::*, px,
+    ListState, ModifiersChangedEvent, ReadGlobal, Window, div, font, list, prelude::*, px, rems,
 };
 
 use crate::title_bar::FileInfo;
@@ -910,21 +910,34 @@ impl Editor {
         self.sync_list_state();
     }
 
+    fn enter(&mut self) {
+        self.state.enter();
+        self.sync_list_state();
+    }
+
+    fn shift_enter(&mut self) {
+        self.state.shift_enter();
+        self.sync_list_state();
+    }
+
+    fn shift_alt_enter(&mut self) {
+        self.state.shift_alt_enter();
+        self.sync_list_state();
+    }
+
     /// Update list state to match current buffer line count.
     /// Uses splice() to add/remove lines while preserving scroll position.
     fn sync_list_state(&mut self) {
         let line_count = self.state.buffer.lines().len();
         let current_count = self.list_state.item_count();
+
         if line_count != current_count {
             if line_count > current_count {
                 // Lines were added - splice at the end
                 let added = line_count - current_count;
-                eprintln!("SPLICE add {} lines at {}", added, current_count);
                 self.list_state.splice(current_count..current_count, added);
             } else {
                 // Lines were removed - splice to remove from end
-                let removed = current_count - line_count;
-                eprintln!("SPLICE remove {} lines", removed);
                 self.list_state.splice(line_count..current_count, 0);
             }
         }
@@ -994,13 +1007,13 @@ impl Editor {
             "enter" => {
                 if keystroke.modifiers.shift && keystroke.modifiers.alt {
                     // Shift+Alt+Enter: indented continuation (nested paragraph)
-                    self.state.shift_alt_enter();
+                    self.shift_alt_enter();
                 } else if keystroke.modifiers.shift {
                     // Shift+Enter: continue container (add markers)
-                    self.state.shift_enter();
+                    self.shift_enter();
                 } else {
                     // Enter: raw newline
-                    self.state.enter();
+                    self.enter();
                 }
                 cx.notify();
             }
@@ -1229,13 +1242,13 @@ impl Editor {
                 self.insert_text(&c.to_string());
             }
             EditorAction::Enter => {
-                self.state.enter();
+                self.enter();
             }
             EditorAction::ShiftEnter => {
-                self.state.shift_enter();
+                self.shift_enter();
             }
             EditorAction::ShiftAltEnter => {
-                self.state.shift_alt_enter();
+                self.shift_alt_enter();
             }
             EditorAction::Tab => {
                 self.tab();
@@ -1402,12 +1415,24 @@ impl Render for Editor {
 
         // Handle scroll-to-cursor BEFORE building the list element
         let cursor_line = self.state.buffer.byte_to_line(cursor_offset);
-        let cursor_moved = self.last_cursor_line != Some(cursor_line);
+        let last_line = self.last_cursor_line;
+        let cursor_moved = last_line != Some(cursor_line);
         self.last_cursor_line = Some(cursor_line);
 
         if cursor_moved || self.scroll_to_cursor_pending {
-            eprintln!("SCROLL to line {}", cursor_line);
-            self.list_state.scroll_to_reveal_item(cursor_line);
+            let total_lines = self.state.buffer.lines().len();
+            let moving_down = cursor_line > last_line.unwrap_or(0);
+
+            if moving_down {
+                // When moving down, reveal lines ahead of cursor so it's not at the edge.
+                // Use a larger margin to keep cursor comfortably in view.
+                let scroll_margin = 8;
+                let reveal_line = (cursor_line + scroll_margin).min(total_lines.saturating_sub(1));
+                self.list_state.scroll_to_reveal_item(reveal_line);
+            } else {
+                // When moving up, reveal the cursor line directly (puts it at top if needed)
+                self.list_state.scroll_to_reveal_item(cursor_line);
+            }
             self.scroll_to_cursor_pending = false;
         }
 
@@ -1434,7 +1459,9 @@ impl Render for Editor {
                 .on_hover(on_hover.clone())
                 .into_any_element()
             })
-            .size_full(),
+            .size_full()
+            .pt(rems(1.6))
+            .pb(rems(4.8)),
         );
 
         div()
