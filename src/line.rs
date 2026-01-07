@@ -37,8 +37,8 @@ pub struct LineTheme {
     pub monospace_char_width: gpui::Pixels,
 }
 
-pub struct Line<'a> {
-    line: &'a LineMarkers,
+pub struct Line {
+    line: LineMarkers,
     /// Owned Rope - clone is O(1) due to internal Arc sharing.
     rope: Rope,
     cursor_offset: usize,
@@ -56,9 +56,9 @@ pub struct Line<'a> {
     substitution: Option<String>,
 }
 
-impl<'a> Line<'a> {
+impl Line {
     pub fn new(
-        line: &'a LineMarkers,
+        line: LineMarkers,
         rope: Rope,
         cursor_offset: usize,
         inline_styles: Vec<StyledRegion>,
@@ -774,7 +774,7 @@ fn line_base(line_number: usize) -> gpui::Stateful<gpui::Div> {
         .mx_auto()
 }
 
-impl IntoElement for Line<'_> {
+impl IntoElement for Line {
     type Element = gpui::Stateful<gpui::Div>;
 
     fn into_element(self) -> Self::Element {

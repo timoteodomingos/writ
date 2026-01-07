@@ -7,6 +7,18 @@ use ropey::Rope;
 use std::ops::Range;
 use tree_sitter::Node;
 
+/// Owned node info for storing tree structure without lifetimes.
+/// Used for efficient lazy LineMarkers computation during rendering.
+#[derive(Debug, Clone)]
+pub struct NodeInfo {
+    pub start_byte: usize,
+    pub end_byte: usize,
+    pub kind: &'static str,
+    pub parent_kind: Option<&'static str>,
+    /// For fenced_code_block_delimiter nodes: true if this is the first (opening) delimiter
+    pub is_first_fence_delimiter: bool,
+}
+
 /// The unordered list marker character.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum UnorderedMarker {
@@ -484,6 +496,13 @@ fn find_node_index(nodes: &[Node], target_byte: usize) -> usize {
         .unwrap_or_else(|idx| idx)
 }
 
+/// Find the index of the first NodeInfo with start_byte >= target.
+fn find_node_info_index(nodes: &[NodeInfo], target_byte: usize) -> usize {
+    nodes
+        .binary_search_by_key(&target_byte, |n| n.start_byte)
+        .unwrap_or_else(|idx| idx)
+}
+
 /// Get a byte slice from a Rope, borrowing if possible.
 /// Returns a Cow that borrows if the slice fits in one chunk, allocates otherwise.
 fn rope_slice_cow(rope: &Rope, start: usize, end: usize) -> std::borrow::Cow<'_, str> {
@@ -714,6 +733,60 @@ pub fn collect_nodes<'a>(root: &Node<'a>) -> Vec<Node<'a>> {
     }
 }
 
+/// Collect all nodes as owned NodeInfo structs (no lifetimes).
+/// Used for lazy LineMarkers computation during rendering.
+pub fn collect_node_infos(root: &Node) -> Vec<NodeInfo> {
+    let mut cursor = root.walk();
+    let mut nodes = Vec::new();
+
+    loop {
+        let node = cursor.node();
+
+        // For fenced_code_block_delimiter, determine if it's the opening fence
+        let is_first_fence_delimiter = if node.kind() == "fenced_code_block_delimiter" {
+            node.parent()
+                .map(|parent| {
+                    if parent.kind() == "fenced_code_block" {
+                        // Find the first delimiter child
+                        let mut child_cursor = parent.walk();
+                        for child in parent.children(&mut child_cursor) {
+                            if child.kind() == "fenced_code_block_delimiter" {
+                                return child.start_byte() == node.start_byte();
+                            }
+                        }
+                    }
+                    true // Default to opening if not inside proper fenced_code_block
+                })
+                .unwrap_or(true)
+        } else {
+            false
+        };
+
+        nodes.push(NodeInfo {
+            start_byte: node.start_byte(),
+            end_byte: node.end_byte(),
+            kind: node.kind(),
+            parent_kind: node.parent().map(|p| p.kind()),
+            is_first_fence_delimiter,
+        });
+
+        if cursor.goto_first_child() {
+            continue;
+        }
+        if cursor.goto_next_sibling() {
+            continue;
+        }
+        loop {
+            if !cursor.goto_parent() {
+                return nodes;
+            }
+            if cursor.goto_next_sibling() {
+                break;
+            }
+        }
+    }
+}
+
 /// Find all markers for a line by scanning nodes that start within the line.
 /// Returns markers innermost to outermost (reverse document order).
 /// Takes a pre-computed nodes vec from `collect_nodes()` for efficiency.
@@ -880,6 +953,217 @@ pub fn markers_at(nodes: &[Node], rope: &Rope, line_start: usize, line_end: usiz
                         true
                     })
                     .unwrap_or(true);
+
+                markers.push(Marker {
+                    kind: MarkerKind::CodeBlockFence {
+                        language,
+                        is_opening,
+                    },
+                    range: start..end,
+                });
+            }
+            "info_string" => {
+                let lang = rope_slice_cow(rope, start, end);
+                let lang = lang.trim();
+                let language = if lang.is_empty() {
+                    None
+                } else {
+                    Some(lang.to_string())
+                };
+                // Store the language temporarily - will be picked up by delimiter
+                // Mark as opening since info_string only appears on opening fences
+                markers.push(Marker {
+                    kind: MarkerKind::CodeBlockFence {
+                        language,
+                        is_opening: true,
+                    },
+                    range: start..end,
+                });
+            }
+
+            _ => {}
+        }
+    }
+
+    // Fallback: If no fence marker was detected but the line looks like a fence,
+    // add a closing fence marker. This handles the case where tree-sitter doesn't
+    // parse the closing fence when there's no trailing content.
+    if !markers
+        .iter()
+        .any(|m| matches!(m.kind, MarkerKind::CodeBlockFence { .. }))
+    {
+        let line_text = rope_slice_cow(rope, line_start, line_end);
+        let trimmed = line_text.trim();
+        // Check for fence pattern: 3+ backticks or tildes, nothing else
+        if (trimmed.starts_with("```") && trimmed.chars().skip(3).all(|c| c == '`'))
+            || (trimmed.starts_with("~~~") && trimmed.chars().skip(3).all(|c| c == '~'))
+        {
+            // This is likely an undetected closing fence
+            markers.push(Marker {
+                kind: MarkerKind::CodeBlockFence {
+                    language: None,
+                    is_opening: false,
+                },
+                range: line_start..line_end,
+            });
+        }
+    }
+
+    markers
+}
+
+/// Find all markers for a line by scanning NodeInfo structs that start within the line.
+/// Returns markers innermost to outermost (reverse document order).
+/// Takes a pre-computed nodes vec from `collect_node_infos()` for efficiency.
+/// This version works with owned NodeInfo instead of borrowed Node<'a>.
+pub fn markers_at_from_infos(
+    nodes: &[NodeInfo],
+    rope: &Rope,
+    line_start: usize,
+    line_end: usize,
+) -> Vec<Marker> {
+    let mut markers = Vec::new();
+    // Pending task marker info: (checked, checkbox_end_byte)
+    // We see task_list_marker before list_marker (iterating innermost to outermost),
+    // so we store the checkbox info and combine when we see the list marker.
+    let mut pending_task: Option<(bool, usize)> = None;
+
+    // Binary search to find first node past line_end - we iterate backwards from here
+    let end_idx = find_node_info_index(nodes, line_end + 1);
+
+    // Iterate in reverse to get innermost markers first
+    for node in nodes[..end_idx].iter().rev() {
+        let start = node.start_byte;
+        // Stop once we're before the line
+        if start < line_start {
+            break;
+        }
+        let end = node.end_byte;
+        let kind = node.kind;
+
+        match kind {
+            "block_quote_marker" | "block_continuation" => {
+                // Skip block_continuation inside indented_code_block (it's code indent, not a marker)
+                if kind == "block_continuation" && node.parent_kind == Some("indented_code_block") {
+                    continue;
+                }
+                let content = rope_slice_cow(rope, start, end);
+                if content.contains('>') {
+                    // Use parse_continuation to extract markers via tree-sitter.
+                    // It returns markers innermost-to-outermost, matching our order.
+                    markers.extend(parse_continuation(rope, start, end));
+                } else if !content.is_empty() && content.chars().all(|c| c.is_whitespace()) {
+                    markers.push(Marker {
+                        kind: MarkerKind::Indent,
+                        range: start..end,
+                    });
+                }
+            }
+            "list_marker_minus" | "list_marker_plus" | "list_marker_star" => {
+                let (marker, indent) = marker_from_node(kind, rope, start, end);
+
+                // Add Indent marker for the leading whitespace if present
+                if let Some(ind) = indent {
+                    markers.push(ind);
+                }
+
+                // Check if this list marker has a pending task checkbox
+                if let Some((checked, checkbox_end)) = pending_task.take() {
+                    // Extract the unordered marker type from the ListItem marker
+                    if let Some(Marker {
+                        kind:
+                            MarkerKind::ListItem {
+                                unordered_marker, ..
+                            },
+                        range,
+                    }) = marker
+                    {
+                        // Combine into a single TaskList marker spanning list marker to checkbox end
+                        markers.push(Marker {
+                            kind: MarkerKind::TaskList {
+                                checked,
+                                unordered_marker,
+                            },
+                            range: range.start..checkbox_end,
+                        });
+                    }
+                } else if let Some(m) = marker {
+                    markers.push(m);
+                }
+            }
+            "list_marker_dot" | "list_marker_parenthesis" => {
+                let (marker, indent) = marker_from_node(kind, rope, start, end);
+
+                // Add Indent marker for the leading whitespace if present
+                if let Some(ind) = indent {
+                    markers.push(ind);
+                }
+
+                if let Some(m) = marker {
+                    markers.push(m);
+                }
+            }
+            "task_list_marker_unchecked" => {
+                // Include trailing space after ] if present
+                let range_end = if rope.get_byte(end) == Some(b' ') {
+                    end + 1
+                } else {
+                    end
+                };
+                // Store for combining with list marker
+                pending_task = Some((false, range_end));
+            }
+            "task_list_marker_checked" => {
+                // Include trailing space after ] if present
+                let range_end = if rope.get_byte(end) == Some(b' ') {
+                    end + 1
+                } else {
+                    end
+                };
+                // Store for combining with list marker
+                pending_task = Some((true, range_end));
+            }
+            "atx_h1_marker" | "atx_h2_marker" | "atx_h3_marker" | "atx_h4_marker"
+            | "atx_h5_marker" | "atx_h6_marker" => {
+                let level = match kind {
+                    "atx_h1_marker" => 1,
+                    "atx_h2_marker" => 2,
+                    "atx_h3_marker" => 3,
+                    "atx_h4_marker" => 4,
+                    "atx_h5_marker" => 5,
+                    _ => 6,
+                };
+                // Include trailing space after # if present
+                let range_end = if rope.get_byte(end) == Some(b' ') {
+                    end + 1
+                } else {
+                    end
+                };
+                markers.push(Marker {
+                    kind: MarkerKind::Heading(level),
+                    range: start..range_end,
+                });
+            }
+            "thematic_break" => {
+                markers.push(Marker {
+                    kind: MarkerKind::ThematicBreak,
+                    range: start..end,
+                });
+            }
+            "fenced_code_block_delimiter" => {
+                // Check if we already recorded a language from info_string
+                let language = markers.iter().find_map(|m| {
+                    if let MarkerKind::CodeBlockFence { language, .. } = &m.kind {
+                        language.clone()
+                    } else {
+                        None
+                    }
+                });
+                // Remove any placeholder fence marker we added from info_string
+                markers.retain(|m| !matches!(m.kind, MarkerKind::CodeBlockFence { .. }));
+
+                // Use pre-computed is_first_fence_delimiter from NodeInfo
+                let is_opening = node.is_first_fence_delimiter;
 
                 markers.push(Marker {
                     kind: MarkerKind::CodeBlockFence {

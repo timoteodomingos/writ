@@ -7,23 +7,67 @@ use undo::Record;
 
 use crate::highlight::{HighlightSpan, Highlighter};
 use crate::inline::{StyledRegion, extract_all_inline_styles, styles_in_range};
-use crate::marker::{LineMarkers, MarkerKind, collect_nodes, markers_at};
+use crate::marker::{LineMarkers, MarkerKind, NodeInfo, collect_node_infos, markers_at_from_infos};
 use crate::parser::{MarkdownParser, MarkdownTree};
 
 /// A snapshot of buffer data for rendering. All fields use Rc for O(1) cloning.
+/// LineMarkers are computed lazily per-line using the nodes cache.
 #[derive(Clone)]
 pub struct RenderSnapshot {
-    pub lines: Rc<Vec<LineMarkers>>,
     pub rope: Rope,
     pub inline_styles: Rc<Vec<StyledRegion>>,
     pub code_highlights: Rc<Vec<(Range<usize>, Vec<HighlightSpan>)>>,
+    /// Cached nodes for lazy LineMarkers computation
+    nodes: Rc<Vec<NodeInfo>>,
+    /// Number of lines in the document
+    line_count: usize,
 }
 
 impl RenderSnapshot {
+    /// Get the number of lines in the document.
+    pub fn line_count(&self) -> usize {
+        self.line_count
+    }
+
+    /// Compute the byte range for a line (excludes trailing newline).
+    fn line_byte_range(&self, line_idx: usize) -> Range<usize> {
+        let start_char = self.rope.line_to_char(line_idx);
+        let end_char = if line_idx + 1 < self.rope.len_lines() {
+            self.rope.line_to_char(line_idx + 1)
+        } else {
+            self.rope.len_chars()
+        };
+        let start_byte = self.rope.char_to_byte(start_char);
+        let end_byte = self.rope.char_to_byte(end_char);
+
+        // Exclude trailing newline
+        let line_slice = self.rope.line(line_idx);
+        let len = line_slice.len_bytes();
+        let has_newline = line_slice.get_byte(len.saturating_sub(1)) == Some(b'\n');
+        let adjusted_end = if has_newline {
+            end_byte.saturating_sub(1)
+        } else {
+            end_byte
+        };
+
+        start_byte..adjusted_end
+    }
+
+    /// Compute LineMarkers for a specific line on demand. O(log n) binary search + marker extraction.
+    pub fn line_markers(&self, line_idx: usize) -> LineMarkers {
+        let range = self.line_byte_range(line_idx);
+        let markers = markers_at_from_infos(&self.nodes, &self.rope, range.start, range.end);
+        LineMarkers {
+            range,
+            line_number: line_idx,
+            markers,
+        }
+    }
+
     /// Get inline styles for a specific line. O(log n) binary search.
     pub fn inline_styles_for_line(&self, line_idx: usize) -> Vec<StyledRegion> {
-        let line = &self.lines[line_idx];
-        styles_in_range(&self.inline_styles, &line.range)
+        let range = self.line_byte_range(line_idx);
+        styles_in_range(&self.inline_styles, &range)
             .into_iter()
             .cloned()
             .collect()
@@ -31,8 +75,7 @@ impl RenderSnapshot {
 
     /// Get code highlights for a specific line. O(code_blocks) scan.
     pub fn code_highlights_for_line(&self, line_idx: usize) -> Vec<HighlightSpan> {
-        let line = &self.lines[line_idx];
-        let range = &line.range;
+        let range = self.line_byte_range(line_idx);
         let mut result = Vec::new();
         for (block_range, highlights) in self.code_highlights.iter() {
             if range.start < block_range.end && range.end > block_range.start {
@@ -110,13 +153,16 @@ pub struct BufferContent {
     tree: Option<MarkdownTree>,
     highlighter: Highlighter,
     code_highlight_cache: CodeHighlightCache,
-    /// Cached line info, updated when tree changes.
-    /// Wrapped in Rc for O(1) cloning in render snapshots.
-    lines: Rc<Vec<LineMarkers>>,
+    /// Cached nodes for lazy LineMarkers computation during rendering.
+    /// Updated when tree changes. Wrapped in Rc for O(1) cloning in render snapshots.
+    nodes: Rc<Vec<NodeInfo>>,
     /// Cached inline styles, updated when tree changes.
     /// Sorted by start position for efficient binary search lookup.
     /// Wrapped in Rc for O(1) cloning in render snapshots.
     inline_styles: Rc<Vec<StyledRegion>>,
+    /// Cached line markers for BufferContent methods that need them.
+    /// This is separate from the render path - only computed when needed.
+    lines_cache: Option<Vec<LineMarkers>>,
 }
 
 impl BufferContent {
@@ -127,20 +173,32 @@ impl BufferContent {
             highlighter: Highlighter::new(),
             tree: None,
             code_highlight_cache: CodeHighlightCache::default(),
-            lines: Rc::new(Vec::new()),
+            nodes: Rc::new(Vec::new()),
             inline_styles: Rc::new(Vec::new()),
+            lines_cache: None,
         }
     }
 
-    /// Recompute cached lines and inline styles from current tree.
-    fn update_lines_cache(&mut self) {
-        let nodes = self
-            .tree
-            .as_ref()
-            .map(|t| collect_nodes(&t.block_tree().root_node()));
+    /// Recompute cached nodes, inline styles, and lines cache from current tree.
+    fn update_caches(&mut self) {
+        // Update nodes cache for lazy LineMarkers computation in RenderSnapshot
+        self.nodes = Rc::new(
+            self.tree
+                .as_ref()
+                .map(|t| collect_node_infos(&t.block_tree().root_node()))
+                .unwrap_or_default(),
+        );
 
+        // Update inline styles cache
+        self.inline_styles = Rc::new(if let Some(ref tree) = self.tree {
+            extract_all_inline_styles(tree, &self.text)
+        } else {
+            Vec::new()
+        });
+
+        // Rebuild lines cache for BufferContent methods (non-rendering path)
         let mut byte_offset = 0;
-        self.lines = Rc::new(
+        self.lines_cache = Some(
             self.text
                 .lines()
                 .enumerate()
@@ -156,11 +214,8 @@ impl BufferContent {
                         start_byte + len
                     };
 
-                    let markers = if let Some(ref nodes) = nodes {
-                        markers_at(nodes, &self.text, start_byte, end_byte)
-                    } else {
-                        Vec::new()
-                    };
+                    let markers =
+                        markers_at_from_infos(&self.nodes, &self.text, start_byte, end_byte);
 
                     LineMarkers {
                         range: start_byte..end_byte,
@@ -170,13 +225,6 @@ impl BufferContent {
                 })
                 .collect(),
         );
-
-        // Update inline styles cache
-        self.inline_styles = Rc::new(if let Some(ref tree) = self.tree {
-            extract_all_inline_styles(tree, &self.text)
-        } else {
-            Vec::new()
-        });
     }
 
     fn apply_edit(&mut self, offset: usize, to_delete: &str, to_insert: &str) {
@@ -226,8 +274,8 @@ impl BufferContent {
         // Normalize ordered list numbering (may re-parse)
         self.normalize_ordered_lists();
 
-        // Update cached lines
-        self.update_lines_cache();
+        // Update cached nodes and inline styles
+        self.update_caches();
 
         // Invalidate code highlight cache
         self.code_highlight_cache.valid = false;
@@ -415,12 +463,14 @@ impl BufferContent {
     }
 
     pub fn lines(&self) -> &[LineMarkers] {
-        &self.lines
+        self.lines_cache
+            .as_ref()
+            .expect("lines_cache should be populated by update_caches")
     }
 
     /// Create a render snapshot for efficient virtualized rendering.
     /// Ensures code highlight cache is valid before creating the snapshot.
-    /// All Rc clones are O(1).
+    /// All Rc clones are O(1). LineMarkers are computed lazily per-line.
     pub fn render_snapshot(&mut self) -> RenderSnapshot {
         // Ensure code highlight cache is valid
         if !self.code_highlight_cache.valid {
@@ -428,10 +478,11 @@ impl BufferContent {
         }
 
         RenderSnapshot {
-            lines: Rc::clone(&self.lines),
             rope: self.text.clone(),
             inline_styles: Rc::clone(&self.inline_styles),
             code_highlights: Rc::clone(&self.code_highlight_cache.highlights),
+            nodes: Rc::clone(&self.nodes),
+            line_count: self.text.len_lines(),
         }
     }
 
@@ -461,10 +512,11 @@ impl BufferContent {
     /// Returns true if the line has no content (only markers or whitespace).
     /// Code fences are always considered content.
     pub fn is_line_empty(&self, line_idx: usize) -> bool {
-        if line_idx >= self.lines.len() {
+        let lines = self.lines();
+        if line_idx >= lines.len() {
             return true;
         }
-        let line = &self.lines[line_idx];
+        let line = &lines[line_idx];
 
         // Code fences are always content
         if line.is_fence() {
@@ -545,66 +597,81 @@ impl BufferContent {
     }
 
     fn rebuild_code_highlight_cache(&mut self) {
+        // First pass: collect code blocks info without holding borrows
+        // (block_start, block_end, content_start, code_content, lang)
+        let mut code_blocks: Vec<(usize, usize, usize, String, String)> = Vec::new();
+
+        {
+            let lines = self.lines();
+            let mut i = 0;
+            while i < lines.len() {
+                // Check if this is a fence line with a language
+                let fence_lang = lines[i].markers.iter().find_map(|m| {
+                    if let MarkerKind::CodeBlockFence { language, .. } = &m.kind {
+                        language.clone()
+                    } else {
+                        None
+                    }
+                });
+
+                if let Some(lang) = fence_lang {
+                    let block_start = lines[i].range.start;
+                    i += 1;
+
+                    // Collect code content
+                    let mut code_content = String::new();
+                    let mut content_start_offset: Option<usize> = None;
+                    let mut block_end = block_start;
+
+                    while i < lines.len() {
+                        if lines[i].is_fence() {
+                            // Closing fence
+                            block_end = lines[i].range.end;
+                            i += 1;
+                            break;
+                        } else {
+                            // Code content line (any non-fence line between opening and closing fence)
+                            if content_start_offset.is_none() {
+                                content_start_offset = Some(lines[i].range.start);
+                            }
+                            // Use rope slice instead of full buffer string
+                            let range = &lines[i].range;
+                            let char_start = self.text.byte_to_char(range.start);
+                            let char_end = self.text.byte_to_char(range.end);
+                            let slice = self.text.slice(char_start..char_end);
+                            code_content.push_str(&slice.to_string());
+                            code_content.push('\n');
+                            block_end = lines[i].range.end;
+                            i += 1;
+                        }
+                    }
+
+                    if let Some(start_offset) = content_start_offset {
+                        code_blocks.push((
+                            block_start,
+                            block_end,
+                            start_offset,
+                            code_content,
+                            lang,
+                        ));
+                    }
+                } else {
+                    i += 1;
+                }
+            }
+        }
+
+        // Second pass: highlight code blocks and store results
         let highlights = Rc::make_mut(&mut self.code_highlight_cache.highlights);
         highlights.clear();
 
-        let lines = &self.lines;
-
-        let mut i = 0;
-        while i < lines.len() {
-            // Check if this is a fence line with a language
-            let fence_lang = lines[i].markers.iter().find_map(|m| {
-                if let MarkerKind::CodeBlockFence { language, .. } = &m.kind {
-                    language.clone()
-                } else {
-                    None
-                }
-            });
-
-            if let Some(lang) = fence_lang {
-                let block_start = lines[i].range.start;
-                i += 1;
-
-                // Collect code content
-                let mut code_content = String::new();
-                let mut content_start_offset: Option<usize> = None;
-                let mut block_end = block_start;
-
-                while i < lines.len() {
-                    if lines[i].is_fence() {
-                        // Closing fence
-                        block_end = lines[i].range.end;
-                        i += 1;
-                        break;
-                    } else {
-                        // Code content line (any non-fence line between opening and closing fence)
-                        if content_start_offset.is_none() {
-                            content_start_offset = Some(lines[i].range.start);
-                        }
-                        // Use rope slice instead of full buffer string
-                        let range = &lines[i].range;
-                        let char_start = self.text.byte_to_char(range.start);
-                        let char_end = self.text.byte_to_char(range.end);
-                        let slice = self.text.slice(char_start..char_end);
-                        code_content.push_str(&slice.to_string());
-                        code_content.push('\n');
-                        block_end = lines[i].range.end;
-                        i += 1;
-                    }
-                }
-
-                // Highlight and store
-                if let Some(start_offset) = content_start_offset {
-                    let mut spans = self.highlighter.highlight(&code_content, &lang);
-                    for span in &mut spans {
-                        span.range.start += start_offset;
-                        span.range.end += start_offset;
-                    }
-                    highlights.push((block_start..block_end, spans));
-                }
-            } else {
-                i += 1;
+        for (block_start, block_end, start_offset, code_content, lang) in code_blocks {
+            let mut spans = self.highlighter.highlight(&code_content, &lang);
+            for span in &mut spans {
+                span.range.start += start_offset;
+                span.range.end += start_offset;
             }
+            highlights.push((block_start..block_end, spans));
         }
 
         self.code_highlight_cache.valid = true;
@@ -756,11 +823,12 @@ impl FromStr for Buffer {
             highlighter: Highlighter::new(),
             tree,
             code_highlight_cache: CodeHighlightCache::default(),
-            lines: Rc::new(Vec::new()),
+            nodes: Rc::new(Vec::new()),
             inline_styles: Rc::new(Vec::new()),
+            lines_cache: None,
         };
 
-        content.update_lines_cache();
+        content.update_caches();
 
         let mut history = Record::new();
         history.set_saved();

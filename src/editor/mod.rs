@@ -801,14 +801,29 @@ impl Editor {
     pub fn set_text(&mut self, content: &str, cx: &mut Context<Self>) {
         self.state.buffer = content.parse().unwrap_or_default();
         self.state.selection = Selection::new(0, 0);
-        self.sync_list_state();
+        self.sync_list_state(cx);
+    }
+
+    /// Sync the list state count with the buffer line count.
+    fn sync_list_state(&mut self, cx: &mut Context<Self>) {
+        let line_count = self.state.buffer.lines().len();
+        let current_count = self.list_state.item_count();
+
+        if line_count != current_count {
+            if line_count > current_count {
+                self.list_state
+                    .splice(current_count..current_count, line_count - current_count);
+            } else {
+                self.list_state.splice(line_count..current_count, 0);
+            }
+        }
+
         cx.notify();
     }
 
     /// Insert text at the current cursor position.
     pub fn insert(&mut self, text: &str, cx: &mut Context<Self>) {
-        self.insert_text(text);
-        cx.notify();
+        self.insert_text(text, cx);
     }
 
     /// Append text to the end of the buffer and move cursor to the end.
@@ -819,8 +834,7 @@ impl Editor {
         self.state.buffer.insert(end, text, end);
         let new_end = self.state.buffer.len_bytes();
         self.state.selection = Selection::new(new_end, new_end);
-        self.sync_list_state();
-        cx.notify();
+        self.sync_list_state(cx);
     }
 
     /// Append text and scroll to keep the cursor visible.
@@ -895,55 +909,37 @@ impl Editor {
         cx.notify();
     }
 
-    fn insert_text(&mut self, text: &str) {
+    fn insert_text(&mut self, text: &str, cx: &mut Context<Self>) {
         self.state.insert_text(text);
-        self.sync_list_state();
+        self.sync_list_state(cx);
     }
 
-    fn delete_backward(&mut self) {
+    fn delete_backward(&mut self, cx: &mut Context<Self>) {
         self.state.delete_backward();
-        self.sync_list_state();
+        self.sync_list_state(cx);
     }
 
-    fn delete_forward(&mut self) {
+    fn delete_forward(&mut self, cx: &mut Context<Self>) {
         self.state.delete_forward();
-        self.sync_list_state();
+        self.sync_list_state(cx);
     }
 
-    fn enter(&mut self) {
+    fn enter(&mut self, cx: &mut Context<Self>) {
         self.state.enter();
-        self.sync_list_state();
+        self.sync_list_state(cx);
     }
 
-    fn shift_enter(&mut self) {
+    fn shift_enter(&mut self, cx: &mut Context<Self>) {
         self.state.shift_enter();
-        self.sync_list_state();
+        self.sync_list_state(cx);
     }
 
-    fn shift_alt_enter(&mut self) {
+    fn shift_alt_enter(&mut self, cx: &mut Context<Self>) {
         self.state.shift_alt_enter();
-        self.sync_list_state();
+        self.sync_list_state(cx);
     }
 
-    /// Update list state to match current buffer line count.
-    /// Uses splice() to add/remove lines while preserving scroll position.
-    fn sync_list_state(&mut self) {
-        let line_count = self.state.buffer.lines().len();
-        let current_count = self.list_state.item_count();
-
-        if line_count != current_count {
-            if line_count > current_count {
-                // Lines were added - splice at the end
-                let added = line_count - current_count;
-                self.list_state.splice(current_count..current_count, added);
-            } else {
-                // Lines were removed - splice to remove from end
-                self.list_state.splice(line_count..current_count, 0);
-            }
-        }
-    }
-
-    fn move_in_direction(&mut self, direction: Direction, extend: bool) {
+    fn move_in_direction(&mut self, direction: Direction, extend: bool, cx: &mut Context<Self>) {
         let new_cursor = match direction {
             Direction::Left => self.cursor().move_left(&self.state.buffer),
             Direction::Right => self.cursor().move_right(&self.state.buffer),
@@ -951,6 +947,7 @@ impl Editor {
             Direction::Down => self.cursor().move_down(&self.state.buffer),
         };
         self.move_cursor(new_cursor, extend);
+        cx.notify();
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -963,28 +960,22 @@ impl Editor {
 
         match keystroke.key.as_str() {
             "backspace" => {
-                self.delete_backward();
-                cx.notify();
+                self.delete_backward(cx);
             }
             "delete" => {
-                self.delete_forward();
-                cx.notify();
+                self.delete_forward(cx);
             }
             "left" => {
-                self.move_in_direction(Direction::Left, extend);
-                cx.notify();
+                self.move_in_direction(Direction::Left, extend, cx);
             }
             "right" => {
-                self.move_in_direction(Direction::Right, extend);
-                cx.notify();
+                self.move_in_direction(Direction::Right, extend, cx);
             }
             "up" => {
-                self.move_in_direction(Direction::Up, extend);
-                cx.notify();
+                self.move_in_direction(Direction::Up, extend, cx);
             }
             "down" => {
-                self.move_in_direction(Direction::Down, extend);
-                cx.notify();
+                self.move_in_direction(Direction::Down, extend, cx);
             }
             "home" => {
                 let new_cursor = if keystroke.modifiers.control || keystroke.modifiers.platform {
@@ -1007,25 +998,25 @@ impl Editor {
             "enter" => {
                 if keystroke.modifiers.shift && keystroke.modifiers.alt {
                     // Shift+Alt+Enter: indented continuation (nested paragraph)
-                    self.shift_alt_enter();
+                    self.shift_alt_enter(cx);
                 } else if keystroke.modifiers.shift {
                     // Shift+Enter: continue container (add markers)
-                    self.shift_enter();
+                    self.shift_enter(cx);
                 } else {
                     // Enter: raw newline
-                    self.enter();
+                    self.enter(cx);
                 }
-                cx.notify();
             }
             "tab" => {
                 if self.state.cursor_in_code_block() {
-                    self.insert_text("    ");
+                    self.insert_text("    ", cx);
                 } else if keystroke.modifiers.shift {
                     self.shift_tab();
+                    cx.notify();
                 } else {
                     self.tab();
+                    cx.notify();
                 }
-                cx.notify();
             }
             "a" if keystroke.modifiers.control || keystroke.modifiers.platform => {
                 self.state.selection = Selection::select_all(&self.state.buffer);
@@ -1055,8 +1046,7 @@ impl Editor {
                     let ctx =
                         PasteContext::from_buffer(&self.state.buffer, self.state.cursor().offset);
                     let transformed = transform_paste(&text, &ctx);
-                    self.insert_text(&transformed);
-                    cx.notify();
+                    self.insert_text(&transformed, cx);
                 }
             }
             "z" if keystroke.modifiers.control || keystroke.modifiers.platform => {
@@ -1086,16 +1076,17 @@ impl Editor {
                         if !self.state.try_insert_space() {
                             return;
                         }
+                        // try_insert_space calls state.insert_text internally, need to sync
+                        self.sync_list_state(cx);
                     } else {
-                        self.insert_text(key_char);
+                        self.insert_text(key_char, cx);
                     }
 
                     // Auto-insert space after blockquote marker if needed
                     if key_char == ">" {
                         self.state.maybe_complete_blockquote_marker();
+                        self.sync_list_state(cx);
                     }
-
-                    cx.notify();
                 }
             }
         }
@@ -1239,31 +1230,32 @@ impl Editor {
     pub fn execute(&mut self, action: EditorAction, _window: &mut Window, cx: &mut Context<Self>) {
         match action {
             EditorAction::Type(c) => {
-                self.insert_text(&c.to_string());
+                self.insert_text(&c.to_string(), cx);
             }
             EditorAction::Enter => {
-                self.enter();
+                self.enter(cx);
             }
             EditorAction::ShiftEnter => {
-                self.shift_enter();
+                self.shift_enter(cx);
             }
             EditorAction::ShiftAltEnter => {
-                self.shift_alt_enter();
+                self.shift_alt_enter(cx);
             }
             EditorAction::Tab => {
                 self.tab();
+                cx.notify();
             }
             EditorAction::ShiftTab => {
                 self.shift_tab();
+                cx.notify();
             }
             EditorAction::Backspace => {
-                self.delete_backward();
+                self.delete_backward(cx);
             }
             EditorAction::Move(direction) => {
-                self.move_in_direction(direction, false);
+                self.move_in_direction(direction, false, cx);
             }
         }
-        cx.notify();
     }
 }
 
@@ -1377,26 +1369,23 @@ impl Render for Editor {
         let entity = cx.entity().clone();
         let on_hover: HoverCallback = Rc::new(
             move |hovering_checkbox, hovering_link_region, _window, cx| {
-                entity.update(cx, |editor, cx| {
-                    if editor.hovering_checkbox != hovering_checkbox
-                        || editor.hovering_link_region != hovering_link_region
-                    {
+                // Read current state without triggering update
+                let (current_checkbox, current_link) = {
+                    let editor = entity.read(cx);
+                    (editor.hovering_checkbox, editor.hovering_link_region)
+                };
+                // Only call update if state actually changed
+                if current_checkbox != hovering_checkbox || current_link != hovering_link_region {
+                    entity.update(cx, |editor, cx| {
                         editor.hovering_checkbox = hovering_checkbox;
                         editor.hovering_link_region = hovering_link_region;
                         cx.notify();
-                    }
-                });
+                    });
+                }
             },
         );
 
-        // Create render snapshot - O(n) clone but avoids O(n) computation
-        // Style/highlight lookups only happen for visible lines
-        let snapshot = self.state.buffer.render_snapshot();
         let base_path = self.config.base_path.clone();
-
-        // Clone line_theme for the closure since we also use it for outer div styling
-        let line_theme_for_list = line_theme.clone();
-        let theme_for_list = theme.clone();
 
         // Handle scroll-to-cursor BEFORE building the list element
         let cursor_line = self.state.buffer.byte_to_line(cursor_offset);
@@ -1421,12 +1410,17 @@ impl Render for Editor {
             self.scroll_to_cursor_pending = false;
         }
 
-        // Build the virtualized list - only visible lines will be rendered
-        // Wrap in a div with stable id to maintain scroll state between renders
+        // Build the virtualized list
+        let line_theme_for_list = line_theme.clone();
+        let theme_for_highlights = self.config.theme.clone();
+        let snapshot = self.state.buffer.render_snapshot();
         let line_list = div().id("line-list").size_full().child(
             list(self.list_state.clone(), move |ix, _window, _cx| {
-                let line = &snapshot.lines[ix];
-                // Compute styles/highlights only for visible lines
+                use std::sync::atomic::{AtomicUsize, Ordering};
+                static RENDER_COUNT: AtomicUsize = AtomicUsize::new(0);
+                let count = RENDER_COUNT.fetch_add(1, Ordering::Relaxed);
+                eprintln!("[{}] RENDER line {}", count, ix);
+                let line = snapshot.line_markers(ix);
                 let inline_styles = snapshot.inline_styles_for_line(ix);
                 let code_highlights: Vec<_> = snapshot
                     .code_highlights_for_line(ix)
@@ -1434,7 +1428,7 @@ impl Render for Editor {
                     .map(|span| {
                         (
                             span.clone(),
-                            theme_for_list.color_for_highlight(span.highlight_id),
+                            theme_for_highlights.color_for_highlight(span.highlight_id),
                         )
                     })
                     .collect();
