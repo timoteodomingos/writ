@@ -363,41 +363,6 @@ impl EditorState {
         Some((states, current_idx))
     }
 
-    /// Find the context line (with markers) within max_lines above current.
-    fn find_context_line(&self, line_idx: usize, max_lines: usize) -> Option<LineMarkers> {
-        if line_idx == 0 {
-            return None;
-        }
-
-        let lines = self.buffer.lines();
-        let mut blank_count = 0;
-
-        for i in (0..line_idx).rev() {
-            let line = &lines[i];
-            let text = self.buffer.slice_cow(line.range.clone());
-
-            if !line.markers.is_empty() {
-                // Found a container line
-                if blank_count <= max_lines {
-                    return Some(line.clone());
-                } else {
-                    return None;
-                }
-            }
-
-            if text.trim().is_empty() {
-                blank_count += 1;
-                if blank_count > max_lines {
-                    return None;
-                }
-            } else {
-                // Non-empty non-container line breaks the search
-                return None;
-            }
-        }
-        None
-    }
-
     /// Get the current prefix of a line (markers/indent before content).
     fn current_line_prefix(&self, line: &LineMarkers) -> String {
         if line.markers.is_empty() {
@@ -411,102 +376,37 @@ impl EditorState {
         }
     }
 
-    /// Build the cycle states based on context line type.
-    fn build_cycle_states(&self, context: &LineMarkers) -> Vec<String> {
-        let mut states = vec![String::new()]; // Always start with empty
-
-        let has_list = context.markers.iter().any(|m| {
-            matches!(
-                m.kind,
-                MarkerKind::ListItem { .. } | MarkerKind::TaskList { .. }
-            )
-        });
-        let has_blockquote = context
-            .markers
-            .iter()
-            .any(|m| matches!(m.kind, MarkerKind::BlockQuote));
-
-        if has_blockquote && has_list {
-            // Nested context (e.g., "> - item")
-            // States: empty → "> " → "> - " → ">   " → empty
-            let outer = self.blockquote_prefix(context);
-            let full = context.continuation_rope(self.buffer.rope());
-            let indent = context.nested_paragraph_indent(self.buffer.rope());
-
-            states.push(outer);
-            if full != states.last().unwrap().as_str() {
-                states.push(full);
-            }
-            if !indent.is_empty() && indent != states.last().unwrap().as_str() {
-                states.push(indent);
-            }
-        } else if has_list {
-            // List context: empty → "  " → "  - " → empty
-            // nested_paragraph_indent gives us the indent ("  ")
-            // For the full nested marker, we need indent + list marker
-            let indent = context.nested_paragraph_indent(self.buffer.rope());
-            let list_marker = context.continuation_rope(self.buffer.rope());
-            let mut full = indent.clone();
-            full.push_str(&list_marker);
-
-            states.push(indent);
-            states.push(full);
-        } else if has_blockquote {
-            // Blockquote only: empty → "> " → empty
-            let marker = context.continuation_rope(self.buffer.rope());
-            if !marker.is_empty() {
-                states.push(marker);
-            }
-        }
-
-        states
-    }
-
-    /// Extract the blockquote prefix from a nested context.
-    fn blockquote_prefix(&self, context: &LineMarkers) -> String {
-        let mut result = String::new();
-        for marker in &context.markers {
-            if matches!(marker.kind, MarkerKind::BlockQuote) {
-                result.push_str(&self.buffer.slice_cow(marker.range.clone()));
-            }
-        }
-        result
-    }
-
     /// Build tab cycle states by walking up the tree-sitter parse tree.
+    /// The cycle is determined by context ABOVE the current line, not by current line content.
     pub fn build_cycle_states_from_tree(&self, cursor_offset: usize) -> Vec<String> {
         let Some(tree) = self.buffer.tree() else {
             return vec![String::new()];
         };
 
         let root = tree.block_tree().root_node();
+        let cursor_line_idx = self.buffer.byte_to_line(cursor_offset);
 
-        // Find the node at cursor position
-        let mut lookup_offset = cursor_offset;
-        let mut node = root.descendant_for_byte_range(lookup_offset, lookup_offset);
-
-        if let Some(n) = &node {
-            if matches!(n.kind(), "document" | "section") && lookup_offset > 0 {
-                lookup_offset -= 1;
-                node = root.descendant_for_byte_range(lookup_offset, lookup_offset);
-            }
-        }
+        // To find context, look backward from start of current line until we find structure
+        // This ensures the cycle is consistent regardless of what's on the current line
+        let line_start = self.buffer.line_to_byte(cursor_line_idx);
+        let lookup_offset = if line_start > 0 { line_start - 1 } else { 0 };
+        let node = root.descendant_for_byte_range(lookup_offset, lookup_offset);
 
         let Some(node) = node else {
             return vec![String::new()];
         };
 
-        // If we're in an ERROR node, find context from previous sibling
-        let in_error = self.is_in_error_node(node);
-        let context_node = if in_error {
+        // Find the containing structure (list_item, block_quote)
+        let context_node = if self.is_in_error_node(node) {
             self.find_context_from_error(node).unwrap_or(node)
         } else {
             node
         };
 
-        // Para indent is just a continuation line, not a distinct structural state
-        // So we don't include it in the cycle - only markers
-        let include_para_indent = false;
+        // Include para indent if there's a blank line between context and cursor
+        let context_line_idx = self.buffer.byte_to_line(context_node.start_byte());
+        let has_blank_line_gap = cursor_line_idx > context_line_idx + 1;
+        let include_para_indent = has_blank_line_gap || context_node.kind() == "list_item";
 
         // Walk up to find all containing list_item and block_quote nodes
         let mut nodes_to_process: Vec<tree_sitter::Node> = Vec::new();
@@ -593,6 +493,7 @@ impl EditorState {
                 sibling_marker
             ));
 
+            // Add para indent after each marker level (for continuation paragraphs)
             if include_para_indent {
                 states.push(format!(
                     "{}{}",
@@ -602,6 +503,7 @@ impl EditorState {
             }
         }
 
+        // Add nested marker (deeper list item) after all existing markers
         if let Some((deepest_indent, deepest_marker, is_ordered)) = list_levels.last() {
             let deeper_indent = deepest_indent + deepest_marker.len();
             let nested_marker = if *is_ordered {
@@ -1936,26 +1838,18 @@ mod tests {
         }
 
         #[test]
-        fn tab_twice_after_list_adds_indent() {
+        fn tab_twice_after_list_adds_nested_marker() {
+            // Cycle is: "" -> "- " -> "  - " (no para indent)
             let mut state = editor_with_cursor("- item\n|");
-            state.tab();
-            state.tab();
-            assert_editor_eq(&state, "- item\n  |");
-        }
-
-        #[test]
-        fn tab_three_times_adds_nested_marker() {
-            let mut state = editor_with_cursor("- item\n|");
-            state.tab();
             state.tab();
             state.tab();
             assert_editor_eq(&state, "- item\n  - |");
         }
 
         #[test]
-        fn tab_four_times_cycles_back() {
+        fn tab_three_times_cycles_back() {
+            // Cycle is: "" -> "- " -> "  - " -> "" (3 states)
             let mut state = editor_with_cursor("- item\n|");
-            state.tab();
             state.tab();
             state.tab();
             state.tab();
@@ -2035,6 +1929,31 @@ mod tests {
             let mut state = editor_with_cursor("- item\n  - |");
             state.shift_tab();
             assert_editor_eq(&state, "- item\n- |");
+        }
+
+        #[test]
+        fn tab_after_blank_line_includes_para_indent() {
+            // With blank line, para indent should be in cycle
+            // Cycle: ["- ", "  ", "  - ", "    ", "    - ", ""]
+            let mut state = editor_with_cursor("- parent\n  - nested\n\n|");
+
+            state.tab();
+            assert_editor_eq(&state, "- parent\n  - nested\n\n- |");
+
+            state.tab();
+            assert_editor_eq(&state, "- parent\n  - nested\n\n  |"); // para indent
+
+            state.tab();
+            assert_editor_eq(&state, "- parent\n  - nested\n\n  - |");
+
+            state.tab();
+            assert_editor_eq(&state, "- parent\n  - nested\n\n    |"); // nested para indent
+
+            state.tab();
+            assert_editor_eq(&state, "- parent\n  - nested\n\n    - |");
+
+            state.tab();
+            assert_editor_eq(&state, "- parent\n  - nested\n\n|"); // back to empty
         }
     }
 
@@ -2133,20 +2052,22 @@ mod debug_tree_detail {
         for (i, b) in content.bytes().enumerate() {
             eprintln!("  {}: {:?} ({})", i, b as char, b);
         }
-        
+
         let state = EditorState::new(content);
-        
+
         if let Some(tree) = state.buffer.tree() {
             let root = tree.block_tree().root_node();
             eprintln!("\nTree: {}", root.to_sexp());
-            
+
             // Show each node with byte ranges
             fn print_node(node: tree_sitter::Node, indent: usize) {
-                eprintln!("{}{} [{}-{}]", 
-                    "  ".repeat(indent), 
-                    node.kind(), 
-                    node.start_byte(), 
-                    node.end_byte());
+                eprintln!(
+                    "{}{} [{}-{}]",
+                    "  ".repeat(indent),
+                    node.kind(),
+                    node.start_byte(),
+                    node.end_byte()
+                );
                 for child in node.children(&mut node.walk()) {
                     print_node(child, indent + 1);
                 }
