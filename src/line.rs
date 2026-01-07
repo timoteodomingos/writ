@@ -1404,6 +1404,9 @@ impl IntoElement for Line {
         if let Some((source, _, _, open_url)) = standalone_image {
             return div()
                 .id(line_number)
+                .max_w(px(800.0))
+                .w_full()
+                .mx_auto()
                 .flex()
                 .flex_col()
                 .child(line_div)
