@@ -98,6 +98,13 @@ impl RenderOnce for WindowShadow {
                     .when(!tiling.bottom, |div| div.pb(shadow_size))
                     .when(!tiling.left, |div| div.pl(shadow_size))
                     .when(!tiling.right, |div| div.pr(shadow_size))
+                    .on_mouse_move(move |e, window, _cx| {
+                        // Only refresh when mouse is in the resize edge area
+                        let size = window.viewport_size();
+                        if resize_edge(e.position, shadow_size, size).is_some() {
+                            window.refresh();
+                        }
+                    })
                     .on_mouse_down(MouseButton::Left, move |e, window, _cx| {
                         let size = window.viewport_size();
                         let pos = e.position;

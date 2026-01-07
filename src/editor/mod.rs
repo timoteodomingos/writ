@@ -1416,10 +1416,6 @@ impl Render for Editor {
         let snapshot = self.state.buffer.render_snapshot();
         let line_list = div().id("line-list").size_full().child(
             list(self.list_state.clone(), move |ix, _window, _cx| {
-                use std::sync::atomic::{AtomicUsize, Ordering};
-                static RENDER_COUNT: AtomicUsize = AtomicUsize::new(0);
-                let count = RENDER_COUNT.fetch_add(1, Ordering::Relaxed);
-                eprintln!("[{}] RENDER line {}", count, ix);
                 let line = snapshot.line_markers(ix);
                 let inline_styles = snapshot.inline_styles_for_line(ix);
                 let code_highlights: Vec<_> = snapshot
