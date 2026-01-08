@@ -1341,6 +1341,7 @@ impl IntoElement for Line {
                         }
                     }
 
+                    cx.stop_propagation();
                     on_click(
                         buffer_offset,
                         event.modifiers.shift,

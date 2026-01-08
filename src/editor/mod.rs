@@ -1472,6 +1472,22 @@ impl Render for Editor {
             .key_context("Editor")
             .on_key_down(cx.listener(Self::on_key_down))
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
+            .on_mouse_down(
+                gpui::MouseButton::Left,
+                cx.listener(|editor, _event: &gpui::MouseDownEvent, window, cx| {
+                    if editor.input_blocked {
+                        return;
+                    }
+                    // Check if click is below all content by comparing to line bounds
+                    // The list items will stop propagation if clicked, so this only fires
+                    // for clicks in empty space (padding area)
+                    let end = editor.state.buffer.len_bytes();
+                    editor.state.selection = Selection::new(end, end);
+                    editor.request_scroll_to_cursor();
+                    window.refresh();
+                    cx.notify();
+                }),
+            )
             .size_full()
             .px(self.config.padding_x)
             .font(line_theme.text_font.clone())
