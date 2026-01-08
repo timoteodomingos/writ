@@ -137,6 +137,12 @@ impl EditorState {
     /// Check if the cursor is inside a code block (between opening and closing fences,
     /// or after an opening fence with no closing fence yet).
     fn cursor_in_code_block(&self) -> bool {
+        self.cursor_code_block_range().is_some()
+    }
+
+    /// Returns the line range (start_line, end_line inclusive) of the code block containing
+    /// the cursor, or None if cursor is not in a code block. The range includes the fence lines.
+    fn cursor_code_block_range(&self) -> Option<(usize, usize)> {
         let lines = self.buffer.lines();
         let cursor_line = self.buffer.byte_to_line(self.cursor().offset);
 
@@ -169,9 +175,9 @@ impl EditorState {
                         )
                     });
                     if is_closing_fence {
-                        // Found a complete code block
-                        if cursor_line > start && cursor_line < i {
-                            return true;
+                        // Found a complete code block - check if cursor is inside (including fences)
+                        if cursor_line >= start && cursor_line <= i {
+                            return Some((start, i));
                         }
                         i += 1;
                         found_close = true;
@@ -179,15 +185,15 @@ impl EditorState {
                     }
                     i += 1;
                 }
-                // Incomplete code block (no closing fence) - cursor is inside if after start
-                if !found_close && cursor_line > start {
-                    return true;
+                // Incomplete code block (no closing fence) - cursor is inside if on or after start
+                if !found_close && cursor_line >= start {
+                    return Some((start, lines.len() - 1));
                 }
             } else {
                 i += 1;
             }
         }
-        false
+        None
     }
 
     /// Check if a line has content after its markers.
@@ -1414,6 +1420,10 @@ impl Render for Editor {
         let line_theme_for_list = line_theme.clone();
         let theme_for_highlights = self.config.theme.clone();
         let snapshot = self.state.buffer.render_snapshot();
+
+        // Compute which code block (if any) the cursor is in, so we can show its fences
+        let cursor_code_block = self.state.cursor_code_block_range();
+
         let line_list = div().id("line-list").size_full().child(
             list(self.list_state.clone(), move |ix, _window, _cx| {
                 let line = snapshot.line_markers(ix);
@@ -1429,6 +1439,11 @@ impl Render for Editor {
                     })
                     .collect();
 
+                // Show fence if this line is within the code block containing the cursor
+                let fence_visible = cursor_code_block
+                    .map(|(start, end)| ix >= start && ix <= end)
+                    .unwrap_or(false);
+
                 Line::new(
                     line,
                     snapshot.rope.clone(),
@@ -1438,6 +1453,7 @@ impl Render for Editor {
                     selection_range.clone(),
                     code_highlights,
                     base_path.clone(),
+                    fence_visible,
                 )
                 .on_click(on_click.clone())
                 .on_drag(on_drag.clone())

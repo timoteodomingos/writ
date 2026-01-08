@@ -54,6 +54,8 @@ pub struct Line {
     scroll_anchor: Option<ScrollAnchor>,
     /// Cached substitution string (computed once in new())
     substitution: Option<String>,
+    /// If this line is a fence, whether it should be visible (cursor in code block).
+    fence_visible: bool,
 }
 
 impl Line {
@@ -66,6 +68,7 @@ impl Line {
         selection_range: Option<Range<usize>>,
         code_highlights: Vec<(HighlightSpan, Rgba)>,
         base_path: Option<PathBuf>,
+        fence_visible: bool,
     ) -> Self {
         // Compute substitution once upfront
         let substitution = {
@@ -87,6 +90,7 @@ impl Line {
             on_hover: None,
             scroll_anchor: None,
             substitution,
+            fence_visible,
         }
     }
 
@@ -354,33 +358,38 @@ impl Line {
             }
         }
 
-        if content_range.start >= content_range.end {
+        // Handle fence lines specially - use full line range, not content_range
+        if self.line.is_fence() {
+            // Only show fence content if cursor is on line, selection overlaps, or fence_visible is set
+            if self.cursor_on_line() || self.selection_on_line() || self.fence_visible {
+                let fence_text = self.slice(self.line.range.clone());
+                let backticks: String = fence_text.chars().take_while(|&c| c == '`').collect();
+                let language = fence_text[backticks.len()..].trim_end();
+
+                if !backticks.is_empty() {
+                    display_text.push_str(&backticks);
+                    runs.push(self.text_run(
+                        backticks.len(),
+                        self.theme.code_font.clone(),
+                        self.theme.fence_color,
+                    ));
+                }
+
+                if !language.is_empty() {
+                    display_text.push_str(language);
+                    runs.push(self.text_run(
+                        language.len(),
+                        self.theme.code_font.clone(),
+                        self.theme.fence_lang_color,
+                    ));
+                }
+            }
+            // If not visible, display_text stays empty (will become single space in caller)
+
             return (display_text, runs);
         }
 
-        if self.line.is_fence() {
-            let fence_text = self.slice(content_range.clone());
-            let backticks: String = fence_text.chars().take_while(|&c| c == '`').collect();
-            let language = fence_text[backticks.len()..].trim_end();
-
-            if !backticks.is_empty() {
-                display_text.push_str(&backticks);
-                runs.push(self.text_run(
-                    backticks.len(),
-                    self.theme.code_font.clone(),
-                    self.theme.fence_color,
-                ));
-            }
-
-            if !language.is_empty() {
-                display_text.push_str(language);
-                runs.push(self.text_run(
-                    language.len(),
-                    self.theme.code_font.clone(),
-                    self.theme.fence_lang_color,
-                ));
-            }
-
+        if content_range.start >= content_range.end {
             return (display_text, runs);
         }
 
@@ -635,7 +644,12 @@ impl Line {
     }
 
     fn buffer_to_visual_pos(&self, buffer_offset: usize, display_text: &str) -> usize {
-        let content_range = self.content_range();
+        // For fence lines, use full line range since we render the entire fence
+        let content_range = if self.line.is_fence() {
+            self.line.range.clone()
+        } else {
+            self.content_range()
+        };
 
         if content_range.start >= content_range.end {
             return 0;

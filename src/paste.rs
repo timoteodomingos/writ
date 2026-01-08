@@ -100,10 +100,8 @@ impl PasteContext {
 fn normalize(text: &str) -> String {
     text.replace("\r\n", "\n")
         .replace('\r', "\n")
-        .replace('\u{201C}', "\"") // left double quote "
-        .replace('\u{201D}', "\"") // right double quote "
-        .replace('\u{2018}', "'") // left single quote '
-        .replace('\u{2019}', "'") // right single quote '
+        .replace(['\u{201C}', '\u{201D}'], "\"") // curly double quotes " "
+        .replace(['\u{2018}', '\u{2019}'], "'") // curly single quotes ' '
 }
 
 /// Transform pasted content based on context.

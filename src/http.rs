@@ -7,14 +7,23 @@ use gpui::http_client::{
     http::{HeaderValue, StatusCode},
 };
 
+const USER_AGENT: &str = "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36";
+
 pub struct Client {
     client: reqwest::Client,
+    user_agent: HeaderValue,
 }
 
 impl Client {
     pub fn new() -> Arc<Self> {
+        let client = reqwest::Client::builder()
+            .user_agent(USER_AGENT)
+            .build()
+            .unwrap_or_else(|_| reqwest::Client::new());
+
         Arc::new(Self {
-            client: reqwest::Client::new(),
+            client,
+            user_agent: HeaderValue::from_static(USER_AGENT),
         })
     }
 }
@@ -25,7 +34,7 @@ impl HttpClient for Client {
     }
 
     fn user_agent(&self) -> Option<&HeaderValue> {
-        None
+        Some(&self.user_agent)
     }
 
     fn proxy(&self) -> Option<&Url> {
