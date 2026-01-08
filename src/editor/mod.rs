@@ -1053,17 +1053,17 @@ impl Editor {
                 if keystroke.modifiers.shift {
                     if let Some(cursor_pos) = self.state.buffer.redo() {
                         self.state.selection = Selection::new(cursor_pos, cursor_pos);
-                        cx.notify();
+                        self.sync_list_state(cx);
                     }
                 } else if let Some(cursor_pos) = self.state.buffer.undo() {
                     self.state.selection = Selection::new(cursor_pos, cursor_pos);
-                    cx.notify();
+                    self.sync_list_state(cx);
                 }
             }
             "y" if keystroke.modifiers.control => {
                 if let Some(cursor_pos) = self.state.buffer.redo() {
                     self.state.selection = Selection::new(cursor_pos, cursor_pos);
-                    cx.notify();
+                    self.sync_list_state(cx);
                 }
             }
             "s" if keystroke.modifiers.control || keystroke.modifiers.platform => {
