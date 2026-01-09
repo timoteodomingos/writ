@@ -1444,7 +1444,7 @@ impl Render for Editor {
                     .map(|(start, end)| ix >= start && ix <= end)
                     .unwrap_or(false);
 
-                Line::new(
+                let line_element = Line::new(
                     line,
                     snapshot.rope.clone(),
                     cursor_offset,
@@ -1458,12 +1458,18 @@ impl Render for Editor {
                 .on_click(on_click.clone())
                 .on_drag(on_drag.clone())
                 .on_checkbox(on_checkbox.clone())
-                .on_hover(on_hover.clone())
-                .into_any_element()
+                .on_hover(on_hover.clone());
+
+                // Add top padding to first line, bottom padding to last line
+                let is_first = ix == 0;
+                let is_last = ix == snapshot.line_count().saturating_sub(1);
+                div()
+                    .when(is_first, |d| d.pt(rems(1.6)))
+                    .when(is_last, |d| d.pb(rems(4.8)))
+                    .child(line_element)
+                    .into_any_element()
             })
-            .size_full()
-            .pt(rems(1.6))
-            .pb(rems(4.8)),
+            .size_full(),
         );
 
         div()
