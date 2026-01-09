@@ -938,14 +938,17 @@ impl Editor {
 
     fn enter(&mut self) {
         self.state.enter();
+        self.scroll_to_cursor_pending = true;
     }
 
     fn shift_enter(&mut self) {
         self.state.shift_enter();
+        self.scroll_to_cursor_pending = true;
     }
 
     fn shift_alt_enter(&mut self) {
         self.state.shift_alt_enter();
+        self.scroll_to_cursor_pending = true;
     }
 
     fn move_in_direction(&mut self, direction: Direction, extend: bool) {
@@ -956,6 +959,7 @@ impl Editor {
             Direction::Down => self.cursor().move_down(&self.state.buffer),
         };
         self.move_cursor(new_cursor, extend);
+        self.scroll_to_cursor_pending = true;
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -992,6 +996,7 @@ impl Editor {
                     self.cursor().move_to_line_start(&self.state.buffer)
                 };
                 self.move_cursor(new_cursor, extend);
+                self.scroll_to_cursor_pending = true;
             }
             "end" => {
                 let new_cursor = if keystroke.modifiers.control || keystroke.modifiers.platform {
@@ -1000,6 +1005,7 @@ impl Editor {
                     self.cursor().move_to_line_end(&self.state.buffer)
                 };
                 self.move_cursor(new_cursor, extend);
+                self.scroll_to_cursor_pending = true;
             }
             "enter" => {
                 if keystroke.modifiers.shift && keystroke.modifiers.alt {
@@ -1391,27 +1397,29 @@ impl Render for Editor {
 
         let base_path = self.config.base_path.clone();
 
-        // Handle scroll-to-cursor BEFORE building the list element
+        // Handle scroll-to-cursor
+        // Only auto-scroll when cursor line changes (keyboard/edit), not on every render
         let cursor_line = self.state.buffer.byte_to_line(cursor_offset);
-        let last_line = self.last_cursor_line;
-        let cursor_moved = last_line != Some(cursor_line);
+        let cursor_line_changed = self.last_cursor_line != Some(cursor_line);
         self.last_cursor_line = Some(cursor_line);
 
-        if cursor_moved || self.scroll_to_cursor_pending {
-            let total_lines = self.state.buffer.lines().len();
-            let moving_down = cursor_line > last_line.unwrap_or(0);
+        // Scroll to cursor if the cursor line changed and it's outside the viewport
+        if cursor_line_changed {
+            if let Some(cursor_bounds) = self.list_state.bounds_for_item(cursor_line) {
+                let viewport = self.list_state.viewport_bounds();
+                let cursor_top = cursor_bounds.origin.y;
+                let cursor_bottom = cursor_top + cursor_bounds.size.height;
+                let viewport_top = viewport.origin.y;
+                let viewport_bottom = viewport_top + viewport.size.height;
 
-            if moving_down {
-                // When moving down, reveal lines ahead of cursor so it's not at the edge.
-                // Use a larger margin to keep cursor comfortably in view.
-                let scroll_margin = 8;
-                let reveal_line = (cursor_line + scroll_margin).min(total_lines.saturating_sub(1));
-                self.list_state.scroll_to_reveal_item(reveal_line);
+                // Scroll if cursor line is above or below the viewport
+                if cursor_top < viewport_top || cursor_bottom > viewport_bottom {
+                    self.list_state.scroll_to_reveal_item(cursor_line);
+                }
             } else {
-                // When moving up, reveal the cursor line directly (puts it at top if needed)
+                // Item not yet measured, scroll to reveal it
                 self.list_state.scroll_to_reveal_item(cursor_line);
             }
-            self.scroll_to_cursor_pending = false;
         }
 
         // Build the virtualized list
