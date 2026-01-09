@@ -600,6 +600,11 @@ impl Line {
     }
 
     fn hidden_bytes_before(&self, offset: usize, content_range: &Range<usize>) -> usize {
+        // When selection is on line, all markers are revealed (show_all_markers in build_styled_content)
+        if self.selection_on_line() {
+            return 0;
+        }
+
         let mut hidden = 0usize;
         for region in &self.inline_styles {
             let cursor_inside = self.cursor_offset >= region.full_range.start
