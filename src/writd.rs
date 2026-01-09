@@ -73,18 +73,14 @@ async fn main() -> Result<()> {
 }
 
 async fn handle_connection(mut stream: TcpStream, peer_addr: SocketAddr, port: u16) -> Result<()> {
-    // Read the HTTP request to determine if it's a WebSocket upgrade or regular GET
     let mut buf = [0u8; 1024];
     let n = stream.peek(&mut buf).await?;
     let request = String::from_utf8_lossy(&buf[..n]);
 
     if request.contains("Upgrade: websocket") || request.contains("upgrade: websocket") {
-        // WebSocket upgrade - use tokio-tungstenite
         let ws_stream = tokio_tungstenite::accept_async(stream).await?;
         handle_websocket(ws_stream, peer_addr).await?;
     } else {
-        // Regular HTTP GET - return handshake JSON
-        // Consume the request first
         let mut request_buf = vec![0u8; 1024];
         let _ = stream.read(&mut request_buf).await?;
 
@@ -112,7 +108,6 @@ async fn handle_websocket(
 ) -> Result<()> {
     let (mut write, mut read) = ws_stream.split();
 
-    // Wait for initial message from browser
     let initial_msg = match read.next().await {
         Some(Ok(Message::Text(text))) => text,
         Some(Ok(msg)) => {
@@ -129,7 +124,6 @@ async fn handle_websocket(
         .clone()
         .unwrap_or_else(|| "ghosttext".to_string());
 
-    // Create temp file with content
     let temp_dir = std::env::temp_dir();
     let sanitized_title: String = title
         .chars()
@@ -145,7 +139,6 @@ async fn handle_websocket(
     std::fs::write(&temp_file, &client_msg.text)?;
     println!("Created temp file: {:?}", temp_file);
 
-    // Set up file watcher
     let (file_tx, mut file_rx) = mpsc::channel::<String>(16);
     let watch_path = temp_file.clone();
 
@@ -160,7 +153,6 @@ async fn handle_websocket(
 
     watcher.watch(&temp_file, RecursiveMode::NonRecursive)?;
 
-    // Spawn writ process with autosave for real-time sync
     let mut child = Command::new("writ")
         .arg("--file")
         .arg(&temp_file)
@@ -172,13 +164,10 @@ async fn handle_websocket(
 
     println!("Spawned writ process for {:?}", temp_file);
 
-    // Track last content to avoid duplicate sends
     let mut last_content = client_msg.text.clone();
 
-    // Main event loop
     loop {
         tokio::select! {
-            // File changed - send update to browser
             Some(content) = file_rx.recv() => {
                 if content != last_content {
                     last_content = content.clone();
@@ -193,7 +182,6 @@ async fn handle_websocket(
                 }
             }
 
-            // Browser sent update - write to file
             Some(msg) = read.next() => {
                 match msg {
                     Ok(Message::Text(text)) => {
@@ -210,10 +198,8 @@ async fn handle_websocket(
                 }
             }
 
-            // writ process exited
             status = child.wait() => {
                 println!("writ process exited with {:?} for {:?}", status, temp_file);
-                // Send final content before closing
                 if let Ok(content) = std::fs::read_to_string(&temp_file)
                     && content != last_content
                 {
@@ -229,7 +215,6 @@ async fn handle_websocket(
         }
     }
 
-    // Cleanup
     drop(watcher);
     let _ = std::fs::remove_file(&temp_file);
     println!("Cleaned up session for {}", peer_addr);

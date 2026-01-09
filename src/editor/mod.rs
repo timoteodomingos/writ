@@ -37,17 +37,6 @@ use crate::line::{CheckboxCallback, ClickCallback, DragCallback, HoverCallback, 
 use crate::marker::{LineMarkers, MarkerKind};
 use crate::paste::{PasteContext, transform_paste};
 
-/// A markdown editor component with live inline rendering.
-///
-/// The editor hides markdown syntax (like `**`, `#`, `-`) when the cursor
-/// is elsewhere, showing only the styled result. When you move the cursor
-/// into styled text, the syntax reappears for editing.
-///
-/// # Example
-///
-/// ```ignore
-/// let editor = cx.new(|cx| Editor::new("# Hello, world!", cx));
-/// ```
 /// Context about the line at the cursor, used by smart editing actions.
 pub struct LineContext<'a> {
     /// Current cursor byte offset.
@@ -843,11 +832,9 @@ impl Editor {
                 use notify::EventKind;
                 match event.kind {
                     EventKind::Modify(_) => {
-                        // File was modified
                         let _ = tx.send(());
                     }
                     EventKind::Create(_) => {
-                        // File was created - check if it's our file
                         if event.paths.iter().any(|p| p == &watch_path) {
                             let _ = tx.send(());
                         }
@@ -863,7 +850,6 @@ impl Editor {
             }
         };
 
-        // If file exists, watch it directly. Otherwise watch parent directory.
         let target = if file_exists {
             path.clone()
         } else if let Some(parent) = path.parent() {
@@ -881,7 +867,6 @@ impl Editor {
         self.file_watcher_rx = Some(rx);
         self.file_watcher = Some(watcher);
 
-        // Schedule periodic checks using a timer-based approach
         cx.spawn(async move |weak, cx| {
             loop {
                 cx.background_executor()
@@ -921,13 +906,12 @@ impl Editor {
     fn reload_file(&mut self, cx: &mut Context<Self>) {
         let Some(path) = &self.file_path else { return };
 
-        // Check if this change was from our own save by comparing mtime
+        // Ignore changes from our own save
         if let Some(last_save_mtime) = self.last_save_mtime
             && let Ok(metadata) = std::fs::metadata(path)
             && let Ok(file_mtime) = metadata.modified()
             && file_mtime == last_save_mtime
         {
-            // mtime matches our last save, this is our own change - ignore it
             return;
         }
 
@@ -939,7 +923,6 @@ impl Editor {
             }
         };
 
-        // Only reload if content actually changed
         if content != self.state.buffer.text() {
             self.set_text(&content, cx);
         }
@@ -982,11 +965,9 @@ impl Editor {
             }
         }
 
-        // Autosave if enabled
         let config = crate::config::Config::global(cx);
         if config.autosave {
             self.save(cx);
-            // Record the mtime so we can ignore our own file change
             if let Some(path) = &self.file_path
                 && let Ok(metadata) = std::fs::metadata(path)
             {

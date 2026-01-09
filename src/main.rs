@@ -16,12 +16,10 @@ use writ::{
     window::{CloseWindow, Quit, window_shadow},
 };
 
-/// Load a file, normalize its content, and save it back.
-/// Returns the normalized content.
-fn load_and_normalize_file(file: &std::path::Path) -> String {
-    let result: Result<(Buffer, bool), std::io::Error> = Buffer::from_file(file);
-    match result {
-        Ok((buffer, _changed)) => buffer.text(),
+/// Load a file and return its content.
+fn load_file(file: &std::path::Path) -> String {
+    match Buffer::from_file(file) {
+        Ok((buffer, _)) => buffer.text(),
         Err(_) => String::new(),
     }
 }
@@ -119,7 +117,7 @@ fn main() {
     let content = if demo_mode {
         String::new()
     } else {
-        load_and_normalize_file(&file_path)
+        load_file(&file_path)
     };
 
     let app = Application::new().with_http_client(http::Client::new());

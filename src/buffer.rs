@@ -692,9 +692,6 @@ impl BufferContent {
         self.code_highlight_cache.valid = true;
     }
 
-    /// Run all normalization passes on the document.
-    /// This ensures the document conforms to the editor's canonical markdown format.
-    /// Returns true if any changes were made.
     /// Normalize the document. Currently does nothing - we preserve the file as-is.
     pub fn normalize_document(&mut self) -> bool {
         // Normalization has been removed. We now support both soft-wrap style
@@ -799,9 +796,6 @@ impl Buffer {
         self.history.can_redo()
     }
 
-    /// Load a file, normalize its content, and save it back.
-    /// Returns the buffer and whether any normalization changes were made.
-    /// If the file doesn't exist or can't be read, returns a buffer with empty content.
     /// Load a buffer from a file. Returns the buffer and whether the file was modified.
     /// Currently always returns false for modified since we don't normalize on load.
     pub fn from_file(path: &std::path::Path) -> std::io::Result<(Self, bool)> {
