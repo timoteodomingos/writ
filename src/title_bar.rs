@@ -54,14 +54,36 @@ pub fn title_bar(theme: &EditorTheme, cx: &mut App) -> impl IntoElement {
         .justify_between()
         .child(
             div()
-                .w_full()
-                .child(title)
+                .flex_1()
+                .min_w_0()
+                .relative()
                 .on_mouse_down(MouseButton::Left, |_e, window, _| {
                     window.start_window_move();
-                }),
+                })
+                // Invisible spacer to give height
+                .child(
+                    div()
+                        .whitespace_nowrap()
+                        .overflow_hidden()
+                        .invisible()
+                        .child(title.clone()),
+                )
+                // Actual text with ellipsis
+                .child(
+                    div()
+                        .absolute()
+                        .left_0()
+                        .right_0()
+                        .top_0()
+                        .bottom_0()
+                        .whitespace_nowrap()
+                        .text_ellipsis()
+                        .child(title),
+                ),
         )
         .child(
             div()
+                .flex_shrink_0()
                 .flex()
                 .flex_row()
                 .gap(rems(0.5))

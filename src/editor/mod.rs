@@ -1587,15 +1587,15 @@ impl Render for Editor {
 
                     // Throttle inversely proportional to distance
                     // Close to edge: ~30ms, far from edge: ~8ms
-                    let speed_factor = (delta.powf(1.2) / 50.0).min(6.0).max(0.5);
+                    let speed_factor = (delta.powf(1.2) / 50.0).clamp(0.5, 6.0);
                     let throttle_ms = (30.0 / speed_factor) as u64;
                     let throttle = Duration::from_millis(throttle_ms.clamp(8, 50));
 
                     let now = Instant::now();
-                    if let Some(last) = editor.last_drag_scroll {
-                        if now.duration_since(last) < throttle {
-                            return;
-                        }
+                    if let Some(last) = editor.last_drag_scroll
+                        && now.duration_since(last) < throttle
+                    {
+                        return;
                     }
                     editor.last_drag_scroll = Some(now);
 
