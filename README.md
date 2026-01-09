@@ -36,6 +36,22 @@ WRIT_TEXT_FONT="Iosevka Aile" WRIT_CODE_FONT="Iosevka" writ --file doc.md
 
 The default fonts are platform-specific: Segoe UI and Consolas on Windows, the system font and Menlo on macOS, and Liberation Sans and Liberation Mono on Linux.
 
+### GhostText Integration
+
+writ can edit browser textareas via the [GhostText](https://ghosttext.fregante.com/) protocol. Install the GhostText browser extension, then run the `writd` daemon:
+
+```bash
+writd
+```
+
+The daemon listens on port 4001. When you activate GhostText on a textarea, `writd` spawns a writ instance with `--autosave` enabled. Edits in writ sync back to the browser in real-time. This is useful for writing GitHub comments, issues, and PRs with writ's markdown editing features.
+
+The `--autosave` flag can also be used standalone to save on every edit:
+
+```bash
+writ --file doc.md --autosave
+```
+
 ## Development
 
 ```bash
@@ -78,9 +94,11 @@ Unordered list markers (`-`) are replaced with bullet symbols when the cursor is
 
 Nesting is fully supported. A task item inside a blockquote is represented internally as a stack of layers, and each layer contributes its visual treatment independently.
 
-### Smart Enter
+### Smart Enter and Tab
 
-Enter behaves contextually. On a list item, it creates a new sibling item. On a blockquote, it creates a paragraph break within the quote. On an empty container line (like `- |` or `> |`), Enter exits all markers and returns to plain text. Shift+Enter always continues the structure without exiting, useful when you want to add more items after an empty one.
+Enter inserts a raw newline—no magic. Shift+Enter continues the current container by copying markers from the current line (e.g., on `- item|`, Shift+Enter creates `\n- `). Shift+Alt+Enter creates an indented continuation for nested paragraphs within list items.
+
+Tab cycles through nesting states based on tree-sitter context. On a blank line after a list item, Tab cycles through: sibling marker → paragraph indent → nested marker → empty. Shift+Tab cycles backwards. This replaces traditional indent/dedent with context-aware structure cycling.
 
 ### Code Blocks
 
