@@ -1506,7 +1506,7 @@ impl Render for Editor {
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|editor, _event: &gpui::MouseDownEvent, window, cx| {
+                cx.listener(|editor, event: &gpui::MouseDownEvent, window, cx| {
                     if editor.input_blocked {
                         return;
                     }
@@ -1515,7 +1515,25 @@ impl Render for Editor {
                     if window.default_prevented() {
                         return;
                     }
-                    // Click is in empty space (padding area below content)
+                    // Check if click is below the last line (empty space at bottom)
+                    // Only then do we jump cursor to end of buffer
+                    let line_count = editor.state.buffer.lines().len();
+                    if line_count > 0 {
+                        if let Some(last_line_bounds) =
+                            editor.list_state.bounds_for_item(line_count - 1)
+                        {
+                            let last_line_bottom =
+                                last_line_bounds.origin.y + last_line_bounds.size.height;
+                            if event.position.y <= last_line_bottom {
+                                // Click is in side margins at height of existing content - ignore
+                                return;
+                            }
+                        } else {
+                            // Last line not visible/measured - ignore click
+                            return;
+                        }
+                    }
+                    // Click is in empty space below content
                     let end = editor.state.buffer.len_bytes();
                     editor.state.selection = Selection::new(end, end);
                     editor.request_scroll_to_cursor();
@@ -1538,11 +1556,6 @@ impl Render for Editor {
                     // Get window bounds to handle maximized windows
                     let window_bounds = window.bounds();
 
-                    eprintln!(
-                        "mouse_y={:?}, viewport={:?}, window={:?}",
-                        mouse_y, viewport, window_bounds
-                    );
-
                     // Create "hot zones" at the edges that trigger scrolling
                     // Use the minimum of viewport edge and window edge for each boundary
                     let zone_size = px(120.0);
@@ -1556,11 +1569,6 @@ impl Render for Editor {
                     let window_bottom = window_bounds.origin.y + window_bounds.size.height;
                     let effective_bottom = viewport_bottom.min(window_bottom);
                     let bottom_threshold = effective_bottom - zone_size;
-
-                    eprintln!(
-                        "  top_threshold={:?}, bottom_threshold={:?}",
-                        top_threshold, bottom_threshold
-                    );
 
                     // Calculate distance outside the inset bounds and direction
                     let (delta, direction): (f32, i32) = if mouse_y < top_threshold {
@@ -1578,10 +1586,10 @@ impl Render for Editor {
                     editor.in_drag_scroll_zone = true;
 
                     // Throttle inversely proportional to distance
-                    // Close to edge: ~60ms, far from edge: ~15ms
-                    let speed_factor = (delta.powf(1.2) / 100.0).min(4.0).max(0.5);
-                    let throttle_ms = (60.0 / speed_factor) as u64;
-                    let throttle = Duration::from_millis(throttle_ms.clamp(15, 80));
+                    // Close to edge: ~30ms, far from edge: ~8ms
+                    let speed_factor = (delta.powf(1.2) / 50.0).min(6.0).max(0.5);
+                    let throttle_ms = (30.0 / speed_factor) as u64;
+                    let throttle = Duration::from_millis(throttle_ms.clamp(8, 50));
 
                     let now = Instant::now();
                     if let Some(last) = editor.last_drag_scroll {
@@ -1598,10 +1606,6 @@ impl Render for Editor {
                     } else {
                         cursor.move_down(&editor.state.buffer)
                     };
-                    eprintln!(
-                        "  -> SCROLL: dir={}, cursor {} -> {}",
-                        direction, cursor.offset, new_cursor.offset
-                    );
                     editor.state.selection = editor.state.selection.extend_to(new_cursor.offset);
                     editor.request_scroll_to_cursor();
                     cx.notify();
