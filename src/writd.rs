@@ -150,12 +150,11 @@ async fn handle_websocket(
     let watch_path = temp_file.clone();
 
     let mut watcher = notify::recommended_watcher(move |res: Result<notify::Event, _>| {
-        if let Ok(event) = res {
-            if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
-                if let Ok(content) = std::fs::read_to_string(&watch_path) {
-                    let _ = file_tx.blocking_send(content);
-                }
-            }
+        if let Ok(event) = res
+            && matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_))
+            && let Ok(content) = std::fs::read_to_string(&watch_path)
+        {
+            let _ = file_tx.blocking_send(content);
         }
     })?;
 
@@ -198,11 +197,11 @@ async fn handle_websocket(
             Some(msg) = read.next() => {
                 match msg {
                     Ok(Message::Text(text)) => {
-                        if let Ok(client_msg) = serde_json::from_str::<ClientMessage>(&text) {
-                            if client_msg.text != last_content {
-                                last_content = client_msg.text.clone();
-                                std::fs::write(&temp_file, &client_msg.text)?;
-                            }
+                        if let Ok(client_msg) = serde_json::from_str::<ClientMessage>(&text)
+                            && client_msg.text != last_content
+                        {
+                            last_content = client_msg.text.clone();
+                            std::fs::write(&temp_file, &client_msg.text)?;
                         }
                     }
                     Ok(Message::Close(_)) => break,
@@ -215,15 +214,15 @@ async fn handle_websocket(
             status = child.wait() => {
                 println!("writ process exited with {:?} for {:?}", status, temp_file);
                 // Send final content before closing
-                if let Ok(content) = std::fs::read_to_string(&temp_file) {
-                    if content != last_content {
-                        let msg = ServerMessage {
-                            text: content,
-                            selections: None,
-                        };
-                        let json = serde_json::to_string(&msg)?;
-                        let _ = write.send(Message::Text(json.into())).await;
-                    }
+                if let Ok(content) = std::fs::read_to_string(&temp_file)
+                    && content != last_content
+                {
+                    let msg = ServerMessage {
+                        text: content,
+                        selections: None,
+                    };
+                    let json = serde_json::to_string(&msg)?;
+                    let _ = write.send(Message::Text(json.into())).await;
                 }
                 break;
             }
