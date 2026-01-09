@@ -2,8 +2,12 @@ use ropey::Rope;
 use std::ops::{Deref, DerefMut, Range};
 use std::rc::Rc;
 use std::str::FromStr;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tree_sitter::{InputEdit, Point};
 use undo::Record;
+
+/// Global counter for unique buffer versions.
+static NEXT_VERSION: AtomicU64 = AtomicU64::new(1);
 
 use crate::highlight::{HighlightSpan, Highlighter};
 use crate::inline::{StyledRegion, extract_all_inline_styles, styles_in_range};
@@ -163,6 +167,8 @@ pub struct BufferContent {
     /// Cached line markers for BufferContent methods that need them.
     /// This is separate from the render path - only computed when needed.
     lines_cache: Option<Vec<LineMarkers>>,
+    /// Version counter, incremented on each edit. Used by Editor to detect changes.
+    version: u64,
 }
 
 impl BufferContent {
@@ -176,7 +182,13 @@ impl BufferContent {
             nodes: Rc::new(Vec::new()),
             inline_styles: Rc::new(Vec::new()),
             lines_cache: None,
+            version: NEXT_VERSION.fetch_add(1, Ordering::Relaxed),
         }
+    }
+
+    /// Returns the current version number. Incremented on each edit.
+    pub fn version(&self) -> u64 {
+        self.version
     }
 
     /// Recompute cached nodes, inline styles, and lines cache from current tree.
@@ -279,6 +291,9 @@ impl BufferContent {
 
         // Invalidate code highlight cache
         self.code_highlight_cache.valid = false;
+
+        // Increment version for change detection
+        self.version += 1;
     }
 
     /// Normalize ordered list numbering - ensure sequential numbers (1, 2, 3...).
@@ -826,6 +841,7 @@ impl FromStr for Buffer {
             nodes: Rc::new(Vec::new()),
             inline_styles: Rc::new(Vec::new()),
             lines_cache: None,
+            version: NEXT_VERSION.fetch_add(1, Ordering::Relaxed),
         };
 
         content.update_caches();

@@ -758,6 +758,8 @@ pub struct Editor {
     hovering_link_region: bool,
     /// Whether Ctrl/Cmd is currently held.
     ctrl_held: bool,
+    /// Last buffer version we synced to. Used to detect buffer changes.
+    last_synced_version: u64,
 }
 
 impl Editor {
@@ -785,6 +787,7 @@ impl Editor {
             hovering_checkbox: false,
             hovering_link_region: false,
             ctrl_held: false,
+            last_synced_version: 0,
         }
     }
 
@@ -807,10 +810,11 @@ impl Editor {
     pub fn set_text(&mut self, content: &str, cx: &mut Context<Self>) {
         self.state.buffer = content.parse().unwrap_or_default();
         self.state.selection = Selection::new(0, 0);
-        self.sync_list_state(cx);
+        cx.notify();
     }
 
     /// Sync the list state count with the buffer line count.
+    /// Also triggers autosave if enabled.
     fn sync_list_state(&mut self, cx: &mut Context<Self>) {
         let line_count = self.state.buffer.lines().len();
         let current_count = self.list_state.item_count();
@@ -824,12 +828,17 @@ impl Editor {
             }
         }
 
-        cx.notify();
+        // Autosave if enabled
+        let config = crate::config::Config::global(cx);
+        if config.autosave {
+            self.save(cx);
+        }
     }
 
     /// Insert text at the current cursor position.
     pub fn insert(&mut self, text: &str, cx: &mut Context<Self>) {
-        self.insert_text(text, cx);
+        self.insert_text(text);
+        cx.notify();
     }
 
     /// Append text to the end of the buffer and move cursor to the end.
@@ -840,7 +849,7 @@ impl Editor {
         self.state.buffer.insert(end, text, end);
         let new_end = self.state.buffer.len_bytes();
         self.state.selection = Selection::new(new_end, new_end);
-        self.sync_list_state(cx);
+        cx.notify();
     }
 
     /// Append text and scroll to keep the cursor visible.
@@ -915,37 +924,31 @@ impl Editor {
         cx.notify();
     }
 
-    fn insert_text(&mut self, text: &str, cx: &mut Context<Self>) {
+    fn insert_text(&mut self, text: &str) {
         self.state.insert_text(text);
-        self.sync_list_state(cx);
     }
 
-    fn delete_backward(&mut self, cx: &mut Context<Self>) {
+    fn delete_backward(&mut self) {
         self.state.delete_backward();
-        self.sync_list_state(cx);
     }
 
-    fn delete_forward(&mut self, cx: &mut Context<Self>) {
+    fn delete_forward(&mut self) {
         self.state.delete_forward();
-        self.sync_list_state(cx);
     }
 
-    fn enter(&mut self, cx: &mut Context<Self>) {
+    fn enter(&mut self) {
         self.state.enter();
-        self.sync_list_state(cx);
     }
 
-    fn shift_enter(&mut self, cx: &mut Context<Self>) {
+    fn shift_enter(&mut self) {
         self.state.shift_enter();
-        self.sync_list_state(cx);
     }
 
-    fn shift_alt_enter(&mut self, cx: &mut Context<Self>) {
+    fn shift_alt_enter(&mut self) {
         self.state.shift_alt_enter();
-        self.sync_list_state(cx);
     }
 
-    fn move_in_direction(&mut self, direction: Direction, extend: bool, cx: &mut Context<Self>) {
+    fn move_in_direction(&mut self, direction: Direction, extend: bool) {
         let new_cursor = match direction {
             Direction::Left => self.cursor().move_left(&self.state.buffer),
             Direction::Right => self.cursor().move_right(&self.state.buffer),
@@ -953,7 +956,6 @@ impl Editor {
             Direction::Down => self.cursor().move_down(&self.state.buffer),
         };
         self.move_cursor(new_cursor, extend);
-        cx.notify();
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -966,22 +968,22 @@ impl Editor {
 
         match keystroke.key.as_str() {
             "backspace" => {
-                self.delete_backward(cx);
+                self.delete_backward();
             }
             "delete" => {
-                self.delete_forward(cx);
+                self.delete_forward();
             }
             "left" => {
-                self.move_in_direction(Direction::Left, extend, cx);
+                self.move_in_direction(Direction::Left, extend);
             }
             "right" => {
-                self.move_in_direction(Direction::Right, extend, cx);
+                self.move_in_direction(Direction::Right, extend);
             }
             "up" => {
-                self.move_in_direction(Direction::Up, extend, cx);
+                self.move_in_direction(Direction::Up, extend);
             }
             "down" => {
-                self.move_in_direction(Direction::Down, extend, cx);
+                self.move_in_direction(Direction::Down, extend);
             }
             "home" => {
                 let new_cursor = if keystroke.modifiers.control || keystroke.modifiers.platform {
@@ -990,7 +992,6 @@ impl Editor {
                     self.cursor().move_to_line_start(&self.state.buffer)
                 };
                 self.move_cursor(new_cursor, extend);
-                cx.notify();
             }
             "end" => {
                 let new_cursor = if keystroke.modifiers.control || keystroke.modifiers.platform {
@@ -999,34 +1000,30 @@ impl Editor {
                     self.cursor().move_to_line_end(&self.state.buffer)
                 };
                 self.move_cursor(new_cursor, extend);
-                cx.notify();
             }
             "enter" => {
                 if keystroke.modifiers.shift && keystroke.modifiers.alt {
                     // Shift+Alt+Enter: indented continuation (nested paragraph)
-                    self.shift_alt_enter(cx);
+                    self.shift_alt_enter();
                 } else if keystroke.modifiers.shift {
                     // Shift+Enter: continue container (add markers)
-                    self.shift_enter(cx);
+                    self.shift_enter();
                 } else {
                     // Enter: raw newline
-                    self.enter(cx);
+                    self.enter();
                 }
             }
             "tab" => {
                 if self.state.cursor_in_code_block() {
-                    self.insert_text("    ", cx);
+                    self.insert_text("    ");
                 } else if keystroke.modifiers.shift {
                     self.shift_tab();
-                    cx.notify();
                 } else {
                     self.tab();
-                    cx.notify();
                 }
             }
             "a" if keystroke.modifiers.control || keystroke.modifiers.platform => {
                 self.state.selection = Selection::select_all(&self.state.buffer);
-                cx.notify();
             }
             "c" if keystroke.modifiers.control || keystroke.modifiers.platform => {
                 if !self.state.selection.is_collapsed() {
@@ -1041,7 +1038,6 @@ impl Editor {
                     let text = self.state.buffer.slice_cow(range).into_owned();
                     cx.write_to_clipboard(gpui::ClipboardItem::new_string(text));
                     self.state.delete_selection();
-                    cx.notify();
                 }
             }
             "v" if keystroke.modifiers.control || keystroke.modifiers.platform => {
@@ -1052,24 +1048,21 @@ impl Editor {
                     let ctx =
                         PasteContext::from_buffer(&self.state.buffer, self.state.cursor().offset);
                     let transformed = transform_paste(&text, &ctx);
-                    self.insert_text(&transformed, cx);
+                    self.insert_text(&transformed);
                 }
             }
             "z" if keystroke.modifiers.control || keystroke.modifiers.platform => {
                 if keystroke.modifiers.shift {
                     if let Some(cursor_pos) = self.state.buffer.redo() {
                         self.state.selection = Selection::new(cursor_pos, cursor_pos);
-                        self.sync_list_state(cx);
                     }
                 } else if let Some(cursor_pos) = self.state.buffer.undo() {
                     self.state.selection = Selection::new(cursor_pos, cursor_pos);
-                    self.sync_list_state(cx);
                 }
             }
             "y" if keystroke.modifiers.control => {
                 if let Some(cursor_pos) = self.state.buffer.redo() {
                     self.state.selection = Selection::new(cursor_pos, cursor_pos);
-                    self.sync_list_state(cx);
                 }
             }
             "s" if keystroke.modifiers.control || keystroke.modifiers.platform => {
@@ -1082,20 +1075,19 @@ impl Editor {
                         if !self.state.try_insert_space() {
                             return;
                         }
-                        // try_insert_space calls state.insert_text internally, need to sync
-                        self.sync_list_state(cx);
                     } else {
-                        self.insert_text(key_char, cx);
+                        self.insert_text(key_char);
                     }
 
                     // Auto-insert space after blockquote marker if needed
                     if key_char == ">" {
                         self.state.maybe_complete_blockquote_marker();
-                        self.sync_list_state(cx);
                     }
                 }
             }
         }
+
+        cx.notify();
     }
 
     fn on_modifiers_changed(
@@ -1236,32 +1228,31 @@ impl Editor {
     pub fn execute(&mut self, action: EditorAction, _window: &mut Window, cx: &mut Context<Self>) {
         match action {
             EditorAction::Type(c) => {
-                self.insert_text(&c.to_string(), cx);
+                self.insert_text(&c.to_string());
             }
             EditorAction::Enter => {
-                self.enter(cx);
+                self.enter();
             }
             EditorAction::ShiftEnter => {
-                self.shift_enter(cx);
+                self.shift_enter();
             }
             EditorAction::ShiftAltEnter => {
-                self.shift_alt_enter(cx);
+                self.shift_alt_enter();
             }
             EditorAction::Tab => {
                 self.tab();
-                cx.notify();
             }
             EditorAction::ShiftTab => {
                 self.shift_tab();
-                cx.notify();
             }
             EditorAction::Backspace => {
-                self.delete_backward(cx);
+                self.delete_backward();
             }
             EditorAction::Move(direction) => {
-                self.move_in_direction(direction, false, cx);
+                self.move_in_direction(direction, false);
             }
         }
+        cx.notify();
     }
 }
 
@@ -1273,6 +1264,13 @@ impl Focusable for Editor {
 
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        // Check if buffer changed and sync list state if needed
+        let buffer_version = self.state.buffer.version();
+        if buffer_version != self.last_synced_version {
+            self.last_synced_version = buffer_version;
+            self.sync_list_state(cx);
+        }
+
         // Sync dirty state with FileInfo global for title bar
         let file_info = FileInfo::global(cx);
         if file_info.dirty != self.state.buffer.is_dirty() {

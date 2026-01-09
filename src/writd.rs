@@ -161,10 +161,11 @@ async fn handle_websocket(
 
     watcher.watch(&temp_file, RecursiveMode::NonRecursive)?;
 
-    // Spawn writ process
+    // Spawn writ process with autosave for real-time sync
     let mut child = Command::new("writ")
         .arg("--file")
         .arg(&temp_file)
+        .arg("--autosave")
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())

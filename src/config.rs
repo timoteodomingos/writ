@@ -33,6 +33,10 @@ pub struct Config {
 
     #[arg(long, env = "WRIT_CODE_FONT", default_value = DEFAULT_CODE_FONT)]
     pub code_font: String,
+
+    /// Save file automatically on every edit (useful for GhostText integration)
+    #[arg(long)]
+    pub autosave: bool,
 }
 
 impl Global for Config {}
