@@ -168,6 +168,12 @@ fn main() {
                 // Create editor with file content and config
                 let editor = cx.new(|cx| Editor::with_config(&content, editor_config, cx));
 
+                // Set up file watching for external changes
+                let watch_path = file_path.clone();
+                editor.update(cx, |editor, cx| {
+                    editor.watch_file(watch_path, cx);
+                });
+
                 // Focus the editor so it receives keyboard input
                 editor.focus_handle(cx).focus(window);
 

@@ -6,7 +6,9 @@ pub use action::{Direction, EditorAction};
 pub use config::EditorConfig;
 pub use theme::EditorTheme;
 
+use std::path::PathBuf;
 use std::rc::Rc;
+use std::sync::mpsc;
 
 use gpui::{
     App, Context, CursorStyle, DragMoveEvent, Empty, FocusHandle, Focusable, IntoElement,
@@ -778,6 +780,13 @@ pub struct Editor {
     last_drag_scroll: Option<std::time::Instant>,
     /// True when we're in the drag-scroll zone, to prevent line's on_drag from resetting selection.
     in_drag_scroll_zone: bool,
+    /// Path to the file being edited (if any).
+    file_path: Option<PathBuf>,
+    /// Receiver for file watcher events.
+    file_watcher_rx: Option<mpsc::Receiver<()>>,
+    /// File watcher handle (kept alive to maintain the watch).
+    #[allow(dead_code)]
+    file_watcher: Option<notify::RecommendedWatcher>,
 }
 
 impl Editor {
@@ -808,6 +817,118 @@ impl Editor {
             last_synced_version: 0,
             last_drag_scroll: None,
             in_drag_scroll_zone: false,
+            file_path: None,
+            file_watcher_rx: None,
+            file_watcher: None,
+        }
+    }
+
+    /// Set up file watching for external changes.
+    /// When the file changes externally, the buffer will be reloaded.
+    /// If the file doesn't exist yet, watches the parent directory for its creation.
+    pub fn watch_file(&mut self, path: PathBuf, cx: &mut Context<Self>) {
+        use notify::{RecursiveMode, Watcher};
+
+        self.file_path = Some(path.clone());
+
+        let (tx, rx) = mpsc::channel();
+        let watch_path = path.clone();
+        let file_exists = path.exists();
+
+        let mut watcher = match notify::recommended_watcher(move |res: Result<notify::Event, _>| {
+            if let Ok(event) = res {
+                use notify::EventKind;
+                match event.kind {
+                    EventKind::Modify(_) => {
+                        // File was modified
+                        let _ = tx.send(());
+                    }
+                    EventKind::Create(_) => {
+                        // File was created - check if it's our file
+                        if event.paths.iter().any(|p| p == &watch_path) {
+                            let _ = tx.send(());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }) {
+            Ok(w) => w,
+            Err(e) => {
+                eprintln!("Failed to create file watcher: {}", e);
+                return;
+            }
+        };
+
+        // If file exists, watch it directly. Otherwise watch parent directory.
+        let target = if file_exists {
+            path.clone()
+        } else if let Some(parent) = path.parent() {
+            parent.to_path_buf()
+        } else {
+            eprintln!("Cannot watch file with no parent directory: {:?}", path);
+            return;
+        };
+
+        if let Err(e) = watcher.watch(&target, RecursiveMode::NonRecursive) {
+            eprintln!("Failed to watch {:?}: {}", target, e);
+            return;
+        }
+
+        self.file_watcher_rx = Some(rx);
+        self.file_watcher = Some(watcher);
+
+        // Schedule periodic checks using a timer-based approach
+        cx.spawn(async move |weak, cx| {
+            loop {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
+
+                let continue_loop = cx
+                    .update(|cx| {
+                        if let Some(editor) = weak.upgrade() {
+                            editor.update(cx, |editor, cx| {
+                                if let Some(rx) = &editor.file_watcher_rx {
+                                    let mut changed = false;
+                                    while rx.try_recv().is_ok() {
+                                        changed = true;
+                                    }
+                                    if changed {
+                                        editor.reload_file(cx);
+                                    }
+                                }
+                            });
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .unwrap_or(false);
+
+                if !continue_loop {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Reload the file from disk, replacing buffer contents.
+    fn reload_file(&mut self, cx: &mut Context<Self>) {
+        let Some(path) = &self.file_path else { return };
+
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("Failed to reload file {:?}: {}", path, e);
+                return;
+            }
+        };
+
+        // Only reload if content actually changed
+        if content != self.state.buffer.text() {
+            self.set_text(&content, cx);
         }
     }
 
