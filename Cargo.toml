@@ -17,15 +17,24 @@ path = "src/lib.rs"
 name = "writ"
 path = "src/main.rs"
 
+[[bin]]
+name = "writd"
+path = "src/writd.rs"
+
 [dependencies]
 anyhow = "1"
 async-compat = "0.2"
 clap = { version = "4.5", features = ["derive", "env"] }
 futures = "0.3"
 gpui = "0.2"
+notify = "8.2"
 open = "5"
 reqwest = { version = "0.13", default-features = false, features = ["http2", "rustls"] }
 ropey = "1.6"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
+tokio-tungstenite = "0.28"
 tree-sitter = "0.26"
 tree-sitter-bash = "0.25"
 tree-sitter-highlight = "0.26"
