@@ -1346,7 +1346,10 @@ impl IntoElement for Line {
                         }
                     }
 
-                    cx.stop_propagation();
+                    // Mark as handled so editor's on_mouse_down knows not to override cursor
+                    // But don't stop propagation - allow the event to bubble up to the editor
+                    // so that on_drag can be triggered for drag selection outside bounds
+                    window.prevent_default();
                     on_click(
                         buffer_offset,
                         event.modifiers.shift,

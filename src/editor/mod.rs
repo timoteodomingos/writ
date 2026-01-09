@@ -9,9 +9,23 @@ pub use theme::EditorTheme;
 use std::rc::Rc;
 
 use gpui::{
-    App, Context, CursorStyle, FocusHandle, Focusable, IntoElement, KeyDownEvent, ListAlignment,
-    ListState, ModifiersChangedEvent, ReadGlobal, Window, div, font, list, prelude::*, px, rems,
+    App, Context, CursorStyle, DragMoveEvent, Empty, FocusHandle, Focusable, IntoElement,
+    KeyDownEvent, ListAlignment, ListState, ModifiersChangedEvent, MouseButton, ReadGlobal, Render,
+    Window, div, font, list, prelude::*, px, rems,
 };
+
+/// Marker type for text selection drag operations.
+/// Used with GPUI's on_drag/on_drag_move to receive mouse events outside element bounds.
+struct SelectionDrag;
+
+/// Empty view for the drag ghost (we don't need a visible drag indicator).
+struct EmptyDragView;
+
+impl Render for EmptyDragView {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
 
 use crate::title_bar::FileInfo;
 
@@ -760,6 +774,10 @@ pub struct Editor {
     ctrl_held: bool,
     /// Last buffer version we synced to. Used to detect buffer changes.
     last_synced_version: u64,
+    /// Last time we moved cursor during drag-scroll, for throttling.
+    last_drag_scroll: Option<std::time::Instant>,
+    /// True when we're in the drag-scroll zone, to prevent line's on_drag from resetting selection.
+    in_drag_scroll_zone: bool,
 }
 
 impl Editor {
@@ -788,6 +806,8 @@ impl Editor {
             hovering_link_region: false,
             ctrl_held: false,
             last_synced_version: 0,
+            last_drag_scroll: None,
+            in_drag_scroll_zone: false,
         }
     }
 
@@ -1358,7 +1378,7 @@ impl Render for Editor {
         let entity = cx.entity().clone();
         let on_drag: DragCallback = Rc::new(move |buffer_offset, _window, cx| {
             entity.update(cx, |editor, cx| {
-                if editor.input_blocked {
+                if editor.input_blocked || editor.in_drag_scroll_zone {
                     return;
                 }
                 editor.state.selection = editor.state.selection.extend_to(buffer_offset);
@@ -1485,14 +1505,17 @@ impl Render for Editor {
             .on_key_down(cx.listener(Self::on_key_down))
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
             .on_mouse_down(
-                gpui::MouseButton::Left,
+                MouseButton::Left,
                 cx.listener(|editor, _event: &gpui::MouseDownEvent, window, cx| {
                     if editor.input_blocked {
                         return;
                     }
-                    // Check if click is below all content by comparing to line bounds
-                    // The list items will stop propagation if clicked, so this only fires
-                    // for clicks in empty space (padding area)
+                    // Only handle if not already handled by a line element
+                    // (lines call prevent_default but don't stop propagation to allow on_drag)
+                    if window.default_prevented() {
+                        return;
+                    }
+                    // Click is in empty space (padding area below content)
                     let end = editor.state.buffer.len_bytes();
                     editor.state.selection = Selection::new(end, end);
                     editor.request_scroll_to_cursor();
@@ -1500,6 +1523,90 @@ impl Render for Editor {
                     cx.notify();
                 }),
             )
+            .on_drag(SelectionDrag, |_drag, _point, _window, cx| {
+                // Return an empty view - we don't need a visible drag indicator
+                cx.new(|_| EmptyDragView)
+            })
+            .on_drag_move(cx.listener(
+                |editor, event: &DragMoveEvent<SelectionDrag>, window, cx| {
+                    use std::time::{Duration, Instant};
+
+                    // When dragging near viewport edges, move cursor to trigger auto-scroll
+                    let viewport = editor.list_state.viewport_bounds();
+                    let mouse_y = event.event.position.y;
+
+                    // Get window bounds to handle maximized windows
+                    let window_bounds = window.bounds();
+
+                    eprintln!(
+                        "mouse_y={:?}, viewport={:?}, window={:?}",
+                        mouse_y, viewport, window_bounds
+                    );
+
+                    // Create "hot zones" at the edges that trigger scrolling
+                    // Use the minimum of viewport edge and window edge for each boundary
+                    let zone_size = px(120.0);
+
+                    // For top: use viewport top (content starts there)
+                    let top_threshold = viewport.origin.y + zone_size;
+
+                    // For bottom: use the smaller of viewport bottom or window bottom
+                    // This handles maximized windows where viewport == window
+                    let viewport_bottom = viewport.origin.y + viewport.size.height;
+                    let window_bottom = window_bounds.origin.y + window_bounds.size.height;
+                    let effective_bottom = viewport_bottom.min(window_bottom);
+                    let bottom_threshold = effective_bottom - zone_size;
+
+                    eprintln!(
+                        "  top_threshold={:?}, bottom_threshold={:?}",
+                        top_threshold, bottom_threshold
+                    );
+
+                    // Calculate distance outside the inset bounds and direction
+                    let (delta, direction): (f32, i32) = if mouse_y < top_threshold {
+                        ((top_threshold - mouse_y).into(), -1) // up
+                    } else if mouse_y > bottom_threshold {
+                        ((mouse_y - bottom_threshold).into(), 1) // down
+                    } else {
+                        // Mouse is inside safe zone - reset throttle and allow line's on_drag
+                        editor.last_drag_scroll = None;
+                        editor.in_drag_scroll_zone = false;
+                        return;
+                    };
+
+                    // We're in the scroll zone - prevent line's on_drag from resetting selection
+                    editor.in_drag_scroll_zone = true;
+
+                    // Throttle inversely proportional to distance
+                    // Close to edge: ~60ms, far from edge: ~15ms
+                    let speed_factor = (delta.powf(1.2) / 100.0).min(4.0).max(0.5);
+                    let throttle_ms = (60.0 / speed_factor) as u64;
+                    let throttle = Duration::from_millis(throttle_ms.clamp(15, 80));
+
+                    let now = Instant::now();
+                    if let Some(last) = editor.last_drag_scroll {
+                        if now.duration_since(last) < throttle {
+                            return;
+                        }
+                    }
+                    editor.last_drag_scroll = Some(now);
+
+                    // Move cursor one line in the appropriate direction
+                    let cursor = editor.state.selection.cursor();
+                    let new_cursor = if direction < 0 {
+                        cursor.move_up(&editor.state.buffer)
+                    } else {
+                        cursor.move_down(&editor.state.buffer)
+                    };
+                    eprintln!(
+                        "  -> SCROLL: dir={}, cursor {} -> {}",
+                        direction, cursor.offset, new_cursor.offset
+                    );
+                    editor.state.selection = editor.state.selection.extend_to(new_cursor.offset);
+                    editor.request_scroll_to_cursor();
+                    cx.notify();
+                },
+            ))
             .size_full()
             .px(self.config.padding_x)
             .font(line_theme.text_font.clone())
