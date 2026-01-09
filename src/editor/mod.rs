@@ -787,6 +787,8 @@ pub struct Editor {
     /// File watcher handle (kept alive to maintain the watch).
     #[allow(dead_code)]
     file_watcher: Option<notify::RecommendedWatcher>,
+    /// The mtime of the file after our last save (used to detect external vs our own changes).
+    last_save_mtime: Option<std::time::SystemTime>,
 }
 
 impl Editor {
@@ -820,6 +822,7 @@ impl Editor {
             file_path: None,
             file_watcher_rx: None,
             file_watcher: None,
+            last_save_mtime: None,
         }
     }
 
@@ -918,6 +921,16 @@ impl Editor {
     fn reload_file(&mut self, cx: &mut Context<Self>) {
         let Some(path) = &self.file_path else { return };
 
+        // Check if this change was from our own save by comparing mtime
+        if let Some(last_save_mtime) = self.last_save_mtime
+            && let Ok(metadata) = std::fs::metadata(path)
+            && let Ok(file_mtime) = metadata.modified()
+            && file_mtime == last_save_mtime
+        {
+            // mtime matches our last save, this is our own change - ignore it
+            return;
+        }
+
         let content = match std::fs::read_to_string(path) {
             Ok(c) => c,
             Err(e) => {
@@ -973,6 +986,12 @@ impl Editor {
         let config = crate::config::Config::global(cx);
         if config.autosave {
             self.save(cx);
+            // Record the mtime so we can ignore our own file change
+            if let Some(path) = &self.file_path
+                && let Ok(metadata) = std::fs::metadata(path)
+            {
+                self.last_save_mtime = metadata.modified().ok();
+            }
         }
     }
 
