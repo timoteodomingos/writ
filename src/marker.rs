@@ -291,6 +291,13 @@ impl LineMarkers {
             .any(|m| matches!(m.kind, MarkerKind::CodeBlockFence { .. }))
     }
 
+    /// Returns true if this line is a thematic break (horizontal rule).
+    pub fn is_thematic_break(&self) -> bool {
+        self.markers
+            .iter()
+            .any(|m| matches!(m.kind, MarkerKind::ThematicBreak))
+    }
+
     /// Returns the heading level if this line is a heading.
     pub fn heading_level(&self) -> Option<u8> {
         for m in &self.markers {

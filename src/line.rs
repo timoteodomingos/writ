@@ -398,6 +398,30 @@ impl Line {
             return (display_text, runs);
         }
 
+        // Handle thematic break lines - always build the text for consistent click positioning,
+        // but use transparent color when cursor is not on line
+        if self.line.is_thematic_break() {
+            let is_visible = self.cursor_on_line() || self.selection_on_line();
+            let break_text = self.slice(self.line.range.clone());
+
+            let transparent = Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.0,
+            };
+            let color = if is_visible {
+                self.theme.text_color
+            } else {
+                transparent
+            };
+
+            display_text.push_str(&break_text);
+            runs.push(self.text_run(break_text.len(), self.theme.text_font.clone(), color));
+
+            return (display_text, runs);
+        }
+
         if content_range.start >= content_range.end {
             return (display_text, runs);
         }
@@ -642,9 +666,9 @@ impl Line {
         if !self.cursor_on_line() {
             return false;
         }
-        // Fence lines render the entire line as text content (no spacers),
+        // Fence and thematic break lines render the entire line as text content (no spacers),
         // so cursor is never "in marker area" for them
-        if self.line.is_fence() {
+        if self.line.is_fence() || self.line.is_thematic_break() {
             return false;
         }
         let content_range = self.content_range();
@@ -663,8 +687,8 @@ impl Line {
     }
 
     fn buffer_to_visual_pos(&self, buffer_offset: usize, display_text: &str) -> usize {
-        // For fence lines, use full line range since we render the entire fence
-        let content_range = if self.line.is_fence() {
+        // For fence and thematic break lines, use full line range since we render the entire line
+        let content_range = if self.line.is_fence() || self.line.is_thematic_break() {
             self.line.range.clone()
         } else {
             self.content_range()
@@ -1249,8 +1273,8 @@ impl IntoElement for Line {
             let on_click = on_click.clone();
             let on_checkbox = self.on_checkbox.clone();
             let layout_for_click = text_layout.clone();
-            // For fence lines, use full line range since we render the entire fence
-            let content_range = if self.line.is_fence() {
+            // For fence and thematic break lines, use full line range since we render the entire line
+            let content_range = if self.line.is_fence() || self.line.is_thematic_break() {
                 self.line.range.clone()
             } else {
                 self.content_range()
@@ -1385,8 +1409,8 @@ impl IntoElement for Line {
             let on_hover = self.on_hover.clone();
             let layout_for_move = text_layout;
             let line_range_for_move = self.line.range.clone();
-            // For fence lines, use full line range since we render the entire fence
-            let content_range = if self.line.is_fence() {
+            // For fence and thematic break lines, use full line range since we render the entire line
+            let content_range = if self.line.is_fence() || self.line.is_thematic_break() {
                 self.line.range.clone()
             } else {
                 self.content_range()
