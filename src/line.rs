@@ -360,31 +360,40 @@ impl Line {
 
         // Handle fence lines specially - use full line range, not content_range
         if self.line.is_fence() {
-            // Only show fence content if cursor is on line, selection overlaps, or fence_visible is set
-            if self.cursor_on_line() || self.selection_on_line() || self.fence_visible {
-                let fence_text = self.slice(self.line.range.clone());
-                let backticks: String = fence_text.chars().take_while(|&c| c == '`').collect();
-                let language = fence_text[backticks.len()..].trim_end();
+            // Always build the fence text (for consistent click positioning),
+            // but use transparent color when hidden
+            let is_visible =
+                self.cursor_on_line() || self.selection_on_line() || self.fence_visible;
+            let fence_text = self.slice(self.line.range.clone());
+            let backticks: String = fence_text.chars().take_while(|&c| c == '`').collect();
+            let language = fence_text[backticks.len()..].trim_end();
 
-                if !backticks.is_empty() {
-                    display_text.push_str(&backticks);
-                    runs.push(self.text_run(
-                        backticks.len(),
-                        self.theme.code_font.clone(),
-                        self.theme.fence_color,
-                    ));
-                }
+            let transparent = Rgba {
+                r: 0.0,
+                g: 0.0,
+                b: 0.0,
+                a: 0.0,
+            };
 
-                if !language.is_empty() {
-                    display_text.push_str(language);
-                    runs.push(self.text_run(
-                        language.len(),
-                        self.theme.code_font.clone(),
-                        self.theme.fence_lang_color,
-                    ));
-                }
+            if !backticks.is_empty() {
+                display_text.push_str(&backticks);
+                let color = if is_visible {
+                    self.theme.fence_color
+                } else {
+                    transparent
+                };
+                runs.push(self.text_run(backticks.len(), self.theme.code_font.clone(), color));
             }
-            // If not visible, display_text stays empty (will become single space in caller)
+
+            if !language.is_empty() {
+                display_text.push_str(language);
+                let color = if is_visible {
+                    self.theme.fence_lang_color
+                } else {
+                    transparent
+                };
+                runs.push(self.text_run(language.len(), self.theme.code_font.clone(), color));
+            }
 
             return (display_text, runs);
         }
@@ -631,6 +640,11 @@ impl Line {
     /// Returns true if the cursor is in the marker area (before content starts)
     fn cursor_in_marker_area(&self) -> bool {
         if !self.cursor_on_line() {
+            return false;
+        }
+        // Fence lines render the entire line as text content (no spacers),
+        // so cursor is never "in marker area" for them
+        if self.line.is_fence() {
             return false;
         }
         let content_range = self.content_range();
@@ -1235,7 +1249,12 @@ impl IntoElement for Line {
             let on_click = on_click.clone();
             let on_checkbox = self.on_checkbox.clone();
             let layout_for_click = text_layout.clone();
-            let content_range = self.content_range();
+            // For fence lines, use full line range since we render the entire fence
+            let content_range = if self.line.is_fence() {
+                self.line.range.clone()
+            } else {
+                self.content_range()
+            };
             let line_number = self.line.line_number;
 
             let checkbox_click_range: Option<std::ops::Range<usize>> =
@@ -1366,7 +1385,12 @@ impl IntoElement for Line {
             let on_hover = self.on_hover.clone();
             let layout_for_move = text_layout;
             let line_range_for_move = self.line.range.clone();
-            let content_range = self.content_range();
+            // For fence lines, use full line range since we render the entire fence
+            let content_range = if self.line.is_fence() {
+                self.line.range.clone()
+            } else {
+                self.content_range()
+            };
             let prefix_len = self.get_substitution().map(|s| s.len()).unwrap_or(0);
 
             let checkbox_hover_range: Option<Range<usize>> = if self.line.checkbox().is_some() {
