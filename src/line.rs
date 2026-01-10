@@ -301,7 +301,12 @@ impl Line {
     }
 
     fn build_styled_content(&self) -> (String, Vec<TextRun>) {
-        let content_range = self.content_range();
+        // For headings, use full line range so we can show/hide the marker
+        let content_range = if self.line.heading_level().is_some() {
+            self.line.range.clone()
+        } else {
+            self.content_range()
+        };
 
         let mut display_text = String::new();
         let mut runs: Vec<TextRun> = Vec::new();
@@ -429,6 +434,14 @@ impl Line {
         let mut boundaries: Vec<usize> = vec![content_range.start, content_range.end];
         let show_all_markers = self.selection_on_line();
 
+        // For headings, add marker boundary so it can be hidden separately
+        if self.line.heading_level().is_some()
+            && let Some(marker_range) = self.line.marker_range()
+        {
+            boundaries.push(marker_range.start);
+            boundaries.push(marker_range.end);
+        }
+
         for region in &self.inline_styles {
             if region.full_range.end > content_range.start
                 && region.full_range.start < content_range.end
@@ -463,6 +476,15 @@ impl Line {
         // to avoid O(n²) nested loops
         let mut hidden_ranges: Vec<(usize, usize)> = Vec::new();
         let mut style_ranges: Vec<(Range<usize>, &StyledRegion)> = Vec::new();
+
+        // For headings, hide the marker (e.g., "## ") when cursor is not on line
+        if self.line.heading_level().is_some()
+            && !self.cursor_on_line()
+            && !self.selection_on_line()
+            && let Some(marker_range) = self.line.marker_range()
+        {
+            hidden_ranges.push((marker_range.start, marker_range.end));
+        }
 
         // Pre-clone fonts once outside the loop to avoid repeated clones
         let is_code_block = self.is_code_block_line();
@@ -639,6 +661,16 @@ impl Line {
         }
 
         let mut hidden = 0usize;
+
+        // For headings, the marker is hidden when cursor is not on line
+        if self.line.heading_level().is_some()
+            && !self.cursor_on_line()
+            && let Some(marker_range) = self.line.marker_range()
+            && offset > marker_range.end
+        {
+            hidden += marker_range.end - marker_range.start;
+        }
+
         for region in &self.inline_styles {
             let cursor_inside = self.cursor_offset >= region.full_range.start
                 && self.cursor_offset <= region.full_range.end;
@@ -666,9 +698,12 @@ impl Line {
         if !self.cursor_on_line() {
             return false;
         }
-        // Fence and thematic break lines render the entire line as text content (no spacers),
+        // Fence, thematic break, and heading lines render the marker as text content (no spacers),
         // so cursor is never "in marker area" for them
-        if self.line.is_fence() || self.line.is_thematic_break() {
+        if self.line.is_fence()
+            || self.line.is_thematic_break()
+            || self.line.heading_level().is_some()
+        {
             return false;
         }
         let content_range = self.content_range();
@@ -687,8 +722,13 @@ impl Line {
     }
 
     fn buffer_to_visual_pos(&self, buffer_offset: usize, display_text: &str) -> usize {
-        // For fence and thematic break lines, use full line range since we render the entire line
+        // For fence and thematic break lines, use full line range since we render the entire line.
+        // For headings, use full line range when markers are visible (cursor/selection on line).
         let content_range = if self.line.is_fence() || self.line.is_thematic_break() {
+            self.line.range.clone()
+        } else if self.line.heading_level().is_some()
+            && (self.cursor_on_line() || self.selection_on_line())
+        {
             self.line.range.clone()
         } else {
             self.content_range()
@@ -1273,13 +1313,25 @@ impl IntoElement for Line {
             let on_click = on_click.clone();
             let on_checkbox = self.on_checkbox.clone();
             let layout_for_click = text_layout.clone();
-            // For fence and thematic break lines, use full line range since we render the entire line
-            let content_range = if self.line.is_fence() || self.line.is_thematic_break() {
+            // For fence, thematic break, and heading lines, use full line range
+            let content_range = if self.line.is_fence()
+                || self.line.is_thematic_break()
+                || self.line.heading_level().is_some()
+            {
                 self.line.range.clone()
             } else {
                 self.content_range()
             };
             let line_number = self.line.line_number;
+            // For headings, the marker is hidden when cursor is not on line
+            let heading_marker_len = if self.line.heading_level().is_some()
+                && !self.cursor_on_line()
+                && !self.selection_on_line()
+            {
+                self.line.marker_range().map(|r| r.len()).unwrap_or(0)
+            } else {
+                0
+            };
 
             let checkbox_click_range: Option<std::ops::Range<usize>> =
                 if self.line.checkbox().is_some() {
@@ -1350,14 +1402,22 @@ impl IntoElement for Line {
                     let buffer_offset = {
                         if content_range.start >= content_range.end {
                             content_range.start
+                        } else if hidden_regions.is_empty() {
+                            // No inline style hidden regions - simple offset calculation
+                            // Add heading_marker_len to skip hidden heading marker
+                            (content_range.start + heading_marker_len + content_visual_index)
+                                .min(content_range.end)
                         } else {
-                            let mut buffer_pos = content_range.start;
+                            // Has inline style hidden regions - need to iterate
+                            let mut buffer_pos = content_range.start + heading_marker_len;
                             let mut visible_count = 0usize;
 
                             while buffer_pos < content_range.end
                                 && visible_count < content_visual_index
                             {
                                 let mut is_hidden = false;
+
+                                // Check inline style hidden regions
                                 for &(opening_start, opening_end, closing_start, closing_end) in
                                     &hidden_regions
                                 {
