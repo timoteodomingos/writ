@@ -722,12 +722,11 @@ impl Line {
     }
 
     fn buffer_to_visual_pos(&self, buffer_offset: usize, display_text: &str) -> usize {
-        // For fence and thematic break lines, use full line range since we render the entire line.
-        // For headings, use full line range when markers are visible (cursor/selection on line).
-        let content_range = if self.line.is_fence() || self.line.is_thematic_break() {
-            self.line.range.clone()
-        } else if self.line.heading_level().is_some()
-            && (self.cursor_on_line() || self.selection_on_line())
+        // For fence, thematic break, and headings (when markers visible), use full line range.
+        let content_range = if self.line.is_fence()
+            || self.line.is_thematic_break()
+            || (self.line.heading_level().is_some()
+                && (self.cursor_on_line() || self.selection_on_line()))
         {
             self.line.range.clone()
         } else {
