@@ -160,7 +160,7 @@ impl Line {
     }
 
     fn is_code_block_line(&self) -> bool {
-        !self.code_highlights.is_empty() || self.line.is_fence()
+        self.line.in_code_block || self.line.is_fence()
     }
 
     fn standalone_image_url(&self) -> Option<&str> {
