@@ -769,6 +769,9 @@ pub struct Editor {
     last_drag_scroll: Option<std::time::Instant>,
     /// True when we're in the drag-scroll zone, to prevent line's on_drag from resetting selection.
     in_drag_scroll_zone: bool,
+    /// True while actively dragging a selection. Used to prevent marker oscillation.
+    /// Once set, stays true until mouse up to keep markers expanded.
+    is_selecting: bool,
     /// Path to the file being edited (if any).
     file_path: Option<PathBuf>,
     /// Receiver for file watcher events.
@@ -808,6 +811,7 @@ impl Editor {
             last_synced_version: 0,
             last_drag_scroll: None,
             in_drag_scroll_zone: false,
+            is_selecting: false,
             file_path: None,
             file_watcher_rx: None,
             file_watcher: None,
@@ -1503,6 +1507,8 @@ impl Render for Editor {
                     return;
                 }
                 editor.state.selection = editor.state.selection.extend_to(buffer_offset);
+                // Latch is_selecting once we start dragging - stays true until mouse up
+                editor.is_selecting = true;
                 cx.notify();
             });
         });
@@ -1571,6 +1577,9 @@ impl Render for Editor {
         // Compute which code block (if any) the cursor is in, so we can show its fences
         let cursor_code_block = self.state.cursor_code_block_range();
 
+        // Capture is_selecting for the list closure
+        let is_selecting = self.is_selecting;
+
         let line_list = div().id("line-list").size_full().child(
             list(self.list_state.clone(), move |ix, _window, _cx| {
                 let line = snapshot.line_markers(ix);
@@ -1601,6 +1610,7 @@ impl Render for Editor {
                     code_highlights,
                     base_path.clone(),
                     fence_visible,
+                    is_selecting,
                 )
                 .on_click(on_click.clone())
                 .on_drag(on_drag.clone())
@@ -1732,6 +1742,16 @@ impl Render for Editor {
                     cx.notify();
                 },
             ))
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|editor, _event: &gpui::MouseUpEvent, _window, cx| {
+                    // Reset is_selecting when mouse is released
+                    if editor.is_selecting {
+                        editor.is_selecting = false;
+                        cx.notify();
+                    }
+                }),
+            )
             .size_full()
             .px(self.config.padding_x)
             .font(line_theme.text_font.clone())

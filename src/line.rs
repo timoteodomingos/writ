@@ -56,6 +56,8 @@ pub struct Line {
     substitution: Option<String>,
     /// If this line is a fence, whether it should be visible (cursor in code block).
     fence_visible: bool,
+    /// True while actively dragging a selection. Used to keep markers expanded.
+    is_selecting: bool,
 }
 
 impl Line {
@@ -69,6 +71,7 @@ impl Line {
         code_highlights: Vec<(HighlightSpan, Rgba)>,
         base_path: Option<PathBuf>,
         fence_visible: bool,
+        is_selecting: bool,
     ) -> Self {
         // Compute substitution once upfront
         let substitution = {
@@ -91,6 +94,7 @@ impl Line {
             scroll_anchor: None,
             substitution,
             fence_visible,
+            is_selecting,
         }
     }
 
@@ -432,7 +436,9 @@ impl Line {
         }
 
         let mut boundaries: Vec<usize> = vec![content_range.start, content_range.end];
-        let show_all_markers = self.selection_on_line();
+        // Show all markers if there's a selection on this line OR if we're actively dragging
+        // The is_selecting flag prevents oscillation when dragging near inline styles
+        let show_all_markers = self.selection_on_line() || self.is_selecting;
 
         // For headings, add marker boundary so it can be hidden separately
         if self.line.heading_level().is_some()
@@ -481,6 +487,7 @@ impl Line {
         if self.line.heading_level().is_some()
             && !self.cursor_on_line()
             && !self.selection_on_line()
+            && !self.is_selecting
             && let Some(marker_range) = self.line.marker_range()
         {
             hidden_ranges.push((marker_range.start, marker_range.end));
@@ -655,8 +662,8 @@ impl Line {
     }
 
     fn hidden_bytes_before(&self, offset: usize, content_range: &Range<usize>) -> usize {
-        // When selection is on line, all markers are revealed (show_all_markers in build_styled_content)
-        if self.selection_on_line() {
+        // When selection is on line or actively selecting, all markers are revealed
+        if self.selection_on_line() || self.is_selecting {
             return 0;
         }
 
@@ -726,7 +733,7 @@ impl Line {
         let content_range = if self.line.is_fence()
             || self.line.is_thematic_break()
             || (self.line.heading_level().is_some()
-                && (self.cursor_on_line() || self.selection_on_line()))
+                && (self.cursor_on_line() || self.selection_on_line() || self.is_selecting))
         {
             self.line.range.clone()
         } else {
@@ -947,6 +954,7 @@ impl IntoElement for Line {
         if let Some((source, on_click, line_end, open_url)) = standalone_image.clone()
             && !self.cursor_on_line()
             && !self.selection_on_line()
+            && !self.is_selecting
         {
             return line_base(line_number).child(img(source).max_w_full().on_mouse_down(
                 MouseButton::Left,
@@ -1364,17 +1372,19 @@ impl IntoElement for Line {
             self.content_range()
         };
 
-        // For headings, the marker is hidden when cursor is not on line
+        // For headings, the marker is hidden when cursor is not on line and not selecting
         let heading_marker_len = if self.line.heading_level().is_some()
             && !self.cursor_on_line()
             && !self.selection_on_line()
+            && !self.is_selecting
         {
             self.line.marker_range().map(|r| r.len()).unwrap_or(0)
         } else {
             0
         };
 
-        let show_all_markers = self.selection_on_line();
+        // Show all markers if there's a selection on this line OR if we're actively dragging
+        let show_all_markers = self.selection_on_line() || self.is_selecting;
         let cursor_offset = self.cursor_offset;
         let hidden_regions: Vec<(usize, usize, usize, usize)> = if show_all_markers {
             Vec::new()
