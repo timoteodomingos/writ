@@ -807,10 +807,10 @@ pub fn collect_node_infos(root: &Node) -> ParsedNodes {
         }
 
         // Check if we've exited the code block
-        if let Some(end_byte) = code_block_end {
-            if node.start_byte() >= end_byte {
-                code_block_end = None;
-            }
+        if let Some(end_byte) = code_block_end
+            && node.start_byte() >= end_byte
+        {
+            code_block_end = None;
         }
 
         // Check if we're entering a list_item that is a checked task

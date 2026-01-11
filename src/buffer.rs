@@ -612,22 +612,22 @@ impl BufferContent {
             });
 
             // Only highlight if there's a language and content
-            if let Some(lang) = language {
-                if !code_block.content_range.is_empty() {
-                    // Extract code content
-                    let char_start = self.text.byte_to_char(code_block.content_range.start);
-                    let char_end = self.text.byte_to_char(code_block.content_range.end);
-                    let slice = self.text.slice(char_start..char_end);
-                    let code_content = slice.to_string();
+            if let Some(lang) = language
+                && !code_block.content_range.is_empty()
+            {
+                // Extract code content
+                let char_start = self.text.byte_to_char(code_block.content_range.start);
+                let char_end = self.text.byte_to_char(code_block.content_range.end);
+                let slice = self.text.slice(char_start..char_end);
+                let code_content = slice.to_string();
 
-                    // Highlight and adjust spans to absolute positions
-                    let mut spans = self.highlighter.highlight(&code_content, &lang);
-                    for span in &mut spans {
-                        span.range.start += code_block.content_range.start;
-                        span.range.end += code_block.content_range.start;
-                    }
-                    highlights.push((code_block.block_range.clone(), spans));
+                // Highlight and adjust spans to absolute positions
+                let mut spans = self.highlighter.highlight(&code_content, &lang);
+                for span in &mut spans {
+                    span.range.start += code_block.content_range.start;
+                    span.range.end += code_block.content_range.start;
                 }
+                highlights.push((code_block.block_range.clone(), spans));
             }
         }
 
