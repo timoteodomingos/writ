@@ -604,6 +604,24 @@ impl EditorState {
         result
     }
 
+    /// Find the byte range of the list_item containing the given byte offset.
+    /// Returns None if not inside a list_item.
+    fn find_list_item_range(&self, byte_offset: usize) -> Option<std::ops::Range<usize>> {
+        let tree = self.buffer.tree()?;
+        let root = tree.block_tree().root_node();
+        let node = root.descendant_for_byte_range(byte_offset, byte_offset)?;
+
+        // Walk up to find the containing list_item
+        let mut current = Some(node);
+        while let Some(n) = current {
+            if n.kind() == "list_item" {
+                return Some(n.start_byte()..n.end_byte());
+            }
+            current = n.parent();
+        }
+        None
+    }
+
     /// Set the line prefix, replacing current markers.
     fn set_line_prefix(&mut self, new_prefix: &str) {
         let cursor_offset = self.cursor().offset;
@@ -1038,45 +1056,164 @@ impl Editor {
     }
 
     fn toggle_checkbox(&mut self, line_number: usize, cx: &mut Context<Self>) {
-        let lines = self.state.buffer.lines();
-        let Some(line) = lines.get(line_number) else {
-            return;
+        // Extract all needed values before any mutations
+        let (is_checked, checkbox_content_start, checkbox_content_end, line_range_start) = {
+            let lines = self.state.buffer.lines();
+            let Some(line) = lines.get(line_number) else {
+                return;
+            };
+
+            let Some(is_checked) = line.checkbox() else {
+                return;
+            };
+
+            let line_text = self.state.buffer.slice_cow(line.range.clone());
+            let checkbox_pattern = if is_checked { "[x]" } else { "[ ]" };
+            let alt_pattern = if is_checked { "[X]" } else { "" };
+
+            let checkbox_offset = line_text.find(checkbox_pattern).or_else(|| {
+                if !alt_pattern.is_empty() {
+                    line_text.find(alt_pattern)
+                } else {
+                    None
+                }
+            });
+
+            let Some(relative_offset) = checkbox_offset else {
+                return;
+            };
+
+            let checkbox_content_start = line.range.start + relative_offset + 1;
+            let checkbox_content_end = checkbox_content_start + 1;
+            (
+                is_checked,
+                checkbox_content_start,
+                checkbox_content_end,
+                line.range.start,
+            )
         };
 
-        let Some(is_checked) = line.checkbox() else {
-            return;
-        };
-
-        let line_text = self.state.buffer.slice_cow(line.range.clone());
-        let checkbox_pattern = if is_checked { "[x]" } else { "[ ]" };
-        let alt_pattern = if is_checked { "[X]" } else { "" };
-
-        let checkbox_offset = line_text.find(checkbox_pattern).or_else(|| {
-            if !alt_pattern.is_empty() {
-                line_text.find(alt_pattern)
-            } else {
-                None
-            }
-        });
-
-        let Some(relative_offset) = checkbox_offset else {
-            return;
-        };
-
-        let checkbox_content_start = line.range.start + relative_offset + 1;
-        let checkbox_content_end = checkbox_content_start + 1;
         let new_content = if is_checked { " " } else { "x" };
-        let cursor_before = self.cursor().offset;
+        let mut cursor_pos = self.cursor().offset;
 
+        // Find the list_item range before mutations
+        let list_item_range = self.state.find_list_item_range(line_range_start);
+
+        // Toggle the checkbox
         self.state.buffer.replace(
             checkbox_content_start..checkbox_content_end,
             new_content,
-            cursor_before,
+            cursor_pos,
         );
 
-        self.state.selection = Selection::new(cursor_before, cursor_before);
+        // Toggle strikethrough on all lines in the list item
+        if let Some(item_range) = list_item_range {
+            let start_line = self.state.buffer.byte_to_line(item_range.start);
+            let end_line = self
+                .state
+                .buffer
+                .byte_to_line(item_range.end.saturating_sub(1));
+
+            // Process lines in reverse order so byte offsets remain valid
+            for line_idx in (start_line..=end_line).rev() {
+                let adjustment = self.toggle_line_strikethrough(line_idx, !is_checked, cursor_pos);
+                cursor_pos = (cursor_pos as isize + adjustment) as usize;
+            }
+        }
+
+        self.state.selection = Selection::new(cursor_pos, cursor_pos);
 
         cx.notify();
+    }
+
+    /// Add or remove strikethrough (`~~`) from a line's content.
+    /// Only wraps the text content after all markers (including indent).
+    /// Returns the cursor adjustment (positive if content added before cursor, negative if removed).
+    fn toggle_line_strikethrough(
+        &mut self,
+        line_idx: usize,
+        add_strikethrough: bool,
+        cursor_pos: usize,
+    ) -> isize {
+        let lines = self.state.buffer.lines();
+        let Some(line) = lines.get(line_idx) else {
+            return 0;
+        };
+
+        // Get content start (after all markers including indent)
+        let content_start = line.content_start();
+        let content_end = line.range.end;
+
+        // Skip if no content range
+        if content_start >= content_end {
+            return 0;
+        }
+
+        let content = self.state.buffer.slice_cow(content_start..content_end);
+        let trimmed = content.trim();
+
+        // Skip empty or whitespace-only content
+        if trimmed.is_empty() {
+            return 0;
+        }
+
+        if add_strikethrough {
+            // Don't add if already has strikethrough
+            if trimmed.starts_with("~~") && trimmed.ends_with("~~") {
+                return 0;
+            }
+
+            // Find where actual content starts and ends (excluding whitespace)
+            let leading_ws = content.len() - content.trim_start().len();
+            let trailing_ws = content.len() - content.trim_end().len();
+
+            let text_start = content_start + leading_ws;
+            let text_end = content_end - trailing_ws;
+
+            // Insert ~~ at end first, then at start (to keep offsets valid)
+            self.state.buffer.insert(text_end, "~~", cursor_pos);
+            self.state.buffer.insert(text_start, "~~", cursor_pos);
+
+            // Calculate cursor adjustment
+            let mut adjustment: isize = 0;
+            if cursor_pos > text_start {
+                adjustment += 2; // opening ~~ inserted before cursor
+            }
+            if cursor_pos > text_end {
+                adjustment += 2; // closing ~~ inserted before cursor
+            }
+            adjustment
+        } else {
+            // Remove ~~ from start and end if present
+            let leading_ws = content.len() - content.trim_start().len();
+            let text_start = content_start + leading_ws;
+
+            if trimmed.starts_with("~~") && trimmed.ends_with("~~") && trimmed.len() >= 4 {
+                // Find the actual positions in buffer
+                let trailing_ws = content.len() - content.trim_end().len();
+                let text_end = content_end - trailing_ws;
+
+                // Remove trailing ~~ first (to keep offsets valid), then leading ~~
+                self.state
+                    .buffer
+                    .delete((text_end - 2)..text_end, cursor_pos);
+                self.state
+                    .buffer
+                    .delete(text_start..(text_start + 2), cursor_pos);
+
+                // Calculate cursor adjustment
+                let mut adjustment: isize = 0;
+                if cursor_pos > text_start + 2 {
+                    adjustment -= 2; // opening ~~ removed before cursor
+                }
+                if cursor_pos > text_end {
+                    adjustment -= 2; // closing ~~ removed before cursor
+                }
+                adjustment
+            } else {
+                0
+            }
+        }
     }
 
     fn insert_text(&mut self, text: &str) {
