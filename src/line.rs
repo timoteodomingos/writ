@@ -602,7 +602,10 @@ impl Line {
                 ..base_font.clone()
             };
 
-            let color: Hsla = if is_link {
+            let color: Hsla = if is_strikethrough {
+                // Strikethrough text uses comment color to appear muted
+                self.theme.border_color.into()
+            } else if is_link {
                 self.theme.link_color.into()
             } else if let Some(highlight_color) = self.get_highlight_color_for_range(start, end) {
                 highlight_color.into()
