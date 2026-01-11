@@ -16,6 +16,30 @@ use crate::marker::{
 };
 use crate::parser::{MarkdownParser, MarkdownTree};
 
+/// Compute the byte range for a line (excludes trailing newline).
+fn compute_line_byte_range(rope: &Rope, line_idx: usize) -> Range<usize> {
+    let start_char = rope.line_to_char(line_idx);
+    let end_char = if line_idx + 1 < rope.len_lines() {
+        rope.line_to_char(line_idx + 1)
+    } else {
+        rope.len_chars()
+    };
+    let start_byte = rope.char_to_byte(start_char);
+    let end_byte = rope.char_to_byte(end_char);
+
+    // Exclude trailing newline
+    let line_slice = rope.line(line_idx);
+    let len = line_slice.len_bytes();
+    let has_newline = line_slice.get_byte(len.saturating_sub(1)) == Some(b'\n');
+    let adjusted_end = if has_newline {
+        end_byte.saturating_sub(1)
+    } else {
+        end_byte
+    };
+
+    start_byte..adjusted_end
+}
+
 /// A snapshot of buffer data for rendering. All fields use Rc for O(1) cloning.
 /// LineMarkers are computed lazily per-line using the nodes cache.
 #[derive(Clone)]
@@ -35,28 +59,8 @@ impl RenderSnapshot {
         self.line_count
     }
 
-    /// Compute the byte range for a line (excludes trailing newline).
     fn line_byte_range(&self, line_idx: usize) -> Range<usize> {
-        let start_char = self.rope.line_to_char(line_idx);
-        let end_char = if line_idx + 1 < self.rope.len_lines() {
-            self.rope.line_to_char(line_idx + 1)
-        } else {
-            self.rope.len_chars()
-        };
-        let start_byte = self.rope.char_to_byte(start_char);
-        let end_byte = self.rope.char_to_byte(end_char);
-
-        // Exclude trailing newline
-        let line_slice = self.rope.line(line_idx);
-        let len = line_slice.len_bytes();
-        let has_newline = line_slice.get_byte(len.saturating_sub(1)) == Some(b'\n');
-        let adjusted_end = if has_newline {
-            end_byte.saturating_sub(1)
-        } else {
-            end_byte
-        };
-
-        start_byte..adjusted_end
+        compute_line_byte_range(&self.rope, line_idx)
     }
 
     /// Compute LineMarkers for a specific line on demand. O(log n) binary search + marker extraction.
@@ -544,26 +548,7 @@ impl BufferContent {
     }
 
     pub fn line_byte_range(&self, line_idx: usize) -> Range<usize> {
-        let start_char = self.text.line_to_char(line_idx);
-        let end_char = if line_idx + 1 < self.text.len_lines() {
-            self.text.line_to_char(line_idx + 1)
-        } else {
-            self.text.len_chars()
-        };
-        let start_byte = self.text.char_to_byte(start_char);
-        let end_byte = self.text.char_to_byte(end_char);
-
-        // Exclude trailing newline
-        let line_slice = self.text.line(line_idx);
-        let len = line_slice.len_bytes();
-        let has_newline = line_slice.get_byte(len.saturating_sub(1)) == Some(b'\n');
-        let adjusted_end = if has_newline {
-            end_byte.saturating_sub(1)
-        } else {
-            end_byte
-        };
-
-        start_byte..adjusted_end
+        compute_line_byte_range(&self.text, line_idx)
     }
 
     fn slice(&self, range: Range<usize>) -> String {
