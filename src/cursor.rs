@@ -38,29 +38,28 @@ impl Cursor {
         let current_line_idx = buffer.byte_to_line(self.offset);
 
         // Check if we're at the end of a marker - if so, jump to start of that marker
-        if let Some(line) = buffer.lines().get(current_line_idx) {
-            // Find if cursor is at the end of any marker
-            for marker in &line.markers {
-                if self.offset == marker.range.end {
-                    // Jump to start of this marker
-                    return Self {
-                        offset: marker.range.start,
-                    };
-                }
+        let line = buffer.line_markers(current_line_idx);
+        // Find if cursor is at the end of any marker
+        for marker in &line.markers {
+            if self.offset == marker.range.end {
+                // Jump to start of this marker
+                return Self {
+                    offset: marker.range.start,
+                };
             }
+        }
 
-            // If we're at line start (after markers or at absolute start),
-            // go to end of previous line
-            if self.offset == line.range.start {
-                if current_line_idx > 0 {
-                    let prev_line_range = buffer.line_byte_range(current_line_idx - 1);
-                    // Position at end of previous line (before the newline)
-                    return Self {
-                        offset: prev_line_range.end.saturating_sub(1),
-                    };
-                }
-                return *self;
+        // If we're at line start (after markers or at absolute start),
+        // go to end of previous line
+        if self.offset == line.range.start {
+            if current_line_idx > 0 {
+                let prev_line_range = buffer.line_byte_range(current_line_idx - 1);
+                // Position at end of previous line (before the newline)
+                return Self {
+                    offset: prev_line_range.end.saturating_sub(1),
+                };
             }
+            return *self;
         }
 
         // Normal character movement
