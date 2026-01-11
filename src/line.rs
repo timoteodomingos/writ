@@ -363,7 +363,7 @@ impl Line {
                 self.cursor_on_line() || self.selection_on_line() || self.fence_visible;
             let fence_text = self.slice(self.line.range.clone());
             let backticks: String = fence_text.chars().take_while(|&c| c == '`').collect();
-            let language = fence_text[backticks.len()..].trim_end();
+            let language = &fence_text[backticks.len()..];
 
             let transparent = Rgba {
                 r: 0.0,
