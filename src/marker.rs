@@ -205,10 +205,13 @@ impl LineMarkers {
                 // Extract actual text from rope to preserve exact formatting
                 MarkerKind::Indent
                 | MarkerKind::ListItem { ordered: false, .. }
-                | MarkerKind::BlockQuote
-                | MarkerKind::TaskList { .. } => {
+                | MarkerKind::BlockQuote => {
                     rope_slice_cow(rope, m.range.start, m.range.end).into_owned()
                 }
+                // For task lists, always produce an unchecked checkbox
+                MarkerKind::TaskList { .. } => rope_slice_cow(rope, m.range.start, m.range.end)
+                    .replace("[x]", "[ ]")
+                    .replace("[X]", "[ ]"),
                 _ => m.kind.continuation().to_string(),
             })
             .collect()
