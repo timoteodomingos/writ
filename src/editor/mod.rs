@@ -433,10 +433,13 @@ impl EditorState {
             current = n.parent();
         }
 
-        let mut list_levels: Vec<(usize, String, bool)> = Vec::new();
+        // (indent, full_marker_text, list_marker_len, is_ordered)
+        // list_marker_len is just the "- " or "1. " part, used for para indent
+        let mut list_levels: Vec<(usize, String, usize, bool)> = Vec::new();
 
         for n in nodes_to_process {
             let mut marker_text = String::new();
+            let mut list_marker_len = 0;
             let mut marker_start = 0;
             let mut is_ordered = false;
 
@@ -444,13 +447,15 @@ impl EditorState {
                 match child.kind() {
                     "list_marker_minus" | "list_marker_plus" | "list_marker_star" => {
                         marker_start = child.start_byte();
-                        marker_text
-                            .push_str(&self.buffer.slice_cow(child.start_byte()..child.end_byte()));
+                        let text = self.buffer.slice_cow(child.start_byte()..child.end_byte());
+                        list_marker_len = text.len();
+                        marker_text.push_str(&text);
                     }
                     "list_marker_dot" | "list_marker_parenthesis" => {
                         marker_start = child.start_byte();
-                        marker_text
-                            .push_str(&self.buffer.slice_cow(child.start_byte()..child.end_byte()));
+                        let text = self.buffer.slice_cow(child.start_byte()..child.end_byte());
+                        list_marker_len = text.len();
+                        marker_text.push_str(&text);
                         is_ordered = true;
                     }
                     "task_list_marker_checked" | "task_list_marker_unchecked" => {
@@ -467,7 +472,7 @@ impl EditorState {
                 let line_start = self.buffer.line_to_byte(line_idx);
                 let absolute_indent = marker_start - line_start;
                 let indent = absolute_indent.saturating_sub(blockquote_prefix.len());
-                list_levels.push((indent, marker_text, is_ordered));
+                list_levels.push((indent, marker_text, list_marker_len, is_ordered));
             }
         }
 
@@ -483,7 +488,7 @@ impl EditorState {
             states.push(blockquote_prefix.clone());
         }
 
-        for (indent, marker, is_ordered) in &list_levels {
+        for (indent, marker, list_marker_len, is_ordered) in &list_levels {
             let sibling_marker = if *is_ordered {
                 Self::increment_ordered_marker(marker)
             } else {
@@ -497,18 +502,23 @@ impl EditorState {
             ));
 
             // Add para indent after each marker level (for continuation paragraphs)
+            // Use list_marker_len (e.g., 2 for "- ") not full marker len (e.g., 6 for "- [ ] ")
+            // because checkbox is a modifier, not part of nesting structure
             if include_para_indent {
                 states.push(format!(
                     "{}{}",
                     blockquote_prefix,
-                    " ".repeat(indent + marker.len())
+                    " ".repeat(indent + list_marker_len)
                 ));
             }
         }
 
         // Add nested marker (deeper list item) after all existing markers
-        if let Some((deepest_indent, deepest_marker, is_ordered)) = list_levels.last() {
-            let deeper_indent = deepest_indent + deepest_marker.len();
+        // Use list_marker_len for nesting depth
+        if let Some((deepest_indent, deepest_marker, list_marker_len, is_ordered)) =
+            list_levels.last()
+        {
+            let deeper_indent = deepest_indent + list_marker_len;
             let nested_marker = if *is_ordered {
                 Self::reset_ordered_marker(deepest_marker)
             } else {
@@ -2302,6 +2312,25 @@ mod tests {
 
             state.tab();
             assert_editor_eq(&state, "- parent item\n  - nested with tab\n|\n");
+        }
+
+        #[test]
+        fn tab_task_list_uses_list_marker_width_not_full_marker() {
+            // Task list "- [ ] " is 6 chars, but para indent should use list marker width (2)
+            // Cycle: ["- [ ] ", "  ", "  - [ ] ", ""]
+            let mut state = editor_with_cursor("- [ ] hey\n\n|");
+
+            state.tab();
+            assert_editor_eq(&state, "- [ ] hey\n\n- [ ] |");
+
+            state.tab();
+            assert_editor_eq(&state, "- [ ] hey\n\n  |"); // 2 spaces, not 6
+
+            state.tab();
+            assert_editor_eq(&state, "- [ ] hey\n\n  - [ ] |"); // nested at 2 spaces
+
+            state.tab();
+            assert_editor_eq(&state, "- [ ] hey\n\n|");
         }
     }
 
