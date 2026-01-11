@@ -154,12 +154,10 @@ impl EditorState {
     fn cursor_code_block_range(&self) -> Option<(usize, usize)> {
         let cursor_offset = self.cursor().offset;
 
-        // Search through pre-collected code blocks
         for code_block in &self.buffer.parsed().code_blocks {
             if cursor_offset >= code_block.block_range.start
                 && cursor_offset < code_block.block_range.end
             {
-                // Convert byte range to line range
                 let start_line = self.buffer.byte_to_line(code_block.block_range.start);
                 let end_line = self
                     .buffer
@@ -262,7 +260,6 @@ impl EditorState {
         let cursor = self.cursor();
         let line_start = cursor.move_to_line_start(&self.buffer).offset;
 
-        // Ignore space at line start or at blockquote content start
         if cursor.offset == line_start || self.cursor_at_blockquote_content_start() {
             return false;
         }
@@ -281,12 +278,10 @@ impl EditorState {
         }
         let line = self.buffer.line_markers(line_idx);
 
-        // Only applies to blockquote-only lines (no lists)
         if !line.is_blockquote_only() {
             return false;
         }
 
-        // Check if cursor is at the content start (right after marker)
         if let Some(marker_range) = line.marker_range() {
             cursor_pos == marker_range.end
         } else {
@@ -335,7 +330,6 @@ impl EditorState {
             return None;
         }
 
-        // Current prefix is simply the text from line start to cursor
         let line_idx = self.buffer.byte_to_line(cursor_offset);
         let line_start = self.buffer.line_to_byte(line_idx);
         let current_prefix = self
@@ -361,8 +355,6 @@ impl EditorState {
         let root = tree.block_tree().root_node();
         let cursor_line_idx = self.buffer.byte_to_line(cursor_offset);
 
-        // To find context, look backward from start of current line until we find structure
-        // This ensures the cycle is consistent regardless of what's on the current line
         let line_start = self.buffer.line_to_byte(cursor_line_idx);
         let lookup_offset = if line_start > 0 { line_start - 1 } else { 0 };
         let node = root.descendant_for_byte_range(lookup_offset, lookup_offset);
@@ -371,19 +363,16 @@ impl EditorState {
             return vec![String::new()];
         };
 
-        // Find the containing structure (list_item, block_quote)
         let context_node = if self.is_in_error_node(node) {
             self.find_context_from_error(node).unwrap_or(node)
         } else {
             node
         };
 
-        // Include para indent if there's a blank line between context and cursor
         let context_line_idx = self.buffer.byte_to_line(context_node.start_byte());
         let has_blank_line_gap = cursor_line_idx > context_line_idx + 1;
         let include_para_indent = has_blank_line_gap || context_node.kind() == "list_item";
 
-        // Walk up to find all containing list_item and block_quote nodes
         let mut nodes_to_process: Vec<tree_sitter::Node> = Vec::new();
         let mut blockquote_prefix = String::new();
         let mut current = Some(context_node);
@@ -405,8 +394,6 @@ impl EditorState {
             current = n.parent();
         }
 
-        // (indent, full_marker_text, list_marker_len, is_ordered)
-        // list_marker_len is just the "- " or "1. " part, used for para indent
         let mut list_levels: Vec<(usize, String, usize, bool)> = Vec::new();
 
         for n in nodes_to_process {
@@ -473,9 +460,6 @@ impl EditorState {
                 sibling_marker
             ));
 
-            // Add para indent after each marker level (for continuation paragraphs)
-            // Use list_marker_len (e.g., 2 for "- ") not full marker len (e.g., 6 for "- [ ] ")
-            // because checkbox is a modifier, not part of nesting structure
             if include_para_indent {
                 states.push(format!(
                     "{}{}",
@@ -485,8 +469,6 @@ impl EditorState {
             }
         }
 
-        // Add nested marker (deeper list item) after all existing markers
-        // Use list_marker_len for nesting depth
         if let Some((deepest_indent, deepest_marker, list_marker_len, is_ordered)) =
             list_levels.last()
         {
@@ -600,10 +582,8 @@ impl EditorState {
         let line_idx = self.buffer.byte_to_line(cursor_offset);
         let line_start = self.buffer.line_to_byte(line_idx);
 
-        // Current prefix is everything from line start to cursor
         let current_prefix_end = cursor_offset;
 
-        // Delete current prefix and insert new one
         if current_prefix_end > line_start {
             self.buffer
                 .delete(line_start..current_prefix_end, cursor_offset);
@@ -613,7 +593,6 @@ impl EditorState {
             self.buffer.insert(line_start, new_prefix, line_start);
         }
 
-        // Update cursor position
         let new_cursor = line_start + new_prefix.len();
         self.selection = Selection::new(new_cursor, new_cursor);
     }
@@ -631,7 +610,6 @@ impl EditorState {
             return;
         };
 
-        // Get the continuation (all markers) for this line
         let continuation = ctx.line.continuation_rope(self.buffer.rope());
         self.insert_text("\n");
         if !continuation.is_empty() {
@@ -650,7 +628,6 @@ impl EditorState {
                 return;
             };
 
-            // Check if line has only blockquote markers (no list markers)
             let has_list = ctx.line.markers.iter().any(|m| {
                 matches!(
                     m.kind,
@@ -664,10 +641,8 @@ impl EditorState {
                 .any(|m| matches!(m.kind, MarkerKind::BlockQuote));
 
             if has_blockquote && !has_list {
-                // Pure blockquote: exit with just indent
                 "  ".to_string()
             } else {
-                // Lists or nested: use nested_paragraph_indent which keeps outer containers
                 ctx.line.nested_paragraph_indent(self.buffer.rope())
             }
         };
@@ -713,15 +688,12 @@ impl EditorState {
 
         let cursor_pos = self.cursor().offset;
 
-        // Check if we're at a marker position - if so, delete the marker atomically
         if let Some((marker_range, _is_indent)) = self.backspace_range_with_type(cursor_pos) {
             self.buffer.delete(marker_range.clone(), cursor_pos);
             self.selection = Selection::new(marker_range.start, marker_range.start);
             return;
         }
 
-        // Otherwise, just delete one character (including newlines)
-        // Use move_left to handle atomic marker jumping for cursor
         let new_pos = cursor_pos - 1;
         self.buffer.delete(new_pos..cursor_pos, cursor_pos);
         self.selection = Selection::new(new_pos, new_pos);
@@ -910,7 +882,6 @@ impl Editor {
     fn reload_file(&mut self, cx: &mut Context<Self>) {
         let Some(path) = &self.file_path else { return };
 
-        // Ignore changes from our own save
         if let Some(last_save_mtime) = self.last_save_mtime
             && let Ok(metadata) = std::fs::metadata(path)
             && let Ok(file_mtime) = metadata.modified()
@@ -1028,7 +999,6 @@ impl Editor {
     }
 
     fn toggle_checkbox(&mut self, line_number: usize, cx: &mut Context<Self>) {
-        // Extract all needed values before any mutations
         let (is_checked, checkbox_content_start, checkbox_content_end, line_range_start) = {
             if line_number >= self.state.buffer.line_count() {
                 return;
@@ -1068,17 +1038,14 @@ impl Editor {
         let new_content = if is_checked { " " } else { "x" };
         let mut cursor_pos = self.cursor().offset;
 
-        // Find the list_item range before mutations
         let list_item_range = self.state.find_list_item_range(line_range_start);
 
-        // Toggle the checkbox
         self.state.buffer.replace(
             checkbox_content_start..checkbox_content_end,
             new_content,
             cursor_pos,
         );
 
-        // Toggle strikethrough on all lines in the list item
         if let Some(item_range) = list_item_range {
             let start_line = self.state.buffer.byte_to_line(item_range.start);
             let end_line = self
@@ -1086,7 +1053,6 @@ impl Editor {
                 .buffer
                 .byte_to_line(item_range.end.saturating_sub(1));
 
-            // Process lines in reverse order so byte offsets remain valid
             for line_idx in (start_line..=end_line).rev() {
                 let adjustment = self.toggle_line_strikethrough(line_idx, !is_checked, cursor_pos);
                 cursor_pos = (cursor_pos as isize + adjustment) as usize;
@@ -1112,11 +1078,9 @@ impl Editor {
         }
         let line = self.state.buffer.line_markers(line_idx);
 
-        // Get content start (after all markers including indent)
         let content_start = line.content_start();
         let content_end = line.range.end;
 
-        // Skip if no content range
         if content_start >= content_end {
             return 0;
         }
@@ -1124,29 +1088,24 @@ impl Editor {
         let content = self.state.buffer.slice_cow(content_start..content_end);
         let trimmed = content.trim();
 
-        // Skip empty or whitespace-only content
         if trimmed.is_empty() {
             return 0;
         }
 
         if add_strikethrough {
-            // Don't add if already has strikethrough
             if trimmed.starts_with("~~") && trimmed.ends_with("~~") {
                 return 0;
             }
 
-            // Find where actual content starts and ends (excluding whitespace)
             let leading_ws = content.len() - content.trim_start().len();
             let trailing_ws = content.len() - content.trim_end().len();
 
             let text_start = content_start + leading_ws;
             let text_end = content_end - trailing_ws;
 
-            // Insert ~~ at end first, then at start (to keep offsets valid)
             self.state.buffer.insert(text_end, "~~", cursor_pos);
             self.state.buffer.insert(text_start, "~~", cursor_pos);
 
-            // Calculate cursor adjustment
             let mut adjustment: isize = 0;
             if cursor_pos > text_start {
                 adjustment += 2; // opening ~~ inserted before cursor
@@ -1156,16 +1115,13 @@ impl Editor {
             }
             adjustment
         } else {
-            // Remove ~~ from start and end if present
             let leading_ws = content.len() - content.trim_start().len();
             let text_start = content_start + leading_ws;
 
             if trimmed.starts_with("~~") && trimmed.ends_with("~~") && trimmed.len() >= 4 {
-                // Find the actual positions in buffer
                 let trailing_ws = content.len() - content.trim_end().len();
                 let text_end = content_end - trailing_ws;
 
-                // Remove trailing ~~ first (to keep offsets valid), then leading ~~
                 self.state
                     .buffer
                     .delete((text_end - 2)..text_end, cursor_pos);
@@ -1173,7 +1129,6 @@ impl Editor {
                     .buffer
                     .delete(text_start..(text_start + 2), cursor_pos);
 
-                // Calculate cursor adjustment
                 let mut adjustment: isize = 0;
                 if cursor_pos > text_start + 2 {
                     adjustment -= 2; // opening ~~ removed before cursor
@@ -1273,13 +1228,10 @@ impl Editor {
             }
             "enter" => {
                 if keystroke.modifiers.shift && keystroke.modifiers.alt {
-                    // Shift+Alt+Enter: indented continuation (nested paragraph)
                     self.shift_alt_enter();
                 } else if keystroke.modifiers.shift {
-                    // Shift+Enter: continue container (add markers)
                     self.shift_enter();
                 } else {
-                    // Enter: raw newline
                     self.enter();
                 }
             }
@@ -1314,7 +1266,6 @@ impl Editor {
                 if let Some(clipboard_item) = cx.read_from_clipboard()
                     && let Some(text) = clipboard_item.text()
                 {
-                    // Context-aware paste: transform content based on cursor position
                     let ctx =
                         PasteContext::from_buffer(&self.state.buffer, self.state.cursor().offset);
                     let transformed = transform_paste(&text, &ctx);
@@ -1349,7 +1300,6 @@ impl Editor {
                         self.insert_text(key_char);
                     }
 
-                    // Auto-insert space after blockquote marker if needed
                     if key_char == ">" {
                         self.state.maybe_complete_blockquote_marker();
                     }
@@ -1534,14 +1484,12 @@ impl Focusable for Editor {
 
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        // Check if buffer changed and sync list state if needed
         let buffer_version = self.state.buffer.version();
         if buffer_version != self.last_synced_version {
             self.last_synced_version = buffer_version;
             self.sync_list_state(cx);
         }
 
-        // Sync dirty state with FileInfo global for title bar
         let file_info = FileInfo::global(cx);
         if file_info.dirty != self.state.buffer.is_dirty() {
             cx.set_global(FileInfo {
@@ -1553,8 +1501,6 @@ impl Render for Editor {
         let theme = self.config.theme.clone();
         let code_font = font(&self.config.code_font);
 
-        // Measure the width of a monospace character for precise indent padding.
-        // We shape a single space character and get its width.
         let text_style = window.text_style();
         let font_size = text_style.font_size.to_pixels(window.rem_size());
         let measure_run = gpui::TextRun {
@@ -1626,7 +1572,6 @@ impl Render for Editor {
                     return;
                 }
                 editor.state.selection = editor.state.selection.extend_to(buffer_offset);
-                // Latch is_selecting once we start dragging - stays true until mouse up
                 editor.is_selecting = true;
                 cx.notify();
             });
@@ -1645,12 +1590,10 @@ impl Render for Editor {
         let entity = cx.entity().clone();
         let on_hover: HoverCallback = Rc::new(
             move |hovering_checkbox, hovering_link_region, _window, cx| {
-                // Read current state without triggering update
                 let (current_checkbox, current_link) = {
                     let editor = entity.read(cx);
                     (editor.hovering_checkbox, editor.hovering_link_region)
                 };
-                // Only call update if state actually changed
                 if current_checkbox != hovering_checkbox || current_link != hovering_link_region {
                     entity.update(cx, |editor, cx| {
                         editor.hovering_checkbox = hovering_checkbox;
@@ -1663,13 +1606,10 @@ impl Render for Editor {
 
         let base_path = self.config.base_path.clone();
 
-        // Handle scroll-to-cursor
-        // Only auto-scroll when cursor line changes (keyboard/edit), not on every render
         let cursor_line = self.state.buffer.byte_to_line(cursor_offset);
         let cursor_line_changed = self.last_cursor_line != Some(cursor_line);
         self.last_cursor_line = Some(cursor_line);
 
-        // Scroll to cursor if the cursor line changed and it's outside the viewport
         if cursor_line_changed {
             if let Some(cursor_bounds) = self.list_state.bounds_for_item(cursor_line) {
                 let viewport = self.list_state.viewport_bounds();
@@ -1678,25 +1618,18 @@ impl Render for Editor {
                 let viewport_top = viewport.origin.y;
                 let viewport_bottom = viewport_top + viewport.size.height;
 
-                // Scroll if cursor line is above or below the viewport
                 if cursor_top < viewport_top || cursor_bottom > viewport_bottom {
                     self.list_state.scroll_to_reveal_item(cursor_line);
                 }
             } else {
-                // Item not yet measured, scroll to reveal it
                 self.list_state.scroll_to_reveal_item(cursor_line);
             }
         }
 
-        // Build the virtualized list
         let line_theme_for_list = line_theme.clone();
         let theme_for_highlights = self.config.theme.clone();
         let snapshot = self.state.buffer.render_snapshot();
-
-        // Compute which code block (if any) the cursor is in, so we can show its fences
         let cursor_code_block = self.state.cursor_code_block_range();
-
-        // Capture is_selecting for the list closure
         let is_selecting = self.is_selecting;
 
         let line_list = div().id("line-list").size_full().child(
@@ -1714,7 +1647,6 @@ impl Render for Editor {
                     })
                     .collect();
 
-                // Show fence if this line is within the code block containing the cursor
                 let fence_visible = cursor_code_block
                     .map(|(start, end)| ix >= start && ix <= end)
                     .unwrap_or(false);

@@ -24,22 +24,17 @@ impl PasteContext {
         let line_idx = buffer.byte_to_line(cursor_offset);
         let current_line = buffer.line_markers(line_idx);
 
-        // Check if in code block using pre-collected code blocks
         let mut in_code_block = false;
         for code_block in &buffer.parsed().code_blocks {
             if cursor_offset >= code_block.block_range.start
                 && cursor_offset < code_block.block_range.end
             {
-                // We're inside this code block's range
-                // But on the opening fence line, we're not "inside" for paste purposes
-                // Check if cursor is past the content_range start (i.e., past the opening fence)
                 in_code_block = cursor_offset >= code_block.content_range.start
                     || code_block.content_range.is_empty();
                 break;
             }
         }
 
-        // Build blockquote prefix from markers
         let bq_depth = current_line
             .markers
             .iter()
@@ -58,34 +53,29 @@ impl PasteContext {
 fn normalize(text: &str) -> String {
     text.replace("\r\n", "\n")
         .replace('\r', "\n")
-        .replace(['\u{201C}', '\u{201D}'], "\"") // curly double quotes " "
-        .replace(['\u{2018}', '\u{2019}'], "'") // curly single quotes ' '
+        .replace(['\u{201C}', '\u{201D}'], "\"")
+        .replace(['\u{2018}', '\u{2019}'], "'")
 }
 
 /// Transform pasted content based on context.
 pub fn transform_paste(text: &str, ctx: &PasteContext) -> String {
     let normalized = normalize(text);
 
-    // In code block: paste literally
     if ctx.in_code_block {
         return normalized;
     }
 
-    // No blockquote: paste as-is
     if ctx.blockquote_prefix.is_empty() {
         return normalized;
     }
 
-    // In blockquote: prefix continuation lines
     normalized
         .lines()
         .enumerate()
         .map(|(i, line)| {
             if i == 0 {
-                // First line: cursor is already positioned, no prefix needed
                 line.to_string()
             } else if line.is_empty() {
-                // Empty line: just the blockquote marker without trailing space
                 ctx.blockquote_prefix.trim_end().to_string()
             } else {
                 format!("{}{}", ctx.blockquote_prefix, line)
@@ -106,7 +96,6 @@ mod tests {
         }
     }
 
-    // Scenario 1: Paste "hello world" on normal line
     #[test]
     fn test_paste_simple_text_normal_line() {
         let ctx = ctx(false, "");
@@ -114,7 +103,6 @@ mod tests {
         assert_eq!(result, "hello world");
     }
 
-    // Scenario 2: Paste multiline on normal line
     #[test]
     fn test_paste_multiline_normal_line() {
         let ctx = ctx(false, "");
@@ -122,7 +110,6 @@ mod tests {
         assert_eq!(result, "line 1\nline 2");
     }
 
-    // Scenario 3: Paste "> quoted" in code block (literal)
     #[test]
     fn test_paste_blockquote_in_code_block() {
         let ctx = ctx(true, "");
@@ -130,7 +117,6 @@ mod tests {
         assert_eq!(result, "> quoted");
     }
 
-    // Scenario 4: Paste "# heading" in code block (literal)
     #[test]
     fn test_paste_heading_in_code_block() {
         let ctx = ctx(true, "");
@@ -138,7 +124,6 @@ mod tests {
         assert_eq!(result, "# heading");
     }
 
-    // Scenario 5: Paste "hello" in blockquote
     #[test]
     fn test_paste_simple_text_in_blockquote() {
         let ctx = ctx(false, "> ");
@@ -146,7 +131,6 @@ mod tests {
         assert_eq!(result, "hello");
     }
 
-    // Scenario 6: Paste multiline in blockquote
     #[test]
     fn test_paste_multiline_in_blockquote() {
         let ctx = ctx(false, "> ");
@@ -154,7 +138,6 @@ mod tests {
         assert_eq!(result, "line 1\n> line 2");
     }
 
-    // Scenario 7: Paste paragraphs in blockquote
     #[test]
     fn test_paste_paragraphs_in_blockquote() {
         let ctx = ctx(false, "> ");
@@ -162,7 +145,6 @@ mod tests {
         assert_eq!(result, "para 1\n>\n> para 2");
     }
 
-    // Scenario 8: Paste multiline in nested blockquote
     #[test]
     fn test_paste_multiline_in_nested_blockquote() {
         let ctx = ctx(false, "> > ");
@@ -170,7 +152,6 @@ mod tests {
         assert_eq!(result, "line 1\n> > line 2");
     }
 
-    // Scenario 9: Paste multiline on list item (no markers added)
     #[test]
     fn test_paste_multiline_on_list_item() {
         let ctx = ctx(false, "");
@@ -178,7 +159,6 @@ mod tests {
         assert_eq!(result, "line 1\nline 2");
     }
 
-    // Scenario 10: Paste curly quotes → straight quotes
     #[test]
     fn test_paste_curly_quotes_normalized() {
         let ctx = ctx(false, "");
@@ -186,7 +166,6 @@ mod tests {
         assert_eq!(result, "\"hello\"");
     }
 
-    // Additional: single curly quotes
     #[test]
     fn test_paste_single_curly_quotes_normalized() {
         let ctx = ctx(false, "");
@@ -194,7 +173,6 @@ mod tests {
         assert_eq!(result, "'hello'");
     }
 
-    // Additional: CRLF normalization
     #[test]
     fn test_paste_crlf_normalized() {
         let ctx = ctx(false, "");
@@ -202,7 +180,6 @@ mod tests {
         assert_eq!(result, "line 1\nline 2");
     }
 
-    // Additional: CR normalization
     #[test]
     fn test_paste_cr_normalized() {
         let ctx = ctx(false, "");

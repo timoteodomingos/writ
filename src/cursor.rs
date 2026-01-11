@@ -37,24 +37,18 @@ impl Cursor {
 
         let current_line_idx = buffer.byte_to_line(self.offset);
 
-        // Check if we're at the end of a marker - if so, jump to start of that marker
         let line = buffer.line_markers(current_line_idx);
-        // Find if cursor is at the end of any marker
         for marker in &line.markers {
             if self.offset == marker.range.end {
-                // Jump to start of this marker
                 return Self {
                     offset: marker.range.start,
                 };
             }
         }
 
-        // If we're at line start (after markers or at absolute start),
-        // go to end of previous line
         if self.offset == line.range.start {
             if current_line_idx > 0 {
                 let prev_line_range = buffer.line_byte_range(current_line_idx - 1);
-                // Position at end of previous line (line_byte_range already excludes newline)
                 return Self {
                     offset: prev_line_range.end,
                 };
@@ -62,7 +56,6 @@ impl Cursor {
             return *self;
         }
 
-        // Normal character movement
         let rope = buffer.rope();
         let char_idx = rope.byte_to_char(self.offset);
         if char_idx == 0 {
@@ -83,19 +76,15 @@ impl Cursor {
 
         let current_line_idx = buffer.byte_to_line(self.offset);
 
-        // Check if we're at the start of a marker - if so, jump to end of that marker
         let line = buffer.line_markers(current_line_idx);
-        // Find if cursor is at the start of any marker (checking from outermost to innermost)
         for marker in line.markers.iter().rev() {
             if self.offset == marker.range.start {
-                // Jump to end of this marker
                 return Self {
                     offset: marker.range.end,
                 };
             }
         }
 
-        // Normal character movement
         let rope = buffer.rope();
         let char_idx = rope.byte_to_char(self.offset);
         let char_count = rope.len_chars();
@@ -107,24 +96,18 @@ impl Cursor {
         }
     }
 
-    /// Move cursor up. Blank lines are not skipped.
     pub fn move_up(&self, buffer: &Buffer) -> Self {
         let current_line = buffer.byte_to_line(self.offset);
         if current_line == 0 {
-            // Already on first line, go to start
             return Self::start();
         }
 
         let target_line = current_line - 1;
-
-        // Get column offset within current line
         let line_start = buffer.line_to_byte(current_line);
         let column = self.offset - line_start;
 
-        // Move to target line, same column (or end of line if shorter)
         let target_line_range = buffer.line_byte_range(target_line);
         let target_line_start = target_line_range.start;
-        // line_byte_range already excludes the trailing newline
         let target_line_len = target_line_range.len();
 
         let new_column = column.min(target_line_len);
@@ -133,26 +116,20 @@ impl Cursor {
         }
     }
 
-    /// Move cursor down. Blank lines are not skipped.
     pub fn move_down(&self, buffer: &Buffer) -> Self {
         let current_line = buffer.byte_to_line(self.offset);
         let line_count = buffer.line_count();
 
         if current_line >= line_count - 1 {
-            // Already on last line, go to end
             return Self::end(buffer);
         }
 
         let target_line = current_line + 1;
-
-        // Get column offset within current line
         let line_start = buffer.line_to_byte(current_line);
         let column = self.offset - line_start;
 
-        // Move to target line, same column (or end of line if shorter)
         let target_line_range = buffer.line_byte_range(target_line);
         let target_line_start = target_line_range.start;
-        // line_byte_range already excludes the trailing newline
         let target_line_len = target_line_range.len();
 
         let new_column = column.min(target_line_len);
@@ -171,14 +148,9 @@ impl Cursor {
     pub fn move_to_line_end(&self, buffer: &Buffer) -> Self {
         let current_line = buffer.byte_to_line(self.offset);
         let line_range = buffer.line_byte_range(current_line);
-        // End of line is end of range minus newline (if not last line)
-        let is_last_line = current_line + 1 >= buffer.line_count();
-        let line_end = if is_last_line {
-            line_range.end
-        } else {
-            line_range.end.saturating_sub(1)
-        };
-        Self { offset: line_end }
+        Self {
+            offset: line_range.end,
+        }
     }
 
     pub fn move_to_start(&self) -> Self {
@@ -277,10 +249,7 @@ impl Selection {
             return Self::new(offset.min(len_bytes), offset.min(len_bytes));
         }
 
-        // Helper to check if a character is part of a word
         let is_word_char = |c: char| c.is_alphanumeric() || c == '_';
-
-        // Convert byte offset to char index
         let char_idx = rope.byte_to_char(offset);
         let char_count = rope.len_chars();
 
@@ -288,16 +257,13 @@ impl Selection {
             return Self::new(offset, offset);
         }
 
-        // Get the character at the cursor position
         let c = rope.char(char_idx);
 
-        // If we're on a non-word character, just select that character
         if !is_word_char(c) {
             let char_end = rope.char_to_byte(char_idx + 1);
             return Self::new(offset, char_end.min(len_bytes));
         }
 
-        // Find word start (scan backward from char_idx)
         let mut start_char_idx = char_idx;
         for i in (0..char_idx).rev() {
             if is_word_char(rope.char(i)) {
@@ -307,7 +273,6 @@ impl Selection {
             }
         }
 
-        // Find word end (scan forward from char_idx)
         let mut end_char_idx = char_idx + 1;
         for i in (char_idx + 1)..char_count {
             if is_word_char(rope.char(i)) {
@@ -324,27 +289,8 @@ impl Selection {
 
     pub fn select_line_at(offset: usize, buffer: &Buffer) -> Self {
         let line = buffer.byte_to_line(offset);
-        let line_start = buffer.line_to_byte(line);
-
-        // Find line end (excluding newline)
-        let line_count = buffer.line_count();
-        let next_line_start = if line + 1 < line_count {
-            buffer.line_to_byte(line + 1)
-        } else {
-            buffer.len_bytes()
-        };
-
-        // Exclude the newline character if present
-        let line_end = if next_line_start > line_start
-            && next_line_start <= buffer.len_bytes()
-            && line + 1 < line_count
-        {
-            next_line_start - 1
-        } else {
-            next_line_start
-        };
-
-        Self::new(line_start, line_end)
+        let line_range = buffer.line_byte_range(line);
+        Self::new(line_range.start, line_range.end)
     }
 }
 

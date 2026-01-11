@@ -195,9 +195,7 @@ impl BufferContent {
         self.version
     }
 
-    /// Recompute cached nodes, inline styles, and lines cache from current tree.
     fn update_caches(&mut self) {
-        // Update parsed nodes cache for lazy LineMarkers computation and code block queries
         self.parsed = Rc::new(
             self.tree
                 .as_ref()
@@ -205,7 +203,6 @@ impl BufferContent {
                 .unwrap_or_default(),
         );
 
-        // Update inline styles cache
         self.inline_styles = Rc::new(if let Some(ref tree) = self.tree {
             extract_all_inline_styles(tree, &self.text)
         } else {
@@ -240,7 +237,6 @@ impl BufferContent {
             new_end_position,
         };
 
-        // Modify rope
         if delete_len > 0 {
             let char_start = self.text.byte_to_char(offset);
             let char_end = self.text.byte_to_char(offset + delete_len);
@@ -251,22 +247,14 @@ impl BufferContent {
             self.text.insert(char_offset, to_insert);
         }
 
-        // Incremental reparse
         if let Some(ref mut tree) = self.tree {
             tree.edit(&edit);
         }
         self.tree = self.parser.parse_rope(&self.text, self.tree.as_ref());
 
-        // Normalize ordered list numbering (may re-parse)
         self.normalize_ordered_lists();
-
-        // Update cached nodes and inline styles
         self.update_caches();
-
-        // Invalidate code highlight cache
         self.code_highlight_cache.valid = false;
-
-        // Increment version for change detection
         self.version += 1;
     }
 
@@ -481,7 +469,6 @@ impl BufferContent {
     /// Ensures code highlight cache is valid before creating the snapshot.
     /// All Rc clones are O(1). LineMarkers are computed lazily per-line.
     pub fn render_snapshot(&mut self) -> RenderSnapshot {
-        // Ensure code highlight cache is valid
         if !self.code_highlight_cache.valid {
             self.rebuild_code_highlight_cache();
         }
@@ -526,7 +513,6 @@ impl BufferContent {
         }
         let line = self.line_markers(line_idx);
 
-        // Code fences are always content
         if line.is_fence() {
             return false;
         }
@@ -577,12 +563,10 @@ impl BufferContent {
     }
 
     pub fn code_highlights_for_range(&mut self, range: Range<usize>) -> Vec<HighlightSpan> {
-        // Rebuild cache if invalid
         if !self.code_highlight_cache.valid {
             self.rebuild_code_highlight_cache();
         }
 
-        // Find highlights that overlap with the range
         let mut result = Vec::new();
         for (block_range, highlights) in self.code_highlight_cache.highlights.iter() {
             if range.start < block_range.end && range.end > block_range.start {
@@ -600,9 +584,7 @@ impl BufferContent {
         let highlights = Rc::make_mut(&mut self.code_highlight_cache.highlights);
         highlights.clear();
 
-        // Iterate over pre-collected code blocks from ParsedNodes
         for code_block in &self.parsed.code_blocks {
-            // Extract language from info_string if present
             let language = code_block.info_string_range.as_ref().and_then(|range| {
                 let char_start = self.text.byte_to_char(range.start);
                 let char_end = self.text.byte_to_char(range.end);
@@ -611,17 +593,14 @@ impl BufferContent {
                 if lang.is_empty() { None } else { Some(lang) }
             });
 
-            // Only highlight if there's a language and content
             if let Some(lang) = language
                 && !code_block.content_range.is_empty()
             {
-                // Extract code content
                 let char_start = self.text.byte_to_char(code_block.content_range.start);
                 let char_end = self.text.byte_to_char(code_block.content_range.end);
                 let slice = self.text.slice(char_start..char_end);
                 let code_content = slice.to_string();
 
-                // Highlight and adjust spans to absolute positions
                 let mut spans = self.highlighter.highlight(&code_content, &lang);
                 for span in &mut spans {
                     span.range.start += code_block.content_range.start;

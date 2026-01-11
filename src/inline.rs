@@ -9,10 +9,6 @@ use tree_sitter::Node;
 
 use crate::parser::MarkdownTree;
 
-// ============================================================================
-// Types
-// ============================================================================
-
 /// Style attributes for inline text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct TextStyle {
@@ -83,20 +79,14 @@ pub struct StyledRegion {
     pub is_image: bool,
 }
 
-// ============================================================================
-// Extraction
-// ============================================================================
-
 /// Extract all inline styles from a markdown tree.
 /// Returns a flat Vec sorted by start byte position.
 pub fn extract_all_inline_styles(tree: &MarkdownTree, rope: &Rope) -> Vec<StyledRegion> {
     let mut styles = Vec::new();
 
-    // Walk the block tree to find all "inline" nodes
     let block_root = tree.block_tree().root_node();
     collect_from_block_tree(&block_root, tree, rope, &mut styles);
 
-    // Sort by start position for efficient lookup
     styles.sort_by_key(|s| s.full_range.start);
 
     styles
@@ -165,10 +155,6 @@ fn collect_from_inline_tree(node: Node, rope: &Rope, styles: &mut Vec<StyledRegi
         collect_from_inline_tree(child, rope, styles);
     }
 }
-
-// ============================================================================
-// Region extraction helpers
-// ============================================================================
 
 fn extract_emphasis_region(node: &Node, style: TextStyle) -> Option<StyledRegion> {
     let full_start = node.start_byte();
@@ -328,10 +314,6 @@ fn extract_image_region(node: &Node, rope: &Rope) -> Option<StyledRegion> {
         is_image: true,
     })
 }
-
-// ============================================================================
-// Lookup
-// ============================================================================
 
 /// Get inline styles that overlap with a byte range.
 /// Uses binary search for efficient lookup.

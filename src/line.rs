@@ -73,7 +73,6 @@ impl Line {
         fence_visible: bool,
         is_selecting: bool,
     ) -> Self {
-        // Compute substitution once upfront
         let substitution = {
             let s = line.substitution_rope(&rope);
             if s.is_empty() { None } else { Some(s) }
@@ -193,7 +192,6 @@ impl Line {
         let range = &self.line.range;
 
         if let Some(marker_range) = self.line.marker_range() {
-            // Content starts after all markers (they're rendered as spacers)
             marker_range.end..range.end
         } else {
             range.clone()
@@ -251,16 +249,12 @@ impl Line {
             let run_start = pos;
             let run_end = pos + run.len;
 
-            // Check if this run overlaps with the selection
             if run_end <= selection_range.start || run_start >= selection_range.end {
-                // No overlap, keep run as-is
                 result.push(run);
             } else {
-                // There's overlap - we may need to split the run
                 let sel_start_in_run = selection_range.start.saturating_sub(run_start);
                 let sel_end_in_run = (selection_range.end - run_start).min(run.len);
 
-                // Part before selection (if any)
                 if sel_start_in_run > 0 {
                     result.push(TextRun {
                         len: sel_start_in_run,
@@ -272,7 +266,6 @@ impl Line {
                     });
                 }
 
-                // Selected part
                 let selected_len = sel_end_in_run - sel_start_in_run;
                 if selected_len > 0 {
                     result.push(TextRun {
@@ -285,7 +278,6 @@ impl Line {
                     });
                 }
 
-                // Part after selection (if any)
                 if sel_end_in_run < run.len {
                     result.push(TextRun {
                         len: run.len - sel_end_in_run,
@@ -305,7 +297,6 @@ impl Line {
     }
 
     fn build_styled_content(&self) -> (String, Vec<TextRun>) {
-        // For headings, use full line range so we can show/hide the marker
         let content_range = if self.line.heading_level().is_some() {
             self.line.range.clone()
         } else {
@@ -367,10 +358,7 @@ impl Line {
             }
         }
 
-        // Handle fence lines specially - use full line range, not content_range
         if self.line.is_fence() {
-            // Always build the fence text (for consistent click positioning),
-            // but use transparent color when hidden
             let is_visible =
                 self.cursor_on_line() || self.selection_on_line() || self.fence_visible;
             let fence_text = self.slice(self.line.range.clone());
@@ -407,8 +395,6 @@ impl Line {
             return (display_text, runs);
         }
 
-        // Handle thematic break lines - always build the text for consistent click positioning,
-        // but use transparent color when cursor is not on line
         if self.line.is_thematic_break() {
             let is_visible = self.cursor_on_line() || self.selection_on_line();
             let break_text = self.slice(self.line.range.clone());
@@ -436,12 +422,9 @@ impl Line {
         }
 
         let mut boundaries: Vec<usize> = vec![content_range.start, content_range.end];
-        // Show all markers if there's a selection on this line OR if we're actively dragging on this line
-        // The is_selecting flag prevents oscillation when dragging near inline styles
         let show_all_markers =
             self.selection_on_line() || (self.is_selecting && self.cursor_on_line());
 
-        // For headings, add marker boundary so it can be hidden separately
         if self.line.heading_level().is_some()
             && let Some(marker_range) = self.line.marker_range()
         {
@@ -479,12 +462,9 @@ impl Line {
         boundaries.sort();
         boundaries.dedup();
 
-        // Pre-compute hidden ranges and style ranges once (O(n) in regions)
-        // to avoid O(n²) nested loops
         let mut hidden_ranges: Vec<(usize, usize)> = Vec::new();
         let mut style_ranges: Vec<(Range<usize>, &StyledRegion)> = Vec::new();
 
-        // For headings, hide the marker (e.g., "## ") when cursor is not on line
         if self.line.heading_level().is_some()
             && !self.cursor_on_line()
             && !self.selection_on_line()
@@ -493,12 +473,10 @@ impl Line {
             hidden_ranges.push((marker_range.start, marker_range.end));
         }
 
-        // Pre-clone fonts once outside the loop to avoid repeated clones
         let is_code_block = self.is_code_block_line();
         let base_code_font = &self.theme.code_font;
         let base_text_font = &self.theme.text_font;
 
-        // Pre-compute ordered list marker range (if any) - should use code_font for consistent width
         let ordered_marker_range = self
             .line
             .markers
@@ -511,13 +489,12 @@ impl Line {
                 && self.cursor_offset <= region.full_range.end;
 
             if !show_all_markers && !cursor_inside {
-                // Opening delimiter range
                 let opening_start = region.full_range.start.max(content_range.start);
                 let opening_end = region.content_range.start.min(content_range.end);
                 if opening_end > opening_start {
                     hidden_ranges.push((opening_start, opening_end));
                 }
-                // Closing delimiter range
+
                 let closing_start = region.content_range.end.max(content_range.start);
                 let closing_end = region.full_range.end.min(content_range.end);
                 if closing_end > closing_start {
@@ -525,7 +502,6 @@ impl Line {
                 }
             }
 
-            // Compute the effective style range for this region
             let style_range = if show_all_markers || cursor_inside {
                 region.full_range.clone()
             } else {
@@ -542,7 +518,6 @@ impl Line {
                 continue;
             }
 
-            // Check if this segment is hidden (O(h) where h = hidden ranges, typically small)
             let is_hidden = hidden_ranges
                 .iter()
                 .any(|&(h_start, h_end)| start >= h_start && end <= h_end);
@@ -561,7 +536,6 @@ impl Line {
             let mut is_strikethrough = false;
             let mut is_link = false;
 
-            // Check which styles apply to this segment
             for (style_range, region) in &style_ranges {
                 if style_range.start <= start && end <= style_range.end {
                     is_bold = is_bold || region.style.bold;
@@ -570,14 +544,12 @@ impl Line {
                     is_strikethrough = is_strikethrough || region.style.strikethrough;
                     is_link = is_link || region.link_url.is_some();
 
-                    // Early exit if all styles are already set
                     if is_bold && is_italic && is_code && is_strikethrough && is_link {
                         break;
                     }
                 }
             }
 
-            // Check if this segment is within the ordered list marker range
             let in_ordered_marker = ordered_marker_range
                 .as_ref()
                 .is_some_and(|r| start < r.end && end > r.start);
@@ -603,7 +575,6 @@ impl Line {
             };
 
             let color: Hsla = if is_strikethrough {
-                // Strikethrough text uses comment color to appear muted
                 self.theme.border_color.into()
             } else if is_link {
                 self.theme.link_color.into()
@@ -708,8 +679,6 @@ impl Line {
         if !self.cursor_on_line() {
             return false;
         }
-        // Fence, thematic break, and heading lines render the marker as text content (no spacers),
-        // so cursor is never "in marker area" for them
         if self.line.is_fence()
             || self.line.is_thematic_break()
             || self.line.heading_level().is_some()
@@ -724,7 +693,6 @@ impl Line {
         if !self.cursor_on_line() {
             return None;
         }
-        // If cursor is in marker area, it will be rendered in the spacers
         if self.cursor_in_marker_area() {
             return None;
         }
@@ -732,7 +700,6 @@ impl Line {
     }
 
     fn buffer_to_visual_pos(&self, buffer_offset: usize, display_text: &str) -> usize {
-        // For fence, thematic break, and headings (when markers visible), use full line range.
         let content_range = if self.line.is_fence()
             || self.line.is_thematic_break()
             || (self.line.heading_level().is_some()
@@ -770,19 +737,15 @@ impl Line {
         }
 
         if hidden_regions.is_empty() {
-            // No inline style hidden regions - simple offset calculation
-            // Add heading_marker_len to skip hidden heading marker
             return (content_range.start + heading_marker_len + visual_index).min(line_end);
         }
 
-        // Has inline style hidden regions - need to iterate
         let mut buffer_pos = content_range.start + heading_marker_len;
         let mut visible_count = 0usize;
 
         while buffer_pos < content_range.end && visible_count < visual_index {
             let mut is_hidden = false;
 
-            // Check inline style hidden regions
             for &(opening_start, opening_end, closing_start, closing_end) in hidden_regions {
                 if (buffer_pos >= opening_start && buffer_pos < opening_end)
                     || (buffer_pos >= closing_start && buffer_pos < closing_end)
@@ -827,8 +790,6 @@ impl Line {
         canvas(
             move |_bounds, _window, _cx| text_layout.position_for_index(cursor_pos),
             move |bounds, cursor_pos_result, window: &mut Window, cx| {
-                // Fall back to start of bounds if position_for_index returns None
-                // (can happen for empty/single-space lines)
                 let pos =
                     cursor_pos_result.unwrap_or_else(|| point(bounds.origin.x, bounds.origin.y));
 
@@ -866,15 +827,12 @@ impl Line {
         .size_full()
     }
 
-    /// Render a cursor at a specific character position within a spacer.
-    /// `char_offset` is how many characters into the spacer the cursor should be.
     fn render_spacer_cursor(&self, char_offset: usize) -> impl IntoElement {
         let cursor_color = self.theme.cursor_color;
         let cursor_font = self.theme.text_font.clone();
         let char_width = self.theme.monospace_char_width;
         let x_pos = char_width * char_offset as f32;
 
-        // Use canvas to match exact same rendering as render_cursor
         canvas(
             move |_bounds, _window, _cx| (),
             move |bounds, _, window: &mut Window, cx| {
@@ -904,7 +862,6 @@ impl Line {
 
                 let cursor_height = cursor_font_size * 1.2;
                 let y_offset = (line_height - cursor_height) / 2.0;
-                // Paint relative to canvas bounds origin
                 let cursor_pos = point(bounds.origin.x + x_pos, bounds.origin.y + y_offset);
                 let _ = shaped_cursor.paint(cursor_pos, cursor_height, window, cx);
             },
@@ -932,12 +889,10 @@ impl IntoElement for Line {
         let line_number = self.line.line_number;
         let line_range = self.line.range.clone();
 
-        // Check if this is a standalone image line (but cursor not on it)
         let standalone_image = self.standalone_image_url().map(|url| {
             let source = self.resolve_image_source(url);
             let on_click = self.on_click.clone();
             let line_end = line_range.end;
-            // Resolve URL for opening (handles relative paths)
             let open_url = if url.starts_with("http://") || url.starts_with("https://") {
                 url.to_string()
             } else {
@@ -953,7 +908,6 @@ impl IntoElement for Line {
             (source, on_click, line_end, open_url)
         });
 
-        // If standalone image and cursor is NOT on line, just show the image
         if let Some((source, on_click, line_end, open_url)) = standalone_image.clone()
             && !self.cursor_on_line()
             && !self.selection_on_line()
@@ -961,7 +915,6 @@ impl IntoElement for Line {
             return line_base(line_number).child(img(source).max_w_full().on_mouse_down(
                 MouseButton::Left,
                 move |event: &MouseDownEvent, window, cx| {
-                    // Ctrl/Cmd + click opens the image
                     if event.modifiers.control || event.modifiers.platform {
                         let _ = open::that(&open_url);
                         return;
@@ -981,7 +934,6 @@ impl IntoElement for Line {
 
         let (display_text, mut runs) = self.build_styled_content();
 
-        // For empty lines, use a single space so the line has height and cursor can render
         let display_text = if display_text.is_empty() {
             runs.push(self.text_run(1, self.line_font(), self.theme.text_color));
             " ".to_string()
@@ -989,12 +941,10 @@ impl IntoElement for Line {
             display_text
         };
 
-        // Compute cursor position after any empty-line substitution
         let visual_cursor_pos = self.compute_visual_cursor_pos(&display_text);
 
         let visual_selection = self.compute_visual_selection_range(&display_text);
 
-        // Apply selection background color to runs
         let runs = if let Some(ref sel_range) = visual_selection {
             self.apply_selection_to_runs(runs, sel_range.clone())
         } else {
@@ -1007,17 +957,10 @@ impl IntoElement for Line {
 
         let mut line_div = line_base(line_number).relative().flex().flex_row();
 
-        // Collect spacers for blockquotes and indent markers
-        // Markers are stored innermost-to-outermost (highest byte first),
-        // so iterate in reverse for left-to-right visual layout
         let mut spacers: Vec<gpui::Div> = Vec::new();
-
-        // Check if cursor is in the marker area
         let cursor_in_markers = self.cursor_in_marker_area();
 
         for marker in self.line.markers.iter().rev() {
-            // Check if cursor is within this specific marker's range
-            // Use exclusive end so cursor at boundary belongs to the next marker
             let cursor_in_this_marker = cursor_in_markers
                 && self.cursor_offset >= marker.range.start
                 && self.cursor_offset < marker.range.end;
@@ -1040,10 +983,8 @@ impl IntoElement for Line {
                     };
                 }
                 MarkerKind::BlockQuote => {
-                    // Create a spacer for wrap indentation with border as separate child
                     let marker_chars = marker.range.len();
                     let spacer_width = self.theme.monospace_char_width * marker_chars as f32;
-                    // Use dimmed color for blockquote border inside checked tasks
                     let border_color = if self.line.in_checked_task {
                         self.theme.selection_color
                     } else {
@@ -1067,7 +1008,6 @@ impl IntoElement for Line {
                     if cursor_in_this_marker {
                         spacer = spacer.child(self.render_spacer_cursor(cursor_char_offset));
                     }
-                    // Add click handler to snap cursor to start of marker
                     if let Some(ref on_click) = self.on_click {
                         let on_click = on_click.clone();
                         let marker_start = marker.range.start;
@@ -1085,7 +1025,6 @@ impl IntoElement for Line {
                             },
                         );
                     }
-                    // Add drag handler for selection
                     if let Some(ref on_drag) = self.on_drag {
                         let on_drag = on_drag.clone();
                         let marker_start = marker.range.start;
@@ -1119,7 +1058,7 @@ impl IntoElement for Line {
 
                         let hr_line = div()
                             .absolute()
-                            .top_1_2() // Center vertically
+                            .top_1_2()
                             .left_0()
                             .right_0()
                             .h(px(1.0))
@@ -1157,7 +1096,6 @@ impl IntoElement for Line {
                     }
                 }
                 MarkerKind::Indent => {
-                    // Create empty spacer for indent (nested paragraph under list item)
                     let indent_chars = marker.range.len();
                     let spacer_width = self.theme.monospace_char_width * indent_chars as f32;
                     let mut spacer = div().relative().w(spacer_width).min_h_full();
@@ -1167,7 +1105,6 @@ impl IntoElement for Line {
                     if cursor_in_this_marker {
                         spacer = spacer.child(self.render_spacer_cursor(cursor_char_offset));
                     }
-                    // Add click handler to snap cursor to start of marker
                     if let Some(ref on_click) = self.on_click {
                         let on_click = on_click.clone();
                         let marker_start = marker.range.start;
@@ -1185,7 +1122,6 @@ impl IntoElement for Line {
                             },
                         );
                     }
-                    // Add drag handler for selection
                     if let Some(ref on_drag) = self.on_drag {
                         let on_drag = on_drag.clone();
                         let marker_start = marker.range.start;
@@ -1203,7 +1139,6 @@ impl IntoElement for Line {
                     unordered_marker,
                     ..
                 } => {
-                    // Create a spacer containing the list marker (bullet or number)
                     let marker_chars = marker.range.len();
                     let spacer_width = self.theme.monospace_char_width * marker_chars as f32;
 
@@ -1213,7 +1148,6 @@ impl IntoElement for Line {
                         unordered_marker.map_or("• ", |m| m.bullet()).to_string()
                     };
 
-                    // Use dimmed color for markers inside checked tasks
                     let marker_color = if self.line.in_checked_task {
                         self.theme.selection_color
                     } else {
@@ -1236,7 +1170,6 @@ impl IntoElement for Line {
                             marker_label.child(self.render_spacer_cursor(cursor_char_offset));
                     }
 
-                    // Add click handler to snap cursor to start of marker
                     if let Some(ref on_click) = self.on_click {
                         let on_click = on_click.clone();
                         let marker_start = marker.range.start;
@@ -1254,7 +1187,6 @@ impl IntoElement for Line {
                             },
                         );
                     }
-                    // Add drag handler for selection
                     if let Some(ref on_drag) = self.on_drag {
                         let on_drag = on_drag.clone();
                         let marker_start = marker.range.start;
@@ -1274,14 +1206,12 @@ impl IntoElement for Line {
                     checked,
                     unordered_marker,
                 } => {
-                    // Create a spacer containing the checkbox
                     let marker_chars = marker.range.len();
                     let spacer_width = self.theme.monospace_char_width * marker_chars as f32;
 
                     let checkbox_str = if *checked { "[x] " } else { "[ ] " };
                     let bullet = unordered_marker.map_or("• ", |m| m.bullet());
 
-                    // Build bullet div with click handler to position cursor at marker start
                     let mut bullet_div = div()
                         .font_family(self.theme.code_font.family.clone())
                         .text_color(self.theme.text_color)
@@ -1305,7 +1235,6 @@ impl IntoElement for Line {
                         );
                     }
 
-                    // Build checkbox div with click handler (keep stop_propagation for toggle)
                     let mut checkbox_div = div()
                         .font_family(self.theme.code_font.family.clone())
                         .text_color(self.theme.link_color)
@@ -1340,7 +1269,6 @@ impl IntoElement for Line {
                         marker_label =
                             marker_label.child(self.render_spacer_cursor(cursor_char_offset));
                     }
-                    // Add drag handler for selection
                     if let Some(ref on_drag) = self.on_drag {
                         let on_drag = on_drag.clone();
                         let marker_start = marker.range.start;
@@ -1359,25 +1287,18 @@ impl IntoElement for Line {
             }
         }
 
-        let mut text_container = div()
-            .relative()
-            .flex_1()
-            .min_w_0() // Allow flex item to shrink below content size for text wrapping
-            .child(styled_text);
+        let mut text_container = div().relative().flex_1().min_w_0().child(styled_text);
 
         if let Some(cursor_pos) = visual_cursor_pos {
             text_container =
                 text_container.child(self.render_cursor(cursor_pos, text_layout.clone()));
         }
 
-        // Add all spacers, then the text container
         for spacer in spacers {
             line_div = line_div.child(spacer);
         }
         line_div = line_div.child(text_container);
 
-        // Shared calculations for click and drag handlers
-        // For fence, thematic break, and heading lines, use full line range
         let content_range_for_handlers = if self.line.is_fence()
             || self.line.is_thematic_break()
             || self.line.heading_level().is_some()
@@ -1387,7 +1308,6 @@ impl IntoElement for Line {
             self.content_range()
         };
 
-        // For headings, the marker is hidden when cursor is not on line
         let heading_marker_len = if self.line.heading_level().is_some()
             && !self.cursor_on_line()
             && !self.selection_on_line()
@@ -1397,7 +1317,6 @@ impl IntoElement for Line {
             0
         };
 
-        // Show all markers if there's a selection on this line OR if we're actively dragging on this line
         let show_all_markers =
             self.selection_on_line() || (self.is_selecting && self.cursor_on_line());
         let cursor_offset = self.cursor_offset;
@@ -1499,9 +1418,6 @@ impl IntoElement for Line {
                         }
                     }
 
-                    // Mark as handled so editor's on_mouse_down knows not to override cursor
-                    // But don't stop propagation - allow the event to bubble up to the editor
-                    // so that on_drag can be triggered for drag selection outside bounds
                     window.prevent_default();
                     on_click(
                         buffer_offset,
@@ -1519,7 +1435,6 @@ impl IntoElement for Line {
             let on_hover = self.on_hover.clone();
             let layout_for_move = text_layout;
             let line_range_for_move = self.line.range.clone();
-            // Use shared content_range (already accounts for fence, thematic break, heading)
             let content_range = content_range_for_handlers;
 
             let checkbox_hover_range: Option<Range<usize>> = if self.line.checkbox().is_some() {
@@ -1586,7 +1501,6 @@ impl IntoElement for Line {
             });
         }
 
-        // If cursor is on a standalone image line, show image below the text
         if let Some((source, _, _, open_url)) = standalone_image {
             return div()
                 .id(line_number)
