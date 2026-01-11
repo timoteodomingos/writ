@@ -746,6 +746,51 @@ impl Line {
         visual_pos.min(display_text.len())
     }
 
+    /// Convert a visual position (index into display text, after prefix) to a buffer offset.
+    /// This is the inverse of `buffer_to_visual_pos` and accounts for hidden regions.
+    fn visual_to_buffer_pos(
+        visual_index: usize,
+        content_range: &Range<usize>,
+        heading_marker_len: usize,
+        hidden_regions: &[(usize, usize, usize, usize)],
+        line_end: usize,
+    ) -> usize {
+        if content_range.start >= content_range.end {
+            return content_range.start;
+        }
+
+        if hidden_regions.is_empty() {
+            // No inline style hidden regions - simple offset calculation
+            // Add heading_marker_len to skip hidden heading marker
+            return (content_range.start + heading_marker_len + visual_index).min(line_end);
+        }
+
+        // Has inline style hidden regions - need to iterate
+        let mut buffer_pos = content_range.start + heading_marker_len;
+        let mut visible_count = 0usize;
+
+        while buffer_pos < content_range.end && visible_count < visual_index {
+            let mut is_hidden = false;
+
+            // Check inline style hidden regions
+            for &(opening_start, opening_end, closing_start, closing_end) in hidden_regions {
+                if (buffer_pos >= opening_start && buffer_pos < opening_end)
+                    || (buffer_pos >= closing_start && buffer_pos < closing_end)
+                {
+                    is_hidden = true;
+                    break;
+                }
+            }
+
+            if !is_hidden {
+                visible_count += 1;
+            }
+            buffer_pos += 1;
+        }
+
+        buffer_pos.min(line_end)
+    }
+
     fn compute_visual_selection_range(&self, display_text: &str) -> Option<Range<usize>> {
         let selection = self.selection_range.as_ref()?;
         let line_range = &self.line.range;
@@ -1308,29 +1353,68 @@ impl IntoElement for Line {
         }
         line_div = line_div.child(text_container);
 
+        // Shared calculations for click and drag handlers
+        // For fence, thematic break, and heading lines, use full line range
+        let content_range_for_handlers = if self.line.is_fence()
+            || self.line.is_thematic_break()
+            || self.line.heading_level().is_some()
+        {
+            self.line.range.clone()
+        } else {
+            self.content_range()
+        };
+
+        // For headings, the marker is hidden when cursor is not on line
+        let heading_marker_len = if self.line.heading_level().is_some()
+            && !self.cursor_on_line()
+            && !self.selection_on_line()
+        {
+            self.line.marker_range().map(|r| r.len()).unwrap_or(0)
+        } else {
+            0
+        };
+
+        let show_all_markers = self.selection_on_line();
+        let cursor_offset = self.cursor_offset;
+        let hidden_regions: Vec<(usize, usize, usize, usize)> = if show_all_markers {
+            Vec::new()
+        } else {
+            self.inline_styles
+                .iter()
+                .filter_map(|region| {
+                    let cursor_inside = cursor_offset >= region.full_range.start
+                        && cursor_offset <= region.full_range.end;
+                    if cursor_inside {
+                        None
+                    } else {
+                        let opening_start = region
+                            .full_range
+                            .start
+                            .max(content_range_for_handlers.start);
+                        let opening_end = region
+                            .content_range
+                            .start
+                            .min(content_range_for_handlers.end);
+                        let closing_start = region
+                            .content_range
+                            .end
+                            .max(content_range_for_handlers.start);
+                        let closing_end = region.full_range.end.min(content_range_for_handlers.end);
+                        Some((opening_start, opening_end, closing_start, closing_end))
+                    }
+                })
+                .collect()
+        };
+
+        let prefix_len = self.get_substitution().map(|s| s.len()).unwrap_or(0);
+
         if let Some(ref on_click) = self.on_click {
             let on_click = on_click.clone();
             let on_checkbox = self.on_checkbox.clone();
             let layout_for_click = text_layout.clone();
-            // For fence, thematic break, and heading lines, use full line range
-            let content_range = if self.line.is_fence()
-                || self.line.is_thematic_break()
-                || self.line.heading_level().is_some()
-            {
-                self.line.range.clone()
-            } else {
-                self.content_range()
-            };
+            let content_range = content_range_for_handlers.clone();
             let line_number = self.line.line_number;
-            // For headings, the marker is hidden when cursor is not on line
-            let heading_marker_len = if self.line.heading_level().is_some()
-                && !self.cursor_on_line()
-                && !self.selection_on_line()
-            {
-                self.line.marker_range().map(|r| r.len()).unwrap_or(0)
-            } else {
-                0
-            };
+            let hidden_regions = hidden_regions.clone();
 
             let checkbox_click_range: Option<std::ops::Range<usize>> =
                 if self.line.checkbox().is_some() {
@@ -1354,31 +1438,6 @@ impl IntoElement for Line {
                 })
                 .collect();
 
-            let show_all_markers = self.selection_on_line();
-            let cursor_offset = self.cursor_offset;
-            let hidden_regions: Vec<(usize, usize, usize, usize)> = if show_all_markers {
-                Vec::new()
-            } else {
-                self.inline_styles
-                    .iter()
-                    .filter_map(|region| {
-                        let cursor_inside = cursor_offset >= region.full_range.start
-                            && cursor_offset <= region.full_range.end;
-                        if cursor_inside {
-                            None
-                        } else {
-                            let opening_start = region.full_range.start.max(content_range.start);
-                            let opening_end = region.content_range.start.min(content_range.end);
-                            let closing_start = region.content_range.end.max(content_range.start);
-                            let closing_end = region.full_range.end.min(content_range.end);
-                            Some((opening_start, opening_end, closing_start, closing_end))
-                        }
-                    })
-                    .collect()
-            };
-
-            let prefix_len = self.get_substitution().map(|s| s.len()).unwrap_or(0);
-
             line_div = line_div.on_mouse_down(
                 MouseButton::Left,
                 move |event: &MouseDownEvent, window, cx| {
@@ -1398,46 +1457,13 @@ impl IntoElement for Line {
 
                     let content_visual_index = visual_index.saturating_sub(prefix_len);
 
-                    let buffer_offset = {
-                        if content_range.start >= content_range.end {
-                            content_range.start
-                        } else if hidden_regions.is_empty() {
-                            // No inline style hidden regions - simple offset calculation
-                            // Add heading_marker_len to skip hidden heading marker
-                            (content_range.start + heading_marker_len + content_visual_index)
-                                .min(content_range.end)
-                        } else {
-                            // Has inline style hidden regions - need to iterate
-                            let mut buffer_pos = content_range.start + heading_marker_len;
-                            let mut visible_count = 0usize;
-
-                            while buffer_pos < content_range.end
-                                && visible_count < content_visual_index
-                            {
-                                let mut is_hidden = false;
-
-                                // Check inline style hidden regions
-                                for &(opening_start, opening_end, closing_start, closing_end) in
-                                    &hidden_regions
-                                {
-                                    if (buffer_pos >= opening_start && buffer_pos < opening_end)
-                                        || (buffer_pos >= closing_start && buffer_pos < closing_end)
-                                    {
-                                        is_hidden = true;
-                                        break;
-                                    }
-                                }
-
-                                if !is_hidden {
-                                    visible_count += 1;
-                                }
-                                buffer_pos += 1;
-                            }
-
-                            buffer_pos.min(content_range.end)
-                        }
-                    };
-                    let buffer_offset = buffer_offset.min(line_range.end);
+                    let buffer_offset = Line::visual_to_buffer_pos(
+                        content_visual_index,
+                        &content_range,
+                        heading_marker_len,
+                        &hidden_regions,
+                        line_range.end,
+                    );
 
                     if event.modifiers.control || event.modifiers.platform {
                         for (range, url) in &link_regions {
@@ -1468,13 +1494,8 @@ impl IntoElement for Line {
             let on_hover = self.on_hover.clone();
             let layout_for_move = text_layout;
             let line_range_for_move = self.line.range.clone();
-            // For fence and thematic break lines, use full line range since we render the entire line
-            let content_range = if self.line.is_fence() || self.line.is_thematic_break() {
-                self.line.range.clone()
-            } else {
-                self.content_range()
-            };
-            let prefix_len = self.get_substitution().map(|s| s.len()).unwrap_or(0);
+            // Use shared content_range (already accounts for fence, thematic break, heading)
+            let content_range = content_range_for_handlers;
 
             let checkbox_hover_range: Option<Range<usize>> = if self.line.checkbox().is_some() {
                 self.get_substitution().and_then(|prefix| {
@@ -1503,8 +1524,13 @@ impl IntoElement for Line {
                     };
 
                     let content_visual_index = visual_index.saturating_sub(prefix_len);
-                    let buffer_offset =
-                        (content_range.start + content_visual_index).min(line_range_for_move.end);
+                    let buffer_offset = Line::visual_to_buffer_pos(
+                        content_visual_index,
+                        &content_range,
+                        heading_marker_len,
+                        &hidden_regions,
+                        line_range_for_move.end,
+                    );
                     on_drag(buffer_offset, window, cx);
                 }
 
@@ -1519,8 +1545,13 @@ impl IntoElement for Line {
                     });
 
                     let content_visual_index = visual_index.saturating_sub(prefix_len);
-                    let buffer_offset =
-                        (content_range.start + content_visual_index).min(line_range_for_move.end);
+                    let buffer_offset = Line::visual_to_buffer_pos(
+                        content_visual_index,
+                        &content_range,
+                        heading_marker_len,
+                        &hidden_regions,
+                        line_range_for_move.end,
+                    );
                     let hovering_link_region = link_content_ranges
                         .iter()
                         .any(|range| buffer_offset >= range.start && buffer_offset < range.end);
