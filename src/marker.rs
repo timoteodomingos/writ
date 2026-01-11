@@ -672,13 +672,15 @@ pub fn parse_continuation(rope: &Rope, start: usize, end: usize) -> Vec<Marker> 
             let (marker, indent) =
                 marker_from_node(kind, rope, start + node_start, start + node_end);
 
-            // Only add indent markers AFTER the first marker (for whitespace between markers).
-            // Leading whitespace before the first marker is handled by a separate
-            // whitespace-only block_continuation node in the original tree.
-            if let Some(ind) = indent
-                && first_marker_seen
-            {
-                markers.insert(0, ind);
+            // Add indent markers for whitespace before markers.
+            // For the first marker, only add if the indent starts at offset 0
+            // (meaning the leading whitespace is part of this block_continuation,
+            // not a separate whitespace-only node).
+            if let Some(ref ind) = indent {
+                let indent_starts_at_zero = ind.range.start == start;
+                if first_marker_seen || indent_starts_at_zero {
+                    markers.insert(0, ind.clone());
+                }
             }
             if let Some(m) = marker {
                 first_marker_seen = true;
