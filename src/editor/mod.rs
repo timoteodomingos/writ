@@ -38,19 +38,19 @@ use crate::marker::{LineMarkers, MarkerKind};
 use crate::paste::{PasteContext, transform_paste};
 
 /// Context about the line at the cursor, used by smart editing actions.
-pub struct LineContext<'a> {
+pub struct LineContext {
     /// Current cursor byte offset.
     pub cursor_offset: usize,
     /// Index of the current line.
     pub line_idx: usize,
     /// The current line's markers.
-    pub line: &'a LineMarkers,
+    pub line: LineMarkers,
     /// Whether content after markers is empty (whitespace only).
     pub is_empty: bool,
     /// Whether this line has any container markers.
     pub has_container: bool,
     /// The previous line, if any.
-    pub prev_line: Option<&'a LineMarkers>,
+    pub prev_line: Option<LineMarkers>,
 }
 
 /// Core editing state that can be used without GPUI context.
@@ -134,9 +134,13 @@ impl EditorState {
         self.selection = Selection::new(new_pos, new_pos);
     }
 
-    fn find_line_at(&self, byte_pos: usize) -> Option<(usize, &LineMarkers)> {
+    fn find_line_at(&self, byte_pos: usize) -> Option<(usize, LineMarkers)> {
         let idx = self.buffer.byte_to_line(byte_pos);
-        self.buffer.lines().get(idx).map(|line| (idx, line))
+        if idx < self.buffer.line_count() {
+            Some((idx, self.buffer.line_markers(idx)))
+        } else {
+            None
+        }
     }
 
     /// Check if the cursor is inside a code block (between opening and closing fences,
@@ -185,16 +189,19 @@ impl EditorState {
 
     /// Get context about the line at the cursor.
     /// Returns None if the cursor is not on a valid line.
-    fn line_context(&self) -> Option<LineContext<'_>> {
+    fn line_context(&self) -> Option<LineContext> {
         let cursor_offset = self.cursor().offset;
         let line_idx = self.buffer.byte_to_line(cursor_offset);
-        let lines = self.buffer.lines();
-        let line = lines.get(line_idx)?;
+        if line_idx >= self.buffer.line_count() {
+            return None;
+        }
+        let line = self.buffer.line_markers(line_idx);
 
-        let is_empty = !self.line_has_content(line);
+        let is_empty = !self.line_has_content(&line);
+        let has_container = line.has_container();
 
         let prev_line = if line_idx > 0 {
-            lines.get(line_idx - 1)
+            Some(self.buffer.line_markers(line_idx - 1))
         } else {
             None
         };
@@ -204,7 +211,7 @@ impl EditorState {
             line_idx,
             line,
             is_empty,
-            has_container: line.has_container(),
+            has_container,
             prev_line,
         })
     }
@@ -225,11 +232,11 @@ impl EditorState {
             return false;
         }
 
-        let lines = self.buffer.lines();
         let line_idx = self.buffer.byte_to_line(cursor_pos);
-        let Some(line) = lines.get(line_idx) else {
+        if line_idx >= self.buffer.line_count() {
             return false;
-        };
+        }
+        let line = self.buffer.line_markers(line_idx);
 
         let has_blockquote = line
             .markers
@@ -269,10 +276,10 @@ impl EditorState {
     fn cursor_at_blockquote_content_start(&self) -> bool {
         let cursor_pos = self.cursor().offset;
         let line_idx = self.buffer.byte_to_line(cursor_pos);
-        let lines = self.buffer.lines();
-        let Some(line) = lines.get(line_idx) else {
+        if line_idx >= self.buffer.line_count() {
             return false;
-        };
+        }
+        let line = self.buffer.line_markers(line_idx);
 
         // Only applies to blockquote-only lines (no lists)
         if !line.is_blockquote_only() {
@@ -786,7 +793,7 @@ impl Editor {
     pub fn with_config(content: &str, config: EditorConfig, cx: &mut Context<Self>) -> Self {
         let focus_handle = cx.focus_handle();
         let state = EditorState::new(content);
-        let line_count = state.buffer.lines().len();
+        let line_count = state.buffer.line_count();
         let list_state = ListState::new(line_count, ListAlignment::Top, px(200.0));
 
         Self {
@@ -950,7 +957,7 @@ impl Editor {
     /// Sync the list state count with the buffer line count.
     /// Also triggers autosave if enabled.
     fn sync_list_state(&mut self, cx: &mut Context<Self>) {
-        let line_count = self.state.buffer.lines().len();
+        let line_count = self.state.buffer.line_count();
         let current_count = self.list_state.item_count();
 
         if line_count != current_count {
@@ -1023,10 +1030,10 @@ impl Editor {
     fn toggle_checkbox(&mut self, line_number: usize, cx: &mut Context<Self>) {
         // Extract all needed values before any mutations
         let (is_checked, checkbox_content_start, checkbox_content_end, line_range_start) = {
-            let lines = self.state.buffer.lines();
-            let Some(line) = lines.get(line_number) else {
+            if line_number >= self.state.buffer.line_count() {
                 return;
-            };
+            }
+            let line = self.state.buffer.line_markers(line_number);
 
             let Some(is_checked) = line.checkbox() else {
                 return;
@@ -1100,10 +1107,10 @@ impl Editor {
         add_strikethrough: bool,
         cursor_pos: usize,
     ) -> isize {
-        let lines = self.state.buffer.lines();
-        let Some(line) = lines.get(line_idx) else {
+        if line_idx >= self.state.buffer.line_count() {
             return 0;
-        };
+        }
+        let line = self.state.buffer.line_markers(line_idx);
 
         // Get content start (after all markers including indent)
         let content_start = line.content_start();
@@ -1760,7 +1767,7 @@ impl Render for Editor {
                     }
                     // Check if click is below the last line (empty space at bottom)
                     // Only then do we jump cursor to end of buffer
-                    let line_count = editor.state.buffer.lines().len();
+                    let line_count = editor.state.buffer.line_count();
                     if line_count > 0 {
                         if let Some(last_line_bounds) =
                             editor.list_state.bounds_for_item(line_count - 1)

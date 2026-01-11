@@ -168,9 +168,6 @@ pub struct BufferContent {
     /// Sorted by start position for efficient binary search lookup.
     /// Wrapped in Rc for O(1) cloning in render snapshots.
     inline_styles: Rc<Vec<StyledRegion>>,
-    /// Cached line markers for BufferContent methods that need them.
-    /// This is separate from the render path - only computed when needed.
-    lines_cache: Option<Vec<LineMarkers>>,
     /// Version counter, incremented on each edit. Used by Editor to detect changes.
     version: u64,
 }
@@ -185,7 +182,6 @@ impl BufferContent {
             code_highlight_cache: CodeHighlightCache::default(),
             parsed: Rc::new(ParsedNodes::default()),
             inline_styles: Rc::new(Vec::new()),
-            lines_cache: None,
             version: NEXT_VERSION.fetch_add(1, Ordering::Relaxed),
         }
     }
@@ -211,38 +207,6 @@ impl BufferContent {
         } else {
             Vec::new()
         });
-
-        // Rebuild lines cache for BufferContent methods (non-rendering path)
-        let mut byte_offset = 0;
-        self.lines_cache = Some(
-            self.text
-                .lines()
-                .enumerate()
-                .map(|(line_idx, line_slice)| {
-                    let start_byte = byte_offset;
-                    let len = line_slice.len_bytes();
-                    byte_offset += len;
-                    // Rope's lines() includes trailing newline; exclude it from range
-                    let has_newline = line_slice.get_byte(len.saturating_sub(1)) == Some(b'\n');
-                    let end_byte = if has_newline {
-                        start_byte + len - 1
-                    } else {
-                        start_byte + len
-                    };
-
-                    let markers =
-                        markers_at_from_infos(&self.parsed.nodes, &self.text, start_byte, end_byte);
-                    let in_checked_task = is_line_in_checked_task(&self.parsed.nodes, start_byte);
-
-                    LineMarkers {
-                        range: start_byte..end_byte,
-                        line_number: line_idx,
-                        markers,
-                        in_checked_task,
-                    }
-                })
-                .collect(),
-        );
     }
 
     fn apply_edit(&mut self, offset: usize, to_delete: &str, to_insert: &str) {
@@ -501,10 +465,12 @@ impl BufferContent {
         }
     }
 
-    pub fn lines(&self) -> &[LineMarkers] {
-        self.lines_cache
-            .as_ref()
-            .expect("lines_cache should be populated by update_caches")
+    /// Compute LineMarkers for all lines. Only available in tests.
+    #[cfg(test)]
+    pub fn lines(&self) -> Vec<LineMarkers> {
+        (0..self.line_count())
+            .map(|i| self.line_markers(i))
+            .collect()
     }
 
     /// Create a render snapshot for efficient virtualized rendering.
@@ -551,11 +517,10 @@ impl BufferContent {
     /// Returns true if the line has no content (only markers or whitespace).
     /// Code fences are always considered content.
     pub fn is_line_empty(&self, line_idx: usize) -> bool {
-        let lines = self.lines();
-        if line_idx >= lines.len() {
+        if line_idx >= self.line_count() {
             return true;
         }
-        let line = &lines[line_idx];
+        let line = self.line_markers(line_idx);
 
         // Code fences are always content
         if line.is_fence() {
@@ -587,7 +552,18 @@ impl BufferContent {
         };
         let start_byte = self.text.char_to_byte(start_char);
         let end_byte = self.text.char_to_byte(end_char);
-        start_byte..end_byte
+
+        // Exclude trailing newline
+        let line_slice = self.text.line(line_idx);
+        let len = line_slice.len_bytes();
+        let has_newline = line_slice.get_byte(len.saturating_sub(1)) == Some(b'\n');
+        let adjusted_end = if has_newline {
+            end_byte.saturating_sub(1)
+        } else {
+            end_byte
+        };
+
+        start_byte..adjusted_end
     }
 
     fn slice(&self, range: Range<usize>) -> String {
@@ -815,7 +791,6 @@ impl FromStr for Buffer {
             code_highlight_cache: CodeHighlightCache::default(),
             parsed: Rc::new(ParsedNodes::default()),
             inline_styles: Rc::new(Vec::new()),
-            lines_cache: None,
             version: NEXT_VERSION.fetch_add(1, Ordering::Relaxed),
         };
 

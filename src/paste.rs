@@ -22,7 +22,7 @@ impl PasteContext {
     /// Analyze the buffer at cursor position to determine paste context.
     pub fn from_buffer(buffer: &Buffer, cursor_offset: usize) -> Self {
         let line_idx = buffer.byte_to_line(cursor_offset);
-        let current_line = buffer.lines().get(line_idx);
+        let current_line = buffer.line_markers(line_idx);
 
         // Check if in code block using pre-collected code blocks
         let mut in_code_block = false;
@@ -40,16 +40,12 @@ impl PasteContext {
         }
 
         // Build blockquote prefix from markers
-        let blockquote_prefix = if let Some(line) = current_line {
-            let bq_depth = line
-                .markers
-                .iter()
-                .filter(|m| matches!(m.kind, MarkerKind::BlockQuote))
-                .count();
-            "> ".repeat(bq_depth)
-        } else {
-            String::new()
-        };
+        let bq_depth = current_line
+            .markers
+            .iter()
+            .filter(|m| matches!(m.kind, MarkerKind::BlockQuote))
+            .count();
+        let blockquote_prefix = "> ".repeat(bq_depth);
 
         Self {
             in_code_block,

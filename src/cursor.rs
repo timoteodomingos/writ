@@ -54,9 +54,9 @@ impl Cursor {
         if self.offset == line.range.start {
             if current_line_idx > 0 {
                 let prev_line_range = buffer.line_byte_range(current_line_idx - 1);
-                // Position at end of previous line (before the newline)
+                // Position at end of previous line (line_byte_range already excludes newline)
                 return Self {
-                    offset: prev_line_range.end.saturating_sub(1),
+                    offset: prev_line_range.end,
                 };
             }
             return *self;
@@ -84,15 +84,14 @@ impl Cursor {
         let current_line_idx = buffer.byte_to_line(self.offset);
 
         // Check if we're at the start of a marker - if so, jump to end of that marker
-        if let Some(line) = buffer.lines().get(current_line_idx) {
-            // Find if cursor is at the start of any marker (checking from outermost to innermost)
-            for marker in line.markers.iter().rev() {
-                if self.offset == marker.range.start {
-                    // Jump to end of this marker
-                    return Self {
-                        offset: marker.range.end,
-                    };
-                }
+        let line = buffer.line_markers(current_line_idx);
+        // Find if cursor is at the start of any marker (checking from outermost to innermost)
+        for marker in line.markers.iter().rev() {
+            if self.offset == marker.range.start {
+                // Jump to end of this marker
+                return Self {
+                    offset: marker.range.end,
+                };
             }
         }
 
@@ -125,8 +124,8 @@ impl Cursor {
         // Move to target line, same column (or end of line if shorter)
         let target_line_range = buffer.line_byte_range(target_line);
         let target_line_start = target_line_range.start;
-        // Subtract 1 for newline if not the last line
-        let target_line_len = target_line_range.len().saturating_sub(1);
+        // line_byte_range already excludes the trailing newline
+        let target_line_len = target_line_range.len();
 
         let new_column = column.min(target_line_len);
         Self {
@@ -153,13 +152,8 @@ impl Cursor {
         // Move to target line, same column (or end of line if shorter)
         let target_line_range = buffer.line_byte_range(target_line);
         let target_line_start = target_line_range.start;
-        // Subtract 1 for newline if not the last line
-        let is_last_line = target_line + 1 >= buffer.line_count();
-        let target_line_len = if is_last_line {
-            target_line_range.len()
-        } else {
-            target_line_range.len().saturating_sub(1)
-        };
+        // line_byte_range already excludes the trailing newline
+        let target_line_len = target_line_range.len();
 
         let new_column = column.min(target_line_len);
         Self {
