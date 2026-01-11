@@ -17,6 +17,8 @@ pub struct NodeInfo {
     pub parent_kind: Option<&'static str>,
     /// For fenced_code_block_delimiter nodes: true if this is the first (opening) delimiter
     pub is_first_fence_delimiter: bool,
+    /// True if this node is inside a checked task list item
+    pub in_checked_task: bool,
 }
 
 /// The unordered list marker character.
@@ -76,6 +78,8 @@ pub struct LineMarkers {
     pub range: Range<usize>,
     pub line_number: usize,
     pub markers: Vec<Marker>,
+    /// True if this line is inside a checked task list item
+    pub in_checked_task: bool,
 }
 
 impl LineMarkers {
@@ -745,14 +749,45 @@ pub fn collect_nodes<'a>(root: &Node<'a>) -> Vec<Node<'a>> {
     }
 }
 
+/// Check if a list_item node contains a checked task marker.
+fn list_item_is_checked_task(node: &Node) -> bool {
+    let mut child_cursor = node.walk();
+    for child in node.children(&mut child_cursor) {
+        if child.kind() == "task_list_marker_checked" {
+            return true;
+        }
+    }
+    false
+}
+
 /// Collect all nodes as owned NodeInfo structs (no lifetimes).
 /// Used for lazy LineMarkers computation during rendering.
 pub fn collect_node_infos(root: &Node) -> Vec<NodeInfo> {
     let mut cursor = root.walk();
     let mut nodes = Vec::new();
+    // Stack of (node_end_byte, is_checked_task) for tracking checked task scope
+    let mut checked_task_stack: Vec<(usize, bool)> = Vec::new();
 
     loop {
         let node = cursor.node();
+
+        // Pop completed scopes from the stack
+        while let Some(&(end_byte, _)) = checked_task_stack.last() {
+            if node.start_byte() >= end_byte {
+                checked_task_stack.pop();
+            } else {
+                break;
+            }
+        }
+
+        // Check if we're entering a list_item that is a checked task
+        if node.kind() == "list_item" {
+            let is_checked = list_item_is_checked_task(&node);
+            checked_task_stack.push((node.end_byte(), is_checked));
+        }
+
+        // Determine if we're currently inside a checked task
+        let in_checked_task = checked_task_stack.iter().any(|(_, checked)| *checked);
 
         // For fenced_code_block_delimiter, determine if it's the opening fence
         let is_first_fence_delimiter = if node.kind() == "fenced_code_block_delimiter" {
@@ -780,6 +815,7 @@ pub fn collect_node_infos(root: &Node) -> Vec<NodeInfo> {
             kind: node.kind(),
             parent_kind: node.parent().map(|p| p.kind()),
             is_first_fence_delimiter,
+            in_checked_task,
         });
 
         if cursor.goto_first_child() {
@@ -1233,6 +1269,14 @@ pub fn markers_at_from_infos(
     }
 
     markers
+}
+
+/// Check if a line is inside a checked task by finding the first node that starts
+/// within the line range.
+pub fn is_line_in_checked_task(nodes: &[NodeInfo], line_start: usize) -> bool {
+    // Binary search to find first node at or after line_start
+    let idx = find_node_info_index(nodes, line_start);
+    nodes.get(idx).map(|n| n.in_checked_task).unwrap_or(false)
 }
 
 #[cfg(test)]
@@ -1759,6 +1803,7 @@ mod tests {
             range,
             line_number: 0,
             markers,
+            in_checked_task: false,
         }
     }
 

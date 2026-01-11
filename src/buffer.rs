@@ -11,7 +11,10 @@ static NEXT_VERSION: AtomicU64 = AtomicU64::new(1);
 
 use crate::highlight::{HighlightSpan, Highlighter};
 use crate::inline::{StyledRegion, extract_all_inline_styles, styles_in_range};
-use crate::marker::{LineMarkers, MarkerKind, NodeInfo, collect_node_infos, markers_at_from_infos};
+use crate::marker::{
+    LineMarkers, MarkerKind, NodeInfo, collect_node_infos, is_line_in_checked_task,
+    markers_at_from_infos,
+};
 use crate::parser::{MarkdownParser, MarkdownTree};
 
 /// A snapshot of buffer data for rendering. All fields use Rc for O(1) cloning.
@@ -61,10 +64,12 @@ impl RenderSnapshot {
     pub fn line_markers(&self, line_idx: usize) -> LineMarkers {
         let range = self.line_byte_range(line_idx);
         let markers = markers_at_from_infos(&self.nodes, &self.rope, range.start, range.end);
+        let in_checked_task = is_line_in_checked_task(&self.nodes, range.start);
         LineMarkers {
             range,
             line_number: line_idx,
             markers,
+            in_checked_task,
         }
     }
 
@@ -228,11 +233,13 @@ impl BufferContent {
 
                     let markers =
                         markers_at_from_infos(&self.nodes, &self.text, start_byte, end_byte);
+                    let in_checked_task = is_line_in_checked_task(&self.nodes, start_byte);
 
                     LineMarkers {
                         range: start_byte..end_byte,
                         line_number: line_idx,
                         markers,
+                        in_checked_task,
                     }
                 })
                 .collect(),

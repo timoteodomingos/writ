@@ -1043,13 +1043,19 @@ impl IntoElement for Line {
                     // Create a spacer for wrap indentation with border as separate child
                     let marker_chars = marker.range.len();
                     let spacer_width = self.theme.monospace_char_width * marker_chars as f32;
+                    // Use dimmed color for blockquote border inside checked tasks
+                    let border_color = if self.line.in_checked_task {
+                        self.theme.selection_color
+                    } else {
+                        self.theme.border_color
+                    };
                     let border_element = div()
                         .absolute()
                         .top_0()
                         .bottom_0()
                         .left_0()
                         .w(px(2.0))
-                        .bg(self.theme.border_color);
+                        .bg(border_color);
                     let mut spacer = div()
                         .relative()
                         .w(spacer_width)
@@ -1207,12 +1213,19 @@ impl IntoElement for Line {
                         unordered_marker.map_or("• ", |m| m.bullet()).to_string()
                     };
 
+                    // Use dimmed color for markers inside checked tasks
+                    let marker_color = if self.line.in_checked_task {
+                        self.theme.selection_color
+                    } else {
+                        self.theme.text_color
+                    };
+
                     let mut marker_label = div()
                         .relative()
                         .w(spacer_width)
                         .min_h_full()
                         .font_family(self.theme.code_font.family.clone())
-                        .text_color(self.theme.text_color)
+                        .text_color(marker_color)
                         .child(marker_text);
 
                     if self.marker_in_selection(&marker.range) {
