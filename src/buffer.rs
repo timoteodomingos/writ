@@ -12,8 +12,7 @@ static NEXT_VERSION: AtomicU64 = AtomicU64::new(1);
 use crate::highlight::{HighlightSpan, Highlighter};
 use crate::inline::{StyledRegion, extract_all_inline_styles, styles_in_range};
 use crate::marker::{
-    LineMarkers, MarkerKind, NodeInfo, collect_node_infos, is_line_in_checked_task,
-    markers_at_from_infos,
+    LineMarkers, ParsedNodes, collect_node_infos, is_line_in_checked_task, markers_at_from_infos,
 };
 use crate::parser::{MarkdownParser, MarkdownTree};
 
@@ -24,8 +23,8 @@ pub struct RenderSnapshot {
     pub rope: Rope,
     pub inline_styles: Rc<Vec<StyledRegion>>,
     pub code_highlights: Rc<Vec<(Range<usize>, Vec<HighlightSpan>)>>,
-    /// Cached nodes for lazy LineMarkers computation
-    nodes: Rc<Vec<NodeInfo>>,
+    /// Cached parsed nodes for lazy LineMarkers computation and code block queries
+    parsed: Rc<ParsedNodes>,
     /// Number of lines in the document
     line_count: usize,
 }
@@ -63,8 +62,8 @@ impl RenderSnapshot {
     /// Compute LineMarkers for a specific line on demand. O(log n) binary search + marker extraction.
     pub fn line_markers(&self, line_idx: usize) -> LineMarkers {
         let range = self.line_byte_range(line_idx);
-        let markers = markers_at_from_infos(&self.nodes, &self.rope, range.start, range.end);
-        let in_checked_task = is_line_in_checked_task(&self.nodes, range.start);
+        let markers = markers_at_from_infos(&self.parsed.nodes, &self.rope, range.start, range.end);
+        let in_checked_task = is_line_in_checked_task(&self.parsed.nodes, range.start);
         LineMarkers {
             range,
             line_number: line_idx,
@@ -162,9 +161,9 @@ pub struct BufferContent {
     tree: Option<MarkdownTree>,
     highlighter: Highlighter,
     code_highlight_cache: CodeHighlightCache,
-    /// Cached nodes for lazy LineMarkers computation during rendering.
+    /// Cached parsed nodes for lazy LineMarkers computation and code block queries.
     /// Updated when tree changes. Wrapped in Rc for O(1) cloning in render snapshots.
-    nodes: Rc<Vec<NodeInfo>>,
+    parsed: Rc<ParsedNodes>,
     /// Cached inline styles, updated when tree changes.
     /// Sorted by start position for efficient binary search lookup.
     /// Wrapped in Rc for O(1) cloning in render snapshots.
@@ -184,7 +183,7 @@ impl BufferContent {
             highlighter: Highlighter::new(),
             tree: None,
             code_highlight_cache: CodeHighlightCache::default(),
-            nodes: Rc::new(Vec::new()),
+            parsed: Rc::new(ParsedNodes::default()),
             inline_styles: Rc::new(Vec::new()),
             lines_cache: None,
             version: NEXT_VERSION.fetch_add(1, Ordering::Relaxed),
@@ -198,8 +197,8 @@ impl BufferContent {
 
     /// Recompute cached nodes, inline styles, and lines cache from current tree.
     fn update_caches(&mut self) {
-        // Update nodes cache for lazy LineMarkers computation in RenderSnapshot
-        self.nodes = Rc::new(
+        // Update parsed nodes cache for lazy LineMarkers computation and code block queries
+        self.parsed = Rc::new(
             self.tree
                 .as_ref()
                 .map(|t| collect_node_infos(&t.block_tree().root_node()))
@@ -232,8 +231,8 @@ impl BufferContent {
                     };
 
                     let markers =
-                        markers_at_from_infos(&self.nodes, &self.text, start_byte, end_byte);
-                    let in_checked_task = is_line_in_checked_task(&self.nodes, start_byte);
+                        markers_at_from_infos(&self.parsed.nodes, &self.text, start_byte, end_byte);
+                    let in_checked_task = is_line_in_checked_task(&self.parsed.nodes, start_byte);
 
                     LineMarkers {
                         range: start_byte..end_byte,
@@ -484,6 +483,24 @@ impl BufferContent {
         self.tree.as_ref()
     }
 
+    /// Get a reference to the parsed nodes for structural queries.
+    pub fn parsed(&self) -> &ParsedNodes {
+        &self.parsed
+    }
+
+    /// Compute LineMarkers for a specific line on demand.
+    pub fn line_markers(&self, line_idx: usize) -> LineMarkers {
+        let range = self.line_byte_range(line_idx);
+        let markers = markers_at_from_infos(&self.parsed.nodes, &self.text, range.start, range.end);
+        let in_checked_task = is_line_in_checked_task(&self.parsed.nodes, range.start);
+        LineMarkers {
+            range,
+            line_number: line_idx,
+            markers,
+            in_checked_task,
+        }
+    }
+
     pub fn lines(&self) -> &[LineMarkers] {
         self.lines_cache
             .as_ref()
@@ -503,7 +520,7 @@ impl BufferContent {
             rope: self.text.clone(),
             inline_styles: Rc::clone(&self.inline_styles),
             code_highlights: Rc::clone(&self.code_highlight_cache.highlights),
-            nodes: Rc::clone(&self.nodes),
+            parsed: Rc::clone(&self.parsed),
             line_count: self.text.len_lines(),
         }
     }
@@ -619,81 +636,38 @@ impl BufferContent {
     }
 
     fn rebuild_code_highlight_cache(&mut self) {
-        // First pass: collect code blocks info without holding borrows
-        // (block_start, block_end, content_start, code_content, lang)
-        let mut code_blocks: Vec<(usize, usize, usize, String, String)> = Vec::new();
-
-        {
-            let lines = self.lines();
-            let mut i = 0;
-            while i < lines.len() {
-                // Check if this is a fence line with a language
-                let fence_lang = lines[i].markers.iter().find_map(|m| {
-                    if let MarkerKind::CodeBlockFence { language, .. } = &m.kind {
-                        language.clone()
-                    } else {
-                        None
-                    }
-                });
-
-                if let Some(lang) = fence_lang {
-                    let block_start = lines[i].range.start;
-                    i += 1;
-
-                    // Collect code content
-                    let mut code_content = String::new();
-                    let mut content_start_offset: Option<usize> = None;
-                    let mut block_end = block_start;
-
-                    while i < lines.len() {
-                        if lines[i].is_fence() {
-                            // Closing fence
-                            block_end = lines[i].range.end;
-                            i += 1;
-                            break;
-                        } else {
-                            // Code content line (any non-fence line between opening and closing fence)
-                            if content_start_offset.is_none() {
-                                content_start_offset = Some(lines[i].range.start);
-                            }
-                            // Use rope slice instead of full buffer string
-                            let range = &lines[i].range;
-                            let char_start = self.text.byte_to_char(range.start);
-                            let char_end = self.text.byte_to_char(range.end);
-                            let slice = self.text.slice(char_start..char_end);
-                            code_content.push_str(&slice.to_string());
-                            code_content.push('\n');
-                            block_end = lines[i].range.end;
-                            i += 1;
-                        }
-                    }
-
-                    if let Some(start_offset) = content_start_offset {
-                        code_blocks.push((
-                            block_start,
-                            block_end,
-                            start_offset,
-                            code_content,
-                            lang,
-                        ));
-                    }
-                } else {
-                    i += 1;
-                }
-            }
-        }
-
-        // Second pass: highlight code blocks and store results
         let highlights = Rc::make_mut(&mut self.code_highlight_cache.highlights);
         highlights.clear();
 
-        for (block_start, block_end, start_offset, code_content, lang) in code_blocks {
-            let mut spans = self.highlighter.highlight(&code_content, &lang);
-            for span in &mut spans {
-                span.range.start += start_offset;
-                span.range.end += start_offset;
+        // Iterate over pre-collected code blocks from ParsedNodes
+        for code_block in &self.parsed.code_blocks {
+            // Extract language from info_string if present
+            let language = code_block.info_string_range.as_ref().and_then(|range| {
+                let char_start = self.text.byte_to_char(range.start);
+                let char_end = self.text.byte_to_char(range.end);
+                let slice = self.text.slice(char_start..char_end);
+                let lang = slice.to_string().trim().to_string();
+                if lang.is_empty() { None } else { Some(lang) }
+            });
+
+            // Only highlight if there's a language and content
+            if let Some(lang) = language {
+                if !code_block.content_range.is_empty() {
+                    // Extract code content
+                    let char_start = self.text.byte_to_char(code_block.content_range.start);
+                    let char_end = self.text.byte_to_char(code_block.content_range.end);
+                    let slice = self.text.slice(char_start..char_end);
+                    let code_content = slice.to_string();
+
+                    // Highlight and adjust spans to absolute positions
+                    let mut spans = self.highlighter.highlight(&code_content, &lang);
+                    for span in &mut spans {
+                        span.range.start += code_block.content_range.start;
+                        span.range.end += code_block.content_range.start;
+                    }
+                    highlights.push((code_block.block_range.clone(), spans));
+                }
             }
-            highlights.push((block_start..block_end, spans));
         }
 
         self.code_highlight_cache.valid = true;
@@ -839,7 +813,7 @@ impl FromStr for Buffer {
             highlighter: Highlighter::new(),
             tree,
             code_highlight_cache: CodeHighlightCache::default(),
-            nodes: Rc::new(Vec::new()),
+            parsed: Rc::new(ParsedNodes::default()),
             inline_styles: Rc::new(Vec::new()),
             lines_cache: None,
             version: NEXT_VERSION.fetch_add(1, Ordering::Relaxed),

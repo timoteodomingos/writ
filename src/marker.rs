@@ -19,6 +19,29 @@ pub struct NodeInfo {
     pub is_first_fence_delimiter: bool,
     /// True if this node is inside a checked task list item
     pub in_checked_task: bool,
+    /// True if this node is inside a fenced code block
+    pub in_code_block: bool,
+}
+
+/// Information about a fenced code block, collected during tree traversal.
+#[derive(Debug, Clone)]
+pub struct CodeBlockInfo {
+    /// Byte range of the entire code block (including fences)
+    pub block_range: Range<usize>,
+    /// Byte range of the code content (between fences, excluding fence lines)
+    pub content_range: Range<usize>,
+    /// Byte range of the info_string (language specifier), if any
+    pub info_string_range: Option<Range<usize>>,
+}
+
+/// Collected parse information from a tree traversal.
+/// Contains both the node list and extracted structural info.
+#[derive(Debug, Clone, Default)]
+pub struct ParsedNodes {
+    /// All nodes in the tree, in preorder traversal order
+    pub nodes: Vec<NodeInfo>,
+    /// Information about fenced code blocks, sorted by start position
+    pub code_blocks: Vec<CodeBlockInfo>,
 }
 
 /// The unordered list marker character.
@@ -762,21 +785,31 @@ fn list_item_is_checked_task(node: &Node) -> bool {
 
 /// Collect all nodes as owned NodeInfo structs (no lifetimes).
 /// Used for lazy LineMarkers computation during rendering.
-pub fn collect_node_infos(root: &Node) -> Vec<NodeInfo> {
+pub fn collect_node_infos(root: &Node) -> ParsedNodes {
     let mut cursor = root.walk();
     let mut nodes = Vec::new();
+    let mut code_blocks = Vec::new();
     // Stack of (node_end_byte, is_checked_task) for tracking checked task scope
     let mut checked_task_stack: Vec<(usize, bool)> = Vec::new();
+    // Track code block scope: Some(end_byte) when inside a fenced_code_block
+    let mut code_block_end: Option<usize> = None;
 
     loop {
         let node = cursor.node();
 
-        // Pop completed scopes from the stack
+        // Pop completed scopes from the checked task stack
         while let Some(&(end_byte, _)) = checked_task_stack.last() {
             if node.start_byte() >= end_byte {
                 checked_task_stack.pop();
             } else {
                 break;
+            }
+        }
+
+        // Check if we've exited the code block
+        if let Some(end_byte) = code_block_end {
+            if node.start_byte() >= end_byte {
+                code_block_end = None;
             }
         }
 
@@ -786,8 +819,65 @@ pub fn collect_node_infos(root: &Node) -> Vec<NodeInfo> {
             checked_task_stack.push((node.end_byte(), is_checked));
         }
 
+        // Check if we're entering a fenced_code_block - collect its info
+        if node.kind() == "fenced_code_block" {
+            code_block_end = Some(node.end_byte());
+
+            // Extract code block info
+            let block_range = node.start_byte()..node.end_byte();
+            let mut content_start: Option<usize> = None;
+            let mut content_end: Option<usize> = None;
+            let mut info_string_range: Option<Range<usize>> = None;
+
+            // Walk children to find info_string and content boundaries
+            let mut child_cursor = node.walk();
+            let mut seen_opening_fence = false;
+            for child in node.children(&mut child_cursor) {
+                match child.kind() {
+                    "info_string" => {
+                        // Store the byte range for the language specifier
+                        info_string_range = Some(child.start_byte()..child.end_byte());
+                    }
+                    "fenced_code_block_delimiter" => {
+                        if !seen_opening_fence {
+                            seen_opening_fence = true;
+                            // Content starts after this delimiter's line
+                        } else {
+                            // This is the closing fence - content ends before it
+                            content_end = Some(child.start_byte());
+                        }
+                    }
+                    "code_fence_content" => {
+                        // This is the actual code content
+                        if content_start.is_none() {
+                            content_start = Some(child.start_byte());
+                        }
+                        content_end = Some(child.end_byte());
+                    }
+                    _ => {
+                        // Other children (like line breaks) - update content range
+                        if seen_opening_fence && content_start.is_none() {
+                            content_start = Some(child.start_byte());
+                        }
+                    }
+                }
+            }
+
+            let content_range =
+                content_start.unwrap_or(node.end_byte())..content_end.unwrap_or(node.end_byte());
+
+            code_blocks.push(CodeBlockInfo {
+                block_range,
+                content_range,
+                info_string_range,
+            });
+        }
+
         // Determine if we're currently inside a checked task
         let in_checked_task = checked_task_stack.iter().any(|(_, checked)| *checked);
+
+        // Determine if we're inside a code block
+        let in_code_block = code_block_end.is_some();
 
         // For fenced_code_block_delimiter, determine if it's the opening fence
         let is_first_fence_delimiter = if node.kind() == "fenced_code_block_delimiter" {
@@ -816,6 +906,7 @@ pub fn collect_node_infos(root: &Node) -> Vec<NodeInfo> {
             parent_kind: node.parent().map(|p| p.kind()),
             is_first_fence_delimiter,
             in_checked_task,
+            in_code_block,
         });
 
         if cursor.goto_first_child() {
@@ -826,7 +917,7 @@ pub fn collect_node_infos(root: &Node) -> Vec<NodeInfo> {
         }
         loop {
             if !cursor.goto_parent() {
-                return nodes;
+                return ParsedNodes { nodes, code_blocks };
             }
             if cursor.goto_next_sibling() {
                 break;

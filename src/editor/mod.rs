@@ -148,54 +148,19 @@ impl EditorState {
     /// Returns the line range (start_line, end_line inclusive) of the code block containing
     /// the cursor, or None if cursor is not in a code block. The range includes the fence lines.
     fn cursor_code_block_range(&self) -> Option<(usize, usize)> {
-        let lines = self.buffer.lines();
-        let cursor_line = self.buffer.byte_to_line(self.cursor().offset);
+        let cursor_offset = self.cursor().offset;
 
-        let mut i = 0;
-        while i < lines.len() {
-            // Check for opening fence
-            let is_opening_fence = lines[i].markers.iter().any(|m| {
-                matches!(
-                    m.kind,
-                    MarkerKind::CodeBlockFence {
-                        is_opening: true,
-                        ..
-                    }
-                )
-            });
-
-            if is_opening_fence {
-                let start = i;
-                i += 1;
-                let mut found_close = false;
-                while i < lines.len() {
-                    // Check for closing fence
-                    let is_closing_fence = lines[i].markers.iter().any(|m| {
-                        matches!(
-                            m.kind,
-                            MarkerKind::CodeBlockFence {
-                                is_opening: false,
-                                ..
-                            }
-                        )
-                    });
-                    if is_closing_fence {
-                        // Found a complete code block - check if cursor is inside (including fences)
-                        if cursor_line >= start && cursor_line <= i {
-                            return Some((start, i));
-                        }
-                        i += 1;
-                        found_close = true;
-                        break;
-                    }
-                    i += 1;
-                }
-                // Incomplete code block (no closing fence) - cursor is inside if on or after start
-                if !found_close && cursor_line >= start {
-                    return Some((start, lines.len() - 1));
-                }
-            } else {
-                i += 1;
+        // Search through pre-collected code blocks
+        for code_block in &self.buffer.parsed().code_blocks {
+            if cursor_offset >= code_block.block_range.start
+                && cursor_offset < code_block.block_range.end
+            {
+                // Convert byte range to line range
+                let start_line = self.buffer.byte_to_line(code_block.block_range.start);
+                let end_line = self
+                    .buffer
+                    .byte_to_line(code_block.block_range.end.saturating_sub(1));
+                return Some((start_line, end_line));
             }
         }
         None

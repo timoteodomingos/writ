@@ -7,7 +7,7 @@
 //! - Adds blockquote prefixes to continuation lines when in a blockquote
 
 use crate::buffer::Buffer;
-use crate::marker::{LineMarkers, MarkerKind};
+use crate::marker::MarkerKind;
 
 /// Context about the cursor position for paste operations.
 #[derive(Debug, Clone)]
@@ -22,11 +22,22 @@ impl PasteContext {
     /// Analyze the buffer at cursor position to determine paste context.
     pub fn from_buffer(buffer: &Buffer, cursor_offset: usize) -> Self {
         let line_idx = buffer.byte_to_line(cursor_offset);
-        let lines = buffer.lines();
-        let current_line = lines.get(line_idx);
+        let current_line = buffer.lines().get(line_idx);
 
-        // Check if in code block
-        let in_code_block = Self::is_in_code_block(lines, line_idx);
+        // Check if in code block using pre-collected code blocks
+        let mut in_code_block = false;
+        for code_block in &buffer.parsed().code_blocks {
+            if cursor_offset >= code_block.block_range.start
+                && cursor_offset < code_block.block_range.end
+            {
+                // We're inside this code block's range
+                // But on the opening fence line, we're not "inside" for paste purposes
+                // Check if cursor is past the content_range start (i.e., past the opening fence)
+                in_code_block = cursor_offset >= code_block.content_range.start
+                    || code_block.content_range.is_empty();
+                break;
+            }
+        }
 
         // Build blockquote prefix from markers
         let blockquote_prefix = if let Some(line) = current_line {
@@ -44,55 +55,6 @@ impl PasteContext {
             in_code_block,
             blockquote_prefix,
         }
-    }
-
-    /// Check if a line index is inside a code block.
-    fn is_in_code_block(lines: &[LineMarkers], target_line: usize) -> bool {
-        let mut in_code = false;
-        for (idx, line) in lines.iter().enumerate() {
-            if idx > target_line {
-                break;
-            }
-
-            for marker in &line.markers {
-                if let MarkerKind::CodeBlockFence { is_opening, .. } = marker.kind {
-                    in_code = is_opening;
-                }
-            }
-
-            // Check if on the opening fence line itself - cursor is "in" code block
-            // only if it's after the fence line
-            if idx == target_line {
-                // If we just saw an opening fence on this line, we're not inside yet
-                let has_opening_fence = line.markers.iter().any(|m| {
-                    matches!(
-                        m.kind,
-                        MarkerKind::CodeBlockFence {
-                            is_opening: true,
-                            ..
-                        }
-                    )
-                });
-                if has_opening_fence {
-                    return false;
-                }
-                // If we just saw a closing fence on this line, we're still inside
-                // (the fence itself is still part of the code block context)
-                let has_closing_fence = line.markers.iter().any(|m| {
-                    matches!(
-                        m.kind,
-                        MarkerKind::CodeBlockFence {
-                            is_opening: false,
-                            ..
-                        }
-                    )
-                });
-                if has_closing_fence {
-                    return true;
-                }
-            }
-        }
-        in_code
     }
 }
 
