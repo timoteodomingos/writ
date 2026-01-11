@@ -599,7 +599,7 @@ impl Line {
             let strikethrough = if is_strikethrough {
                 Some(gpui::StrikethroughStyle {
                     thickness: px(1.0),
-                    color: Some(self.theme.text_color.into()),
+                    color: Some(self.theme.border_color.into()),
                 })
             } else {
                 None
@@ -1037,9 +1037,7 @@ impl IntoElement for Line {
                     }
                     spacers.push(spacer);
                 }
-                MarkerKind::CodeBlockFence { .. } | MarkerKind::CodeBlockContent => {
-                    line_div = line_div.text_size(rems(0.9));
-                }
+                MarkerKind::CodeBlockFence { .. } => {}
                 MarkerKind::ThematicBreak => {
                     if !self.cursor_on_line() && !self.selection_on_line() {
                         let line_text = self.slice(self.line.range.clone());
@@ -1285,6 +1283,10 @@ impl IntoElement for Line {
                     spacers.push(marker_label);
                 }
             }
+        }
+
+        if self.line.in_code_block {
+            line_div = line_div.text_size(rems(0.9));
         }
 
         let mut text_container = div().relative().flex_1().min_w_0().child(styled_text);

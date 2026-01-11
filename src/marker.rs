@@ -83,7 +83,6 @@ pub enum MarkerKind {
         language: Option<String>,
         is_opening: bool,
     },
-    CodeBlockContent,
     ThematicBreak,
     Indent,
 }
@@ -103,6 +102,8 @@ pub struct LineMarkers {
     pub markers: Vec<Marker>,
     /// True if this line is inside a checked task list item
     pub in_checked_task: bool,
+    /// True if this line is inside a fenced code block (content lines, not fence lines)
+    pub in_code_block: bool,
 }
 
 impl LineMarkers {
@@ -293,13 +294,6 @@ impl LineMarkers {
         String::new()
     }
 
-    /// Returns true if this line is code block content (not a fence line).
-    pub fn is_code_block_content(&self) -> bool {
-        self.markers
-            .iter()
-            .any(|m| matches!(m.kind, MarkerKind::CodeBlockContent))
-    }
-
     /// Returns true if this line is a code block fence (opening or closing).
     pub fn is_fence(&self) -> bool {
         self.markers
@@ -467,7 +461,6 @@ impl MarkerKind {
             },
             MarkerKind::Heading(_) => "",
             MarkerKind::CodeBlockFence { .. } => "",
-            MarkerKind::CodeBlockContent => "",
             MarkerKind::ThematicBreak => "",
             MarkerKind::Indent => "  ",
         }
@@ -482,7 +475,6 @@ impl MarkerKind {
             MarkerKind::TaskList { .. } => "- [ ] ",
             MarkerKind::Heading(_) => "",
             MarkerKind::CodeBlockFence { .. } => "",
-            MarkerKind::CodeBlockContent => "",
             MarkerKind::ThematicBreak => "",
             MarkerKind::Indent => "",
         }
@@ -1257,6 +1249,13 @@ pub fn is_line_in_checked_task(nodes: &[NodeInfo], line_start: usize) -> bool {
     nodes.get(idx).map(|n| n.in_checked_task).unwrap_or(false)
 }
 
+/// Check if a line is inside a fenced code block by finding the first node that starts
+/// within the line range.
+pub fn is_line_in_code_block(nodes: &[NodeInfo], line_start: usize) -> bool {
+    let idx = find_node_info_index(nodes, line_start);
+    nodes.get(idx).map(|n| n.in_code_block).unwrap_or(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1782,6 +1781,7 @@ mod tests {
             line_number: 0,
             markers,
             in_checked_task: false,
+            in_code_block: false,
         }
     }
 

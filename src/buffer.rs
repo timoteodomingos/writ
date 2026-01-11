@@ -12,7 +12,8 @@ static NEXT_VERSION: AtomicU64 = AtomicU64::new(1);
 use crate::highlight::{HighlightSpan, Highlighter};
 use crate::inline::{StyledRegion, extract_all_inline_styles, styles_in_range};
 use crate::marker::{
-    LineMarkers, ParsedNodes, collect_node_infos, is_line_in_checked_task, markers_at_from_infos,
+    LineMarkers, ParsedNodes, collect_node_infos, is_line_in_checked_task, is_line_in_code_block,
+    markers_at_from_infos,
 };
 use crate::parser::{MarkdownParser, MarkdownTree};
 
@@ -68,11 +69,13 @@ impl RenderSnapshot {
         let range = self.line_byte_range(line_idx);
         let markers = markers_at_from_infos(&self.parsed.nodes, &self.rope, range.start, range.end);
         let in_checked_task = is_line_in_checked_task(&self.parsed.nodes, range.start);
+        let in_code_block = is_line_in_code_block(&self.parsed.nodes, range.start);
         LineMarkers {
             range,
             line_number: line_idx,
             markers,
             in_checked_task,
+            in_code_block,
         }
     }
 
@@ -449,11 +452,13 @@ impl BufferContent {
         let range = self.line_byte_range(line_idx);
         let markers = markers_at_from_infos(&self.parsed.nodes, &self.text, range.start, range.end);
         let in_checked_task = is_line_in_checked_task(&self.parsed.nodes, range.start);
+        let in_code_block = is_line_in_code_block(&self.parsed.nodes, range.start);
         LineMarkers {
             range,
             line_number: line_idx,
             markers,
             in_checked_task,
+            in_code_block,
         }
     }
 
