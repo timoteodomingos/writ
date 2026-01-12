@@ -117,6 +117,18 @@ fn collect_from_block_tree(
 
 /// Collect styled regions from an inline tree.
 fn collect_from_inline_tree(node: Node, rope: &Rope, styles: &mut Vec<StyledRegion>) {
+    collect_from_inline_tree_inner(node, rope, styles, false);
+}
+
+/// Inner function that tracks whether we're inside a strikethrough.
+fn collect_from_inline_tree_inner(
+    node: Node,
+    rope: &Rope,
+    styles: &mut Vec<StyledRegion>,
+    in_strikethrough: bool,
+) {
+    let mut child_in_strikethrough = in_strikethrough;
+
     match node.kind() {
         "emphasis" => {
             if let Some(region) = extract_emphasis_region(&node, TextStyle::italic()) {
@@ -134,8 +146,12 @@ fn collect_from_inline_tree(node: Node, rope: &Rope, styles: &mut Vec<StyledRegi
             }
         }
         "strikethrough" => {
-            if let Some(region) = extract_emphasis_region(&node, TextStyle::strikethrough()) {
-                styles.push(region);
+            // Skip nested strikethroughs - tree-sitter parses ~~text~~ as nested ~(~text~)~
+            if !in_strikethrough {
+                if let Some(region) = extract_emphasis_region(&node, TextStyle::strikethrough()) {
+                    styles.push(region);
+                }
+                child_in_strikethrough = true;
             }
         }
         "inline_link" | "full_reference_link" | "collapsed_reference_link" | "shortcut_link" => {
@@ -154,7 +170,7 @@ fn collect_from_inline_tree(node: Node, rope: &Rope, styles: &mut Vec<StyledRegi
     // Recurse into children
     let mut cursor = node.walk();
     for child in node.children(&mut cursor) {
-        collect_from_inline_tree(child, rope, styles);
+        collect_from_inline_tree_inner(child, rope, styles, child_in_strikethrough);
     }
 }
 
@@ -165,24 +181,34 @@ fn extract_emphasis_region(node: &Node, style: TextStyle) -> Option<StyledRegion
     let mut content_start = full_start;
     let mut content_end = full_end;
 
-    // Find delimiter boundaries
-    let mut delimiters: Vec<(usize, usize)> = Vec::new();
-    let mut cursor = node.walk();
-    for child in node.children(&mut cursor) {
-        let kind = child.kind();
-        if kind == "emphasis_delimiter" || kind.ends_with("_delimiter") {
-            delimiters.push((child.start_byte(), child.end_byte()));
+    // Find all delimiter boundaries recursively
+    // This handles ~~text~~ which tree-sitter parses as nested ~(~text~)~
+    fn collect_delimiters(node: &Node, delimiters: &mut Vec<(usize, usize)>) {
+        let mut cursor = node.walk();
+        for child in node.children(&mut cursor) {
+            let kind = child.kind();
+            if kind == "emphasis_delimiter" || kind.ends_with("_delimiter") {
+                delimiters.push((child.start_byte(), child.end_byte()));
+            }
+            // Recurse into nested emphasis/strikethrough of the same type
+            if kind == node.kind() {
+                collect_delimiters(&child, delimiters);
+            }
         }
     }
 
-    // Opening delimiters from start
+    let mut delimiters: Vec<(usize, usize)> = Vec::new();
+    collect_delimiters(node, &mut delimiters);
+
+    // Opening delimiters from start - keep consuming adjacent delimiters
+    delimiters.sort_by_key(|(start, _)| *start);
     for &(start, end) in &delimiters {
         if start == content_start {
             content_start = end;
         }
     }
 
-    // Closing delimiters from end
+    // Closing delimiters from end - keep consuming adjacent delimiters
     for &(start, end) in delimiters.iter().rev() {
         if end == content_end {
             content_end = start;
@@ -443,5 +469,18 @@ mod tests {
         assert_eq!(styles.len(), 2);
         assert!(styles[0].style.bold);
         assert!(styles[1].style.italic);
+    }
+
+    #[test]
+    fn test_strikethrough() {
+        let styles = get_styles("~~hey~~\n");
+        // Tree-sitter parses ~~hey~~ as nested strikethrough ~(~hey~)~
+        // We skip the inner one and collect all delimiters recursively
+        assert_eq!(styles.len(), 1);
+        assert!(styles[0].style.strikethrough);
+        // full_range is the entire ~~hey~~ (0..7)
+        // content_range excludes all delimiters (2..5 for just "hey")
+        assert_eq!(styles[0].full_range, 0..7);
+        assert_eq!(styles[0].content_range, 2..5);
     }
 }
