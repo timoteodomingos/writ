@@ -1466,8 +1466,13 @@ impl Editor {
     /// Execute an editor action programmatically.
     ///
     /// This is useful for scripted demos or external control of the editor.
-    /// Also used as the unified handler for GPUI-dispatched actions.
+    /// Bypasses `input_blocked` check - use `handle_action` for user input.
     pub fn execute(&mut self, action: &EditorAction, _window: &mut Window, cx: &mut Context<Self>) {
+        self.execute_action(action, cx);
+    }
+
+    /// Handle an action from GPUI dispatch (respects input_blocked).
+    pub fn handle_action(&mut self, action: &EditorAction, cx: &mut Context<Self>) {
         if self.input_blocked {
             // Allow hover updates even when input is blocked
             if let EditorAction::UpdateHover {
@@ -1483,7 +1488,11 @@ impl Editor {
             }
             return;
         }
+        self.execute_action(action, cx);
+    }
 
+    /// Internal action execution (no input_blocked check).
+    fn execute_action(&mut self, action: &EditorAction, cx: &mut Context<Self>) {
         match action {
             EditorAction::Type(c) => {
                 self.insert_text(&c.to_string());
@@ -1684,8 +1693,8 @@ impl Render for Editor {
             .on_key_down(cx.listener(Self::on_key_down))
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
             .on_action(cx.listener(
-                |editor: &mut Editor, action: &DispatchEditorAction, window, cx| {
-                    editor.execute(&action.0, window, cx);
+                |editor: &mut Editor, action: &DispatchEditorAction, _window, cx| {
+                    editor.handle_action(&action.0, cx);
                 },
             ))
             .on_mouse_down(
