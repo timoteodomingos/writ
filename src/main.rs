@@ -33,7 +33,7 @@ fn run_demo(editor: Entity<Editor>, cx: &mut gpui::App) {
             let _ = cx.update(|cx| {
                 if let Some(wh) = cx.windows().first().copied() {
                     let _ = cx.update_window(wh, |_, window, cx| {
-                        editor.update(cx, |editor, cx| editor.execute(action, window, cx));
+                        editor.update(cx, |editor, cx| editor.execute(&action, window, cx));
                     });
                 }
             });

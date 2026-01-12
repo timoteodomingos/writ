@@ -1467,13 +1467,13 @@ impl Editor {
     ///
     /// This is useful for scripted demos or external control of the editor.
     /// Also used as the unified handler for GPUI-dispatched actions.
-    pub fn execute(&mut self, action: EditorAction, _window: &mut Window, cx: &mut Context<Self>) {
+    pub fn execute(&mut self, action: &EditorAction, _window: &mut Window, cx: &mut Context<Self>) {
         if self.input_blocked {
             // Allow hover updates even when input is blocked
             if let EditorAction::UpdateHover {
                 over_checkbox,
                 over_link,
-            } = action
+            } = *action
                 && (self.hovering_checkbox != over_checkbox
                     || self.hovering_link_region != over_link)
             {
@@ -1507,37 +1507,38 @@ impl Editor {
                 self.delete_backward();
             }
             EditorAction::Move(direction) => {
-                self.move_in_direction(direction, false);
+                self.move_in_direction(direction.clone(), false);
             }
             EditorAction::Click {
                 offset,
                 shift,
                 click_count,
             } => {
-                self.state.handle_click(offset, shift, click_count);
+                self.state.handle_click(*offset, *shift, *click_count);
             }
             EditorAction::Drag { offset } => {
                 if !self.in_drag_scroll_zone {
-                    self.state.handle_drag(offset);
+                    self.state.handle_drag(*offset);
                     self.is_selecting = true;
                 }
             }
             EditorAction::ToggleCheckbox { line_number } => {
-                self.toggle_checkbox(line_number, cx);
+                self.toggle_checkbox(*line_number, cx);
                 return; // toggle_checkbox calls cx.notify() itself
             }
             EditorAction::UpdateHover {
                 over_checkbox,
                 over_link,
             } => {
-                if self.hovering_checkbox != over_checkbox || self.hovering_link_region != over_link
+                if self.hovering_checkbox != *over_checkbox
+                    || self.hovering_link_region != *over_link
                 {
-                    self.hovering_checkbox = over_checkbox;
-                    self.hovering_link_region = over_link;
+                    self.hovering_checkbox = *over_checkbox;
+                    self.hovering_link_region = *over_link;
                 }
             }
             EditorAction::OpenLink { url } => {
-                let _ = open::that(&url);
+                let _ = open::that(url);
             }
         }
         cx.notify();
@@ -1684,7 +1685,7 @@ impl Render for Editor {
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
             .on_action(cx.listener(
                 |editor: &mut Editor, action: &DispatchEditorAction, window, cx| {
-                    editor.execute(action.0.clone(), window, cx);
+                    editor.execute(&action.0, window, cx);
                 },
             ))
             .on_mouse_down(
