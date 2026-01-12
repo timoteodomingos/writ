@@ -617,14 +617,6 @@ impl BufferContent {
 
         self.code_highlight_cache.valid = true;
     }
-
-    /// Normalize the document. Currently does nothing - we preserve the file as-is.
-    pub fn normalize_document(&mut self) -> bool {
-        // Normalization has been removed. We now support both soft-wrap style
-        // (single newlines) and hard-wrap style (blank lines between paragraphs).
-        // The file is loaded exactly as-is.
-        false
-    }
 }
 
 impl Default for BufferContent {

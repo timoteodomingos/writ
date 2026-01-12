@@ -17,36 +17,6 @@ use crate::marker::{LineMarkers, MarkerKind};
 /// (opening_start, opening_end, closing_start, closing_end) for collapsed markdown syntax.
 pub type HiddenRegion = (usize, usize, usize, usize);
 
-/// Compute hidden regions for a line based on inline styles and cursor position.
-/// Regions where the cursor is inside are not hidden (syntax is revealed for editing).
-pub fn compute_hidden_regions(
-    inline_styles: &[StyledRegion],
-    content_range: &Range<usize>,
-    cursor_offset: usize,
-    show_all: bool,
-) -> Vec<HiddenRegion> {
-    if show_all {
-        return Vec::new();
-    }
-
-    inline_styles
-        .iter()
-        .filter_map(|region| {
-            let cursor_inside =
-                cursor_offset >= region.full_range.start && cursor_offset <= region.full_range.end;
-            if cursor_inside {
-                None
-            } else {
-                let opening_start = region.full_range.start.max(content_range.start);
-                let opening_end = region.content_range.start.min(content_range.end);
-                let closing_start = region.content_range.end.max(content_range.start);
-                let closing_end = region.full_range.end.min(content_range.end);
-                Some((opening_start, opening_end, closing_start, closing_end))
-            }
-        })
-        .collect()
-}
-
 /// Convert a visual position (index into display text, after prefix) to a buffer offset.
 pub fn visual_to_buffer_pos(
     visual_index: usize,
