@@ -5,6 +5,9 @@ description = "A hybrid markdown editor combining raw text editing with live inl
 authors = ["Wilfred Denton <wilfred@hey.com>"]
 license = "MIT"
 edition = "2024"
+repository = "https://github.com/wilfreddenton/writ"
+homepage = "https://github.com/wilfreddenton/writ"
+documentation = "https://docs.rs/writ"
 
 [lints.clippy]
 too_many_arguments = "allow"
