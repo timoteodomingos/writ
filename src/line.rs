@@ -437,22 +437,12 @@ impl Line {
             boundaries.push(marker_range.end);
         }
 
-        // Add checkbox boundary so it gets styled separately from content.
-        // The checkbox marker range includes trailing space "[ ] ", but we only
-        // want to style "[ ]" (3 bytes) with link_color.
-        let checkbox_style_range: Option<std::ops::Range<usize>> = self
-            .line
-            .markers
-            .iter()
-            .find(|m| matches!(m.kind, MarkerKind::Checkbox { .. }))
-            .map(|m| m.range.start..m.range.start + 3);
-
-        if let Some(ref range) = checkbox_style_range {
-            boundaries.push(range.start);
-            boundaries.push(range.end);
-        }
-
         for region in &self.inline_styles {
+            // Add boundaries for checkbox regions (from synthetic StyledRegion)
+            if region.checkbox.is_some() {
+                boundaries.push(region.full_range.start.max(content_range.start));
+                boundaries.push(region.full_range.end.min(content_range.end));
+            }
             if region.full_range.end > content_range.start
                 && region.full_range.start < content_range.end
             {
@@ -555,11 +545,7 @@ impl Line {
             let mut is_code = false;
             let mut is_strikethrough = false;
             let mut is_link = false;
-
-            // Check if this span is within the checkbox text "[ ]"
-            let is_checkbox = checkbox_style_range
-                .as_ref()
-                .is_some_and(|r| start >= r.start && end <= r.end);
+            let mut is_checkbox = false;
 
             for (style_range, region) in &style_ranges {
                 if style_range.start <= start && end <= style_range.end {
@@ -568,8 +554,10 @@ impl Line {
                     is_code = is_code || region.style.code;
                     is_strikethrough = is_strikethrough || region.style.strikethrough;
                     is_link = is_link || region.link_url.is_some();
+                    is_checkbox = is_checkbox || region.checkbox.is_some();
 
-                    if is_bold && is_italic && is_code && is_strikethrough && is_link {
+                    if is_bold && is_italic && is_code && is_strikethrough && is_link && is_checkbox
+                    {
                         break;
                     }
                 }

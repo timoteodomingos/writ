@@ -80,12 +80,35 @@ impl RenderSnapshot {
     }
 
     /// Get inline styles for a specific line. O(log n) binary search.
+    /// Also injects a synthetic StyledRegion for any checkbox marker on the line.
     pub fn inline_styles_for_line(&self, line_idx: usize) -> Vec<StyledRegion> {
         let range = self.line_byte_range(line_idx);
-        styles_in_range(&self.inline_styles, &range)
+        let mut styles: Vec<StyledRegion> = styles_in_range(&self.inline_styles, &range)
             .into_iter()
             .cloned()
-            .collect()
+            .collect();
+
+        // Inject synthetic StyledRegion for checkbox markers
+        let markers = self.line_markers(line_idx);
+        for marker in &markers.markers {
+            if let crate::marker::MarkerKind::Checkbox { checked } = marker.kind {
+                // The checkbox marker range is "[ ] " (4 bytes), but we only
+                // want to style "[ ]" (3 bytes) with the checkbox style.
+                let checkbox_range = marker.range.start..marker.range.start + 3;
+                styles.push(StyledRegion {
+                    full_range: checkbox_range.clone(),
+                    content_range: checkbox_range,
+                    style: crate::inline::TextStyle::default(),
+                    link_url: None,
+                    is_image: false,
+                    checkbox: Some(checked),
+                });
+            }
+        }
+
+        // Re-sort by start position to maintain order
+        styles.sort_by_key(|s| s.full_range.start);
+        styles
     }
 
     /// Get code highlights for a specific line. O(code_blocks) scan.
