@@ -1,12 +1,11 @@
 use std::borrow::Cow;
 use std::ops::Range;
 use std::path::PathBuf;
-use std::rc::Rc;
 
 use gpui::{
-    App, CursorStyle, Font, FontStyle, FontWeight, Hsla, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, Rgba, ScrollAnchor, SharedString, StyledText, TextRun, Window, canvas, div,
-    img, point, prelude::*, px, rems,
+    Action, CursorStyle, Font, FontStyle, FontWeight, Hsla, IntoElement, MouseButton,
+    MouseDownEvent, MouseMoveEvent, Rgba, ScrollAnchor, SharedString, StyledText, TextRun, Window,
+    canvas, div, img, point, prelude::*, px, rems,
 };
 use ropey::Rope;
 
@@ -14,11 +13,107 @@ use crate::highlight::HighlightSpan;
 use crate::inline::StyledRegion;
 use crate::marker::{LineMarkers, MarkerKind};
 
-pub type ClickCallback = Rc<dyn Fn(usize, bool, usize, &mut Window, &mut App)>;
-pub type DragCallback = Rc<dyn Fn(usize, &mut Window, &mut App)>;
-pub type CheckboxCallback = Rc<dyn Fn(usize, &mut Window, &mut App)>;
-/// Callback for hover state changes: (hovering_checkbox, hovering_link_region)
-pub type HoverCallback = Rc<dyn Fn(bool, bool, &mut Window, &mut App)>;
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(no_json)]
+pub struct ClickAtOffset {
+    pub offset: usize,
+    pub shift: bool,
+    pub click_count: usize,
+}
+
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(no_json)]
+pub struct DragToOffset {
+    pub offset: usize,
+}
+
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(no_json)]
+pub struct ToggleCheckbox {
+    pub line_number: usize,
+}
+
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(no_json)]
+pub struct UpdateHover {
+    pub over_checkbox: bool,
+    pub over_link: bool,
+}
+
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(no_json)]
+pub struct OpenLink {
+    pub url: String,
+}
+
+/// (opening_start, opening_end, closing_start, closing_end) for collapsed markdown syntax.
+pub type HiddenRegion = (usize, usize, usize, usize);
+
+/// Compute hidden regions for a line based on inline styles and cursor position.
+/// Regions where the cursor is inside are not hidden (syntax is revealed for editing).
+pub fn compute_hidden_regions(
+    inline_styles: &[StyledRegion],
+    content_range: &Range<usize>,
+    cursor_offset: usize,
+    show_all: bool,
+) -> Vec<HiddenRegion> {
+    if show_all {
+        return Vec::new();
+    }
+
+    inline_styles
+        .iter()
+        .filter_map(|region| {
+            let cursor_inside =
+                cursor_offset >= region.full_range.start && cursor_offset <= region.full_range.end;
+            if cursor_inside {
+                None
+            } else {
+                let opening_start = region.full_range.start.max(content_range.start);
+                let opening_end = region.content_range.start.min(content_range.end);
+                let closing_start = region.content_range.end.max(content_range.start);
+                let closing_end = region.full_range.end.min(content_range.end);
+                Some((opening_start, opening_end, closing_start, closing_end))
+            }
+        })
+        .collect()
+}
+
+/// Convert a visual position (index into display text, after prefix) to a buffer offset.
+pub fn visual_to_buffer_pos(
+    visual_index: usize,
+    content_range: &Range<usize>,
+    heading_marker_len: usize,
+    hidden_regions: &[HiddenRegion],
+    line_end: usize,
+) -> usize {
+    if content_range.start >= content_range.end {
+        return content_range.start;
+    }
+
+    if hidden_regions.is_empty() {
+        return (content_range.start + heading_marker_len + visual_index).min(line_end);
+    }
+
+    let mut buffer_pos = content_range.start + heading_marker_len;
+    let mut visible_count = 0usize;
+
+    while buffer_pos < content_range.end && visible_count < visual_index {
+        let is_hidden = hidden_regions.iter().any(
+            |&(opening_start, opening_end, closing_start, closing_end)| {
+                (buffer_pos >= opening_start && buffer_pos < opening_end)
+                    || (buffer_pos >= closing_start && buffer_pos < closing_end)
+            },
+        );
+
+        if !is_hidden {
+            visible_count += 1;
+        }
+        buffer_pos += 1;
+    }
+
+    buffer_pos.min(line_end)
+}
 
 #[derive(Clone)]
 pub struct LineTheme {
@@ -39,7 +134,6 @@ pub struct LineTheme {
 
 pub struct Line {
     line: LineMarkers,
-    /// Owned Rope - clone is O(1) due to internal Arc sharing.
     rope: Rope,
     cursor_offset: usize,
     inline_styles: Vec<StyledRegion>,
@@ -47,16 +141,9 @@ pub struct Line {
     selection_range: Option<Range<usize>>,
     code_highlights: Vec<(HighlightSpan, Rgba)>,
     base_path: Option<PathBuf>,
-    on_click: Option<ClickCallback>,
-    on_drag: Option<DragCallback>,
-    on_checkbox: Option<CheckboxCallback>,
-    on_hover: Option<HoverCallback>,
     scroll_anchor: Option<ScrollAnchor>,
-    /// Cached substitution string (computed once in new())
     substitution: Option<String>,
-    /// If this line is a fence, whether it should be visible (cursor in code block).
     fence_visible: bool,
-    /// True while actively dragging a selection. Used to keep markers expanded.
     is_selecting: bool,
 }
 
@@ -86,10 +173,6 @@ impl Line {
             selection_range,
             code_highlights,
             base_path,
-            on_click: None,
-            on_drag: None,
-            on_checkbox: None,
-            on_hover: None,
             scroll_anchor: None,
             substitution,
             fence_visible,
@@ -110,26 +193,6 @@ impl Line {
 
     pub fn with_scroll_anchor(mut self, anchor: Option<ScrollAnchor>) -> Self {
         self.scroll_anchor = anchor;
-        self
-    }
-
-    pub fn on_click(mut self, callback: ClickCallback) -> Self {
-        self.on_click = Some(callback);
-        self
-    }
-
-    pub fn on_drag(mut self, callback: DragCallback) -> Self {
-        self.on_drag = Some(callback);
-        self
-    }
-
-    pub fn on_checkbox(mut self, callback: CheckboxCallback) -> Self {
-        self.on_checkbox = Some(callback);
-        self
-    }
-
-    pub fn on_hover(mut self, callback: HoverCallback) -> Self {
-        self.on_hover = Some(callback);
         self
     }
 
@@ -723,47 +786,6 @@ impl Line {
         visual_pos.min(display_text.len())
     }
 
-    /// Convert a visual position (index into display text, after prefix) to a buffer offset.
-    /// This is the inverse of `buffer_to_visual_pos` and accounts for hidden regions.
-    fn visual_to_buffer_pos(
-        visual_index: usize,
-        content_range: &Range<usize>,
-        heading_marker_len: usize,
-        hidden_regions: &[(usize, usize, usize, usize)],
-        line_end: usize,
-    ) -> usize {
-        if content_range.start >= content_range.end {
-            return content_range.start;
-        }
-
-        if hidden_regions.is_empty() {
-            return (content_range.start + heading_marker_len + visual_index).min(line_end);
-        }
-
-        let mut buffer_pos = content_range.start + heading_marker_len;
-        let mut visible_count = 0usize;
-
-        while buffer_pos < content_range.end && visible_count < visual_index {
-            let mut is_hidden = false;
-
-            for &(opening_start, opening_end, closing_start, closing_end) in hidden_regions {
-                if (buffer_pos >= opening_start && buffer_pos < opening_end)
-                    || (buffer_pos >= closing_start && buffer_pos < closing_end)
-                {
-                    is_hidden = true;
-                    break;
-                }
-            }
-
-            if !is_hidden {
-                visible_count += 1;
-            }
-            buffer_pos += 1;
-        }
-
-        buffer_pos.min(line_end)
-    }
-
     fn compute_visual_selection_range(&self, display_text: &str) -> Option<Range<usize>> {
         let selection = self.selection_range.as_ref()?;
         let line_range = &self.line.range;
@@ -891,7 +913,6 @@ impl IntoElement for Line {
 
         let standalone_image = self.standalone_image_url().map(|url| {
             let source = self.resolve_image_source(url);
-            let on_click = self.on_click.clone();
             let line_end = line_range.end;
             let open_url = if url.starts_with("http://") || url.starts_with("https://") {
                 url.to_string()
@@ -905,10 +926,10 @@ impl IntoElement for Line {
                     url.to_string()
                 }
             };
-            (source, on_click, line_end, open_url)
+            (source, line_end, open_url)
         });
 
-        if let Some((source, on_click, line_end, open_url)) = standalone_image.clone()
+        if let Some((source, line_end, open_url)) = standalone_image.clone()
             && !self.cursor_on_line()
             && !self.selection_on_line()
         {
@@ -916,18 +937,22 @@ impl IntoElement for Line {
                 MouseButton::Left,
                 move |event: &MouseDownEvent, window, cx| {
                     if event.modifiers.control || event.modifiers.platform {
-                        let _ = open::that(&open_url);
-                        return;
-                    }
-                    if let Some(ref on_click) = on_click {
-                        on_click(
-                            line_end,
-                            event.modifiers.shift,
-                            event.click_count,
-                            window,
+                        window.dispatch_action(
+                            Box::new(OpenLink {
+                                url: open_url.clone(),
+                            }),
                             cx,
                         );
+                        return;
                     }
+                    window.dispatch_action(
+                        Box::new(ClickAtOffset {
+                            offset: line_end,
+                            shift: event.modifiers.shift,
+                            click_count: event.click_count,
+                        }),
+                        cx,
+                    );
                 },
             ));
         }
@@ -1008,33 +1033,33 @@ impl IntoElement for Line {
                     if cursor_in_this_marker {
                         spacer = spacer.child(self.render_spacer_cursor(cursor_char_offset));
                     }
-                    if let Some(ref on_click) = self.on_click {
-                        let on_click = on_click.clone();
-                        let marker_start = marker.range.start;
-                        spacer = spacer.on_mouse_down(
-                            MouseButton::Left,
-                            move |event: &MouseDownEvent, window, cx| {
-                                cx.stop_propagation();
-                                on_click(
-                                    marker_start,
-                                    event.modifiers.shift,
-                                    event.click_count,
-                                    window,
-                                    cx,
-                                );
-                            },
-                        );
-                    }
-                    if let Some(ref on_drag) = self.on_drag {
-                        let on_drag = on_drag.clone();
-                        let marker_start = marker.range.start;
-                        spacer = spacer.on_mouse_move(move |event: &MouseMoveEvent, window, cx| {
-                            if event.pressed_button == Some(MouseButton::Left) {
-                                cx.stop_propagation();
-                                on_drag(marker_start, window, cx);
-                            }
-                        });
-                    }
+                    let marker_start = marker.range.start;
+                    spacer = spacer.on_mouse_down(
+                        MouseButton::Left,
+                        move |event: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            window.dispatch_action(
+                                Box::new(ClickAtOffset {
+                                    offset: marker_start,
+                                    shift: event.modifiers.shift,
+                                    click_count: event.click_count,
+                                }),
+                                cx,
+                            );
+                        },
+                    );
+                    let marker_start = marker.range.start;
+                    spacer = spacer.on_mouse_move(move |event: &MouseMoveEvent, window, cx| {
+                        if event.pressed_button == Some(MouseButton::Left) {
+                            cx.stop_propagation();
+                            window.dispatch_action(
+                                Box::new(DragToOffset {
+                                    offset: marker_start,
+                                }),
+                                cx,
+                            );
+                        }
+                    });
                     spacers.push(spacer);
                 }
                 MarkerKind::CodeBlockFence { .. } => {}
@@ -1067,28 +1092,26 @@ impl IntoElement for Line {
                             .child(styled_text)
                             .child(hr_line);
 
-                        if let Some(ref on_click) = self.on_click {
-                            let on_click = on_click.clone();
-                            hr_div = hr_div.on_mouse_down(
-                                MouseButton::Left,
-                                move |event: &MouseDownEvent, window, cx| {
-                                    let visual_index =
-                                        match text_layout.index_for_position(event.position) {
-                                            Ok(idx) => idx,
-                                            Err(idx) => idx,
-                                        };
-                                    let buffer_offset = line_range.start + visual_index;
-                                    let buffer_offset = buffer_offset.min(line_range.end);
-                                    on_click(
-                                        buffer_offset,
-                                        event.modifiers.shift,
-                                        event.click_count,
-                                        window,
-                                        cx,
-                                    );
-                                },
-                            );
-                        }
+                        hr_div = hr_div.on_mouse_down(
+                            MouseButton::Left,
+                            move |event: &MouseDownEvent, window, cx| {
+                                let visual_index =
+                                    match text_layout.index_for_position(event.position) {
+                                        Ok(idx) => idx,
+                                        Err(idx) => idx,
+                                    };
+                                let buffer_offset = line_range.start + visual_index;
+                                let buffer_offset = buffer_offset.min(line_range.end);
+                                window.dispatch_action(
+                                    Box::new(ClickAtOffset {
+                                        offset: buffer_offset,
+                                        shift: event.modifiers.shift,
+                                        click_count: event.click_count,
+                                    }),
+                                    cx,
+                                );
+                            },
+                        );
 
                         return hr_div;
                     }
@@ -1103,33 +1126,33 @@ impl IntoElement for Line {
                     if cursor_in_this_marker {
                         spacer = spacer.child(self.render_spacer_cursor(cursor_char_offset));
                     }
-                    if let Some(ref on_click) = self.on_click {
-                        let on_click = on_click.clone();
-                        let marker_start = marker.range.start;
-                        spacer = spacer.on_mouse_down(
-                            MouseButton::Left,
-                            move |event: &MouseDownEvent, window, cx| {
-                                cx.stop_propagation();
-                                on_click(
-                                    marker_start,
-                                    event.modifiers.shift,
-                                    event.click_count,
-                                    window,
-                                    cx,
-                                );
-                            },
-                        );
-                    }
-                    if let Some(ref on_drag) = self.on_drag {
-                        let on_drag = on_drag.clone();
-                        let marker_start = marker.range.start;
-                        spacer = spacer.on_mouse_move(move |event: &MouseMoveEvent, window, cx| {
-                            if event.pressed_button == Some(MouseButton::Left) {
-                                cx.stop_propagation();
-                                on_drag(marker_start, window, cx);
-                            }
-                        });
-                    }
+                    let marker_start = marker.range.start;
+                    spacer = spacer.on_mouse_down(
+                        MouseButton::Left,
+                        move |event: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            window.dispatch_action(
+                                Box::new(ClickAtOffset {
+                                    offset: marker_start,
+                                    shift: event.modifiers.shift,
+                                    click_count: event.click_count,
+                                }),
+                                cx,
+                            );
+                        },
+                    );
+                    let marker_start = marker.range.start;
+                    spacer = spacer.on_mouse_move(move |event: &MouseMoveEvent, window, cx| {
+                        if event.pressed_button == Some(MouseButton::Left) {
+                            cx.stop_propagation();
+                            window.dispatch_action(
+                                Box::new(DragToOffset {
+                                    offset: marker_start,
+                                }),
+                                cx,
+                            );
+                        }
+                    });
                     spacers.push(spacer);
                 }
                 MarkerKind::ListItem {
@@ -1168,35 +1191,34 @@ impl IntoElement for Line {
                             marker_label.child(self.render_spacer_cursor(cursor_char_offset));
                     }
 
-                    if let Some(ref on_click) = self.on_click {
-                        let on_click = on_click.clone();
-                        let marker_start = marker.range.start;
-                        marker_label = marker_label.on_mouse_down(
-                            MouseButton::Left,
-                            move |event: &MouseDownEvent, window, cx| {
+                    let marker_start = marker.range.start;
+                    marker_label = marker_label.on_mouse_down(
+                        MouseButton::Left,
+                        move |event: &MouseDownEvent, window, cx| {
+                            cx.stop_propagation();
+                            window.dispatch_action(
+                                Box::new(ClickAtOffset {
+                                    offset: marker_start,
+                                    shift: event.modifiers.shift,
+                                    click_count: event.click_count,
+                                }),
+                                cx,
+                            );
+                        },
+                    );
+                    let marker_start = marker.range.start;
+                    marker_label =
+                        marker_label.on_mouse_move(move |event: &MouseMoveEvent, window, cx| {
+                            if event.pressed_button == Some(MouseButton::Left) {
                                 cx.stop_propagation();
-                                on_click(
-                                    marker_start,
-                                    event.modifiers.shift,
-                                    event.click_count,
-                                    window,
+                                window.dispatch_action(
+                                    Box::new(DragToOffset {
+                                        offset: marker_start,
+                                    }),
                                     cx,
                                 );
-                            },
-                        );
-                    }
-                    if let Some(ref on_drag) = self.on_drag {
-                        let on_drag = on_drag.clone();
-                        let marker_start = marker.range.start;
-                        marker_label = marker_label.on_mouse_move(
-                            move |event: &MouseMoveEvent, window, cx| {
-                                if event.pressed_button == Some(MouseButton::Left) {
-                                    cx.stop_propagation();
-                                    on_drag(marker_start, window, cx);
-                                }
-                            },
-                        );
-                    }
+                            }
+                        });
 
                     spacers.push(marker_label);
                 }
@@ -1210,46 +1232,36 @@ impl IntoElement for Line {
                     let checkbox_str = if *checked { "[x] " } else { "[ ] " };
                     let bullet = unordered_marker.map_or("• ", |m| m.bullet());
 
-                    let mut bullet_div = div()
+                    let marker_start = marker.range.start;
+                    let bullet_div = div()
                         .font_family(self.theme.code_font.family.clone())
                         .text_color(self.theme.text_color)
-                        .child(bullet.to_string());
-
-                    if let Some(ref on_click) = self.on_click {
-                        let on_click = on_click.clone();
-                        let marker_start = marker.range.start;
-                        bullet_div = bullet_div.on_mouse_down(
+                        .child(bullet.to_string())
+                        .on_mouse_down(
                             MouseButton::Left,
                             move |event: &MouseDownEvent, window, cx| {
                                 cx.stop_propagation();
-                                on_click(
-                                    marker_start,
-                                    event.modifiers.shift,
-                                    event.click_count,
-                                    window,
+                                window.dispatch_action(
+                                    Box::new(ClickAtOffset {
+                                        offset: marker_start,
+                                        shift: event.modifiers.shift,
+                                        click_count: event.click_count,
+                                    }),
                                     cx,
                                 );
                             },
                         );
-                    }
 
-                    let mut checkbox_div = div()
+                    let line_number = self.line.line_number;
+                    let checkbox_div = div()
                         .font_family(self.theme.code_font.family.clone())
                         .text_color(self.theme.link_color)
                         .cursor(CursorStyle::PointingHand)
-                        .child(checkbox_str.to_string());
-
-                    if let Some(ref on_checkbox) = self.on_checkbox {
-                        let on_checkbox = on_checkbox.clone();
-                        let line_number = self.line.line_number;
-                        checkbox_div = checkbox_div.on_mouse_down(
-                            MouseButton::Left,
-                            move |_event, window, cx| {
-                                cx.stop_propagation();
-                                on_checkbox(line_number, window, cx);
-                            },
-                        );
-                    }
+                        .child(checkbox_str.to_string())
+                        .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
+                            cx.stop_propagation();
+                            window.dispatch_action(Box::new(ToggleCheckbox { line_number }), cx);
+                        });
 
                     let mut marker_label = div()
                         .relative()
@@ -1267,18 +1279,19 @@ impl IntoElement for Line {
                         marker_label =
                             marker_label.child(self.render_spacer_cursor(cursor_char_offset));
                     }
-                    if let Some(ref on_drag) = self.on_drag {
-                        let on_drag = on_drag.clone();
-                        let marker_start = marker.range.start;
-                        marker_label = marker_label.on_mouse_move(
-                            move |event: &MouseMoveEvent, window, cx| {
-                                if event.pressed_button == Some(MouseButton::Left) {
-                                    cx.stop_propagation();
-                                    on_drag(marker_start, window, cx);
-                                }
-                            },
-                        );
-                    }
+                    let marker_start = marker.range.start;
+                    marker_label =
+                        marker_label.on_mouse_move(move |event: &MouseMoveEvent, window, cx| {
+                            if event.pressed_button == Some(MouseButton::Left) {
+                                cx.stop_propagation();
+                                window.dispatch_action(
+                                    Box::new(DragToOffset {
+                                        offset: marker_start,
+                                    }),
+                                    cx,
+                                );
+                            }
+                        });
 
                     spacers.push(marker_label);
                 }
@@ -1354,9 +1367,7 @@ impl IntoElement for Line {
 
         let prefix_len = self.get_substitution().map(|s| s.len()).unwrap_or(0);
 
-        if let Some(ref on_click) = self.on_click {
-            let on_click = on_click.clone();
-            let on_checkbox = self.on_checkbox.clone();
+        {
             let layout_for_click = text_layout.clone();
             let content_range = content_range_for_handlers.clone();
             let line_number = self.line.line_number;
@@ -1395,15 +1406,14 @@ impl IntoElement for Line {
                     if let Some(ref range) = checkbox_click_range
                         && visual_index >= range.start
                         && visual_index < range.end
-                        && let Some(ref on_checkbox) = on_checkbox
                     {
-                        on_checkbox(line_number, window, cx);
+                        window.dispatch_action(Box::new(ToggleCheckbox { line_number }), cx);
                         return;
                     }
 
                     let content_visual_index = visual_index.saturating_sub(prefix_len);
 
-                    let buffer_offset = Line::visual_to_buffer_pos(
+                    let buffer_offset = visual_to_buffer_pos(
                         content_visual_index,
                         &content_range,
                         heading_marker_len,
@@ -1414,18 +1424,19 @@ impl IntoElement for Line {
                     if event.modifiers.control || event.modifiers.platform {
                         for (range, url) in &link_regions {
                             if buffer_offset >= range.start && buffer_offset <= range.end {
-                                let _ = open::that(url);
+                                window.dispatch_action(Box::new(OpenLink { url: url.clone() }), cx);
                                 return;
                             }
                         }
                     }
 
                     window.prevent_default();
-                    on_click(
-                        buffer_offset,
-                        event.modifiers.shift,
-                        event.click_count,
-                        window,
+                    window.dispatch_action(
+                        Box::new(ClickAtOffset {
+                            offset: buffer_offset,
+                            shift: event.modifiers.shift,
+                            click_count: event.click_count,
+                        }),
                         cx,
                     );
                 },
@@ -1433,8 +1444,6 @@ impl IntoElement for Line {
         }
 
         {
-            let on_drag = self.on_drag.clone();
-            let on_hover = self.on_hover.clone();
             let layout_for_move = text_layout;
             let line_range_for_move = self.line.range.clone();
             let content_range = content_range_for_handlers;
@@ -1457,53 +1466,60 @@ impl IntoElement for Line {
                 .collect();
 
             line_div = line_div.on_mouse_move(move |event: &MouseMoveEvent, window, cx| {
-                if event.pressed_button == Some(MouseButton::Left)
-                    && let Some(ref on_drag) = on_drag
-                {
+                if event.pressed_button == Some(MouseButton::Left) {
                     let visual_index = match layout_for_move.index_for_position(event.position) {
                         Ok(idx) => idx,
                         Err(idx) => idx,
                     };
 
                     let content_visual_index = visual_index.saturating_sub(prefix_len);
-                    let buffer_offset = Line::visual_to_buffer_pos(
+                    let buffer_offset = visual_to_buffer_pos(
                         content_visual_index,
                         &content_range,
                         heading_marker_len,
                         &hidden_regions,
                         line_range_for_move.end,
                     );
-                    on_drag(buffer_offset, window, cx);
-                }
-
-                if let Some(ref on_hover) = on_hover {
-                    let visual_index = match layout_for_move.index_for_position(event.position) {
-                        Ok(idx) => idx,
-                        Err(idx) => idx,
-                    };
-
-                    let hovering_checkbox = checkbox_hover_range.as_ref().is_some_and(|range| {
-                        visual_index >= range.start && visual_index < range.end
-                    });
-
-                    let content_visual_index = visual_index.saturating_sub(prefix_len);
-                    let buffer_offset = Line::visual_to_buffer_pos(
-                        content_visual_index,
-                        &content_range,
-                        heading_marker_len,
-                        &hidden_regions,
-                        line_range_for_move.end,
+                    window.dispatch_action(
+                        Box::new(DragToOffset {
+                            offset: buffer_offset,
+                        }),
+                        cx,
                     );
-                    let hovering_link_region = link_content_ranges
-                        .iter()
-                        .any(|range| buffer_offset >= range.start && buffer_offset < range.end);
-
-                    on_hover(hovering_checkbox, hovering_link_region, window, cx);
                 }
+
+                let visual_index = match layout_for_move.index_for_position(event.position) {
+                    Ok(idx) => idx,
+                    Err(idx) => idx,
+                };
+
+                let hovering_checkbox = checkbox_hover_range
+                    .as_ref()
+                    .is_some_and(|range| visual_index >= range.start && visual_index < range.end);
+
+                let content_visual_index = visual_index.saturating_sub(prefix_len);
+                let buffer_offset = visual_to_buffer_pos(
+                    content_visual_index,
+                    &content_range,
+                    heading_marker_len,
+                    &hidden_regions,
+                    line_range_for_move.end,
+                );
+                let hovering_link_region = link_content_ranges
+                    .iter()
+                    .any(|range| buffer_offset >= range.start && buffer_offset < range.end);
+
+                window.dispatch_action(
+                    Box::new(UpdateHover {
+                        over_checkbox: hovering_checkbox,
+                        over_link: hovering_link_region,
+                    }),
+                    cx,
+                );
             });
         }
 
-        if let Some((source, _, _, open_url)) = standalone_image {
+        if let Some((source, _, open_url)) = standalone_image {
             return div()
                 .id(line_number)
                 .max_w(px(800.0))

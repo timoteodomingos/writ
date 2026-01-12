@@ -7,7 +7,6 @@ pub use config::EditorConfig;
 pub use theme::EditorTheme;
 
 use std::path::PathBuf;
-use std::rc::Rc;
 use std::sync::mpsc;
 
 use gpui::{
@@ -33,7 +32,9 @@ use crate::title_bar::FileInfo;
 
 use crate::buffer::Buffer;
 use crate::cursor::{Cursor, Selection};
-use crate::line::{CheckboxCallback, ClickCallback, DragCallback, HoverCallback, Line, LineTheme};
+use crate::line::{
+    ClickAtOffset, DragToOffset, Line, LineTheme, OpenLink, ToggleCheckbox, UpdateHover,
+};
 use crate::marker::{LineMarkers, MarkerKind};
 use crate::paste::{PasteContext, transform_paste};
 
@@ -716,6 +717,28 @@ impl EditorState {
             self.buffer
                 .delete(cursor_before..next.offset, cursor_before);
         }
+    }
+
+    pub fn handle_click(&mut self, buffer_offset: usize, shift_held: bool, click_count: usize) {
+        if shift_held {
+            self.selection = self.selection.extend_to(buffer_offset);
+        } else {
+            match click_count {
+                2 => {
+                    self.selection = Selection::select_word_at(buffer_offset, &self.buffer);
+                }
+                3 => {
+                    self.selection = Selection::select_line_at(buffer_offset, &self.buffer);
+                }
+                _ => {
+                    self.selection = Selection::new(buffer_offset, buffer_offset);
+                }
+            }
+        }
+    }
+
+    pub fn handle_drag(&mut self, buffer_offset: usize) {
+        self.selection = self.selection.extend_to(buffer_offset);
     }
 }
 
@@ -1536,74 +1559,6 @@ impl Render for Editor {
             Some(self.state.selection.range())
         };
 
-        let entity = cx.entity().clone();
-        let on_click: ClickCallback =
-            Rc::new(move |buffer_offset, shift_held, click_count, _window, cx| {
-                entity.update(cx, |editor, cx| {
-                    if editor.input_blocked {
-                        return;
-                    }
-                    if shift_held {
-                        editor.state.selection = editor.state.selection.extend_to(buffer_offset);
-                    } else {
-                        match click_count {
-                            2 => {
-                                editor.state.selection =
-                                    Selection::select_word_at(buffer_offset, &editor.state.buffer);
-                            }
-                            3 => {
-                                editor.state.selection =
-                                    Selection::select_line_at(buffer_offset, &editor.state.buffer);
-                            }
-                            _ => {
-                                editor.state.selection =
-                                    Selection::new(buffer_offset, buffer_offset);
-                            }
-                        }
-                    }
-                    cx.notify();
-                });
-            });
-
-        let entity = cx.entity().clone();
-        let on_drag: DragCallback = Rc::new(move |buffer_offset, _window, cx| {
-            entity.update(cx, |editor, cx| {
-                if editor.input_blocked || editor.in_drag_scroll_zone {
-                    return;
-                }
-                editor.state.selection = editor.state.selection.extend_to(buffer_offset);
-                editor.is_selecting = true;
-                cx.notify();
-            });
-        });
-
-        let entity = cx.entity().clone();
-        let on_checkbox: CheckboxCallback = Rc::new(move |line_number, _window, cx| {
-            entity.update(cx, |editor, cx| {
-                if editor.input_blocked {
-                    return;
-                }
-                editor.toggle_checkbox(line_number, cx);
-            });
-        });
-
-        let entity = cx.entity().clone();
-        let on_hover: HoverCallback = Rc::new(
-            move |hovering_checkbox, hovering_link_region, _window, cx| {
-                let (current_checkbox, current_link) = {
-                    let editor = entity.read(cx);
-                    (editor.hovering_checkbox, editor.hovering_link_region)
-                };
-                if current_checkbox != hovering_checkbox || current_link != hovering_link_region {
-                    entity.update(cx, |editor, cx| {
-                        editor.hovering_checkbox = hovering_checkbox;
-                        editor.hovering_link_region = hovering_link_region;
-                        cx.notify();
-                    });
-                }
-            },
-        );
-
         let base_path = self.config.base_path.clone();
 
         let cursor_line = self.state.buffer.byte_to_line(cursor_offset);
@@ -1662,11 +1617,7 @@ impl Render for Editor {
                     base_path.clone(),
                     fence_visible,
                     is_selecting,
-                )
-                .on_click(on_click.clone())
-                .on_drag(on_drag.clone())
-                .on_checkbox(on_checkbox.clone())
-                .on_hover(on_hover.clone());
+                );
 
                 // Add top padding to first line, bottom padding to last line
                 let is_first = ix == 0;
@@ -1686,6 +1637,51 @@ impl Render for Editor {
             .key_context("Editor")
             .on_key_down(cx.listener(Self::on_key_down))
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
+            .on_action(
+                cx.listener(|editor: &mut Editor, action: &ClickAtOffset, _window, cx| {
+                    if editor.input_blocked {
+                        return;
+                    }
+                    editor
+                        .state
+                        .handle_click(action.offset, action.shift, action.click_count);
+                    cx.notify();
+                }),
+            )
+            .on_action(
+                cx.listener(|editor: &mut Editor, action: &DragToOffset, _window, cx| {
+                    if editor.input_blocked || editor.in_drag_scroll_zone {
+                        return;
+                    }
+                    editor.state.handle_drag(action.offset);
+                    editor.is_selecting = true;
+                    cx.notify();
+                }),
+            )
+            .on_action(cx.listener(
+                |editor: &mut Editor, action: &ToggleCheckbox, _window, cx| {
+                    if editor.input_blocked {
+                        return;
+                    }
+                    editor.toggle_checkbox(action.line_number, cx);
+                },
+            ))
+            .on_action(
+                cx.listener(|editor: &mut Editor, action: &UpdateHover, _window, cx| {
+                    if editor.hovering_checkbox != action.over_checkbox
+                        || editor.hovering_link_region != action.over_link
+                    {
+                        editor.hovering_checkbox = action.over_checkbox;
+                        editor.hovering_link_region = action.over_link;
+                        cx.notify();
+                    }
+                }),
+            )
+            .on_action(
+                cx.listener(|_editor: &mut Editor, action: &OpenLink, _window, _cx| {
+                    let _ = open::that(&action.url);
+                }),
+            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|editor, event: &gpui::MouseDownEvent, window, cx| {
@@ -1857,6 +1853,123 @@ mod tests {
         actual.push('|');
         actual.push_str(&text[cursor..]);
         assert_eq!(actual, expected);
+    }
+
+    /// Helper to check editor state with selection.
+    /// Format: `<` marks start of selection, `|` marks head (cursor), `>` marks end.
+    /// Examples:
+    ///   - `|hello` - cursor at start, no selection
+    ///   - `<hello|>` - "hello" selected, cursor at end
+    ///   - `<|hello>` - "hello" selected, cursor at start
+    fn assert_selection_eq(state: &EditorState, expected: &str) {
+        let expected = trim_raw(expected);
+        let text = state.text();
+        let selection = &state.selection;
+
+        let anchor = selection.anchor;
+        let head = selection.head;
+        let start = anchor.min(head);
+        let end = anchor.max(head);
+        let is_collapsed = anchor == head;
+
+        let mut actual = String::new();
+        let mut byte_pos = 0;
+
+        for c in text.chars() {
+            if !is_collapsed && byte_pos == start {
+                actual.push('<');
+            }
+            if byte_pos == head {
+                actual.push('|');
+            }
+            if !is_collapsed && byte_pos == end {
+                actual.push('>');
+            }
+            actual.push(c);
+            byte_pos += c.len_utf8();
+        }
+
+        // Handle markers at end of text
+        if !is_collapsed && byte_pos == start {
+            actual.push('<');
+        }
+        if byte_pos == head {
+            actual.push('|');
+        }
+        if !is_collapsed && byte_pos == end {
+            actual.push('>');
+        }
+
+        assert_eq!(actual, expected, "Selection mismatch");
+    }
+
+    mod click_tests {
+        use super::*;
+
+        #[test]
+        fn click_sets_cursor() {
+            let mut state = editor_with_cursor("hello| world");
+            state.handle_click(0, false, 1);
+            assert_editor_eq(&state, "|hello world");
+        }
+
+        #[test]
+        fn click_middle() {
+            let mut state = editor_with_cursor("|hello world");
+            state.handle_click(6, false, 1);
+            assert_editor_eq(&state, "hello |world");
+        }
+
+        #[test]
+        fn shift_click_extends_selection() {
+            let mut state = editor_with_cursor("hello| world");
+            state.handle_click(11, true, 1);
+            assert_selection_eq(&state, "hello< world|>");
+        }
+
+        #[test]
+        fn shift_click_backward() {
+            let mut state = editor_with_cursor("hello| world");
+            state.handle_click(0, true, 1);
+            assert_selection_eq(&state, "<|hello> world");
+        }
+
+        #[test]
+        fn double_click_selects_word() {
+            let mut state = editor_with_cursor("|hello world");
+            state.handle_click(2, false, 2);
+            assert_selection_eq(&state, "<hello|> world");
+        }
+
+        #[test]
+        fn double_click_second_word() {
+            let mut state = editor_with_cursor("|hello world");
+            state.handle_click(8, false, 2);
+            assert_selection_eq(&state, "hello <world|>");
+        }
+
+        #[test]
+        fn triple_click_selects_line() {
+            let mut state = editor_with_cursor("|hello world");
+            state.handle_click(2, false, 3);
+            assert_selection_eq(&state, "<hello world|>");
+        }
+
+        #[test]
+        fn drag_extends_selection() {
+            let mut state = editor_with_cursor("|hello world");
+            state.handle_click(0, false, 1);
+            state.handle_drag(5);
+            assert_selection_eq(&state, "<hello|> world");
+        }
+
+        #[test]
+        fn drag_backward() {
+            let mut state = editor_with_cursor("hello world|");
+            state.handle_click(11, false, 1);
+            state.handle_drag(6);
+            assert_selection_eq(&state, "hello <|world>");
+        }
     }
 
     mod cursor_movement_tests {
