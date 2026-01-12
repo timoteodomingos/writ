@@ -3,9 +3,9 @@ use std::ops::Range;
 use std::path::PathBuf;
 
 use gpui::{
-    Action, CursorStyle, Font, FontStyle, FontWeight, Hsla, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, Rgba, ScrollAnchor, SharedString, StyledText, TextRun, Window,
-    canvas, div, img, point, prelude::*, px, rems,
+    Action, App, CursorStyle, Font, FontStyle, FontWeight, Hsla, IntoElement, MouseButton,
+    MouseDownEvent, MouseMoveEvent, RenderOnce, Rgba, ScrollAnchor, SharedString, StyledText,
+    TextRun, Window, canvas, div, img, point, prelude::*, px, rems,
 };
 use ropey::Rope;
 
@@ -132,6 +132,7 @@ pub struct LineTheme {
     pub monospace_char_width: gpui::Pixels,
 }
 
+#[derive(IntoElement)]
 pub struct Line {
     line: LineMarkers,
     rope: Rope,
@@ -904,10 +905,8 @@ fn line_base(line_number: usize) -> gpui::Stateful<gpui::Div> {
         .mx_auto()
 }
 
-impl IntoElement for Line {
-    type Element = gpui::Stateful<gpui::Div>;
-
-    fn into_element(self) -> Self::Element {
+impl RenderOnce for Line {
+    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let line_number = self.line.line_number;
         let line_range = self.line.range.clone();
 
