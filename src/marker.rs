@@ -70,11 +70,9 @@ pub enum MarkerKind {
         #[allow(dead_code)]
         ordered_marker: Option<OrderedMarker>,
     },
-    /// A task list item: `- [ ]` or `- [x]` (combines list marker + checkbox)
-    TaskList {
+    /// A checkbox marker: `[ ]` or `[x]` (rendered inline, not as spacer)
+    Checkbox {
         checked: bool,
-        #[allow(dead_code)]
-        unordered_marker: Option<UnorderedMarker>,
     },
     Heading(u8),
     /// A code block fence (``` or ~~~).
@@ -107,8 +105,28 @@ pub struct LineMarkers {
 }
 
 impl LineMarkers {
-    /// Returns the combined byte range of all markers, or None if no markers.
+    /// Returns the combined byte range of spacer markers (excluding Checkbox).
+    /// Checkbox markers are rendered inline, not as spacers, so they don't
+    /// contribute to wrap indent.
     pub fn marker_range(&self) -> Option<Range<usize>> {
+        // Filter out Checkbox markers - they're rendered inline, not as spacers
+        let spacer_markers: Vec<_> = self
+            .markers
+            .iter()
+            .filter(|m| !matches!(m.kind, MarkerKind::Checkbox { .. }))
+            .collect();
+
+        if spacer_markers.is_empty() {
+            return None;
+        }
+        let start = spacer_markers.last()?.range.start;
+        let end = spacer_markers.first()?.range.end;
+        Some(start..end)
+    }
+
+    /// Returns the combined byte range of ALL markers (including Checkbox).
+    /// Used for determining where content actually starts.
+    pub fn full_marker_range(&self) -> Option<Range<usize>> {
         if self.markers.is_empty() {
             return None;
         }
@@ -119,7 +137,7 @@ impl LineMarkers {
 
     /// Returns the byte offset where content starts (after all markers).
     pub fn content_start(&self) -> usize {
-        self.marker_range()
+        self.full_marker_range()
             .map(|r| r.end)
             .unwrap_or(self.range.start)
     }
@@ -150,7 +168,7 @@ impl LineMarkers {
                 MarkerKind::Indent
                     | MarkerKind::BlockQuote
                     | MarkerKind::ListItem { .. }
-                    | MarkerKind::TaskList { .. }
+                    | MarkerKind::Checkbox { .. }
                     | MarkerKind::CodeBlockFence { .. }
             )
         }) {
@@ -192,7 +210,7 @@ impl LineMarkers {
                 MarkerKind::Indent
                     | MarkerKind::BlockQuote
                     | MarkerKind::ListItem { .. }
-                    | MarkerKind::TaskList { .. }
+                    | MarkerKind::Checkbox { .. }
             ) {
                 result.push_str(m.kind.substitution());
             }
@@ -223,9 +241,10 @@ impl LineMarkers {
                 | MarkerKind::BlockQuote => {
                     rope_slice_cow(rope, m.range.start, m.range.end).into_owned()
                 }
-                MarkerKind::TaskList { .. } => rope_slice_cow(rope, m.range.start, m.range.end)
-                    .replace("[x]", "[ ]")
-                    .replace("[X]", "[ ]"),
+                MarkerKind::Checkbox { .. } => {
+                    // When continuing, always use unchecked checkbox
+                    "[ ] ".to_string()
+                }
                 _ => m.kind.continuation().to_string(),
             })
             .collect()
@@ -241,27 +260,26 @@ impl LineMarkers {
         self.markers.iter().any(|m| m.kind.is_container())
     }
 
-    /// Returns true if this line has a list marker (ordered, unordered, or task list).
+    /// Returns true if this line has a list marker (ordered or unordered).
     pub fn has_list_marker(&self) -> bool {
-        self.markers.iter().any(|m| {
-            matches!(
-                m.kind,
-                MarkerKind::ListItem { .. } | MarkerKind::TaskList { .. }
-            )
-        })
+        self.markers
+            .iter()
+            .any(|m| matches!(m.kind, MarkerKind::ListItem { .. }))
     }
 
     /// Returns the list marker kind if present (for comparing list types).
-    /// Returns a tuple of (is_ordered, is_task_list) to distinguish list types.
+    /// Returns a tuple of (is_ordered, has_checkbox) to distinguish list types.
     pub fn list_marker_kind(&self) -> Option<(bool, bool)> {
+        let mut is_ordered = None;
+        let mut has_checkbox = false;
         for m in &self.markers {
             match &m.kind {
-                MarkerKind::ListItem { ordered, .. } => return Some((*ordered, false)),
-                MarkerKind::TaskList { .. } => return Some((false, true)),
+                MarkerKind::ListItem { ordered, .. } => is_ordered = Some(*ordered),
+                MarkerKind::Checkbox { .. } => has_checkbox = true,
                 _ => {}
             }
         }
-        None
+        is_ordered.map(|ordered| (ordered, has_checkbox))
     }
 
     /// Returns the container markers (blockquotes, indents) without the list marker.
@@ -274,10 +292,10 @@ impl LineMarkers {
             .collect()
     }
 
-    /// Returns the checkbox state if this line has a task list marker.
+    /// Returns the checkbox state if this line has a checkbox marker.
     pub fn checkbox(&self) -> Option<bool> {
         for m in &self.markers {
-            if let MarkerKind::TaskList { checked, .. } = m.kind {
+            if let MarkerKind::Checkbox { checked } = m.kind {
                 return Some(checked);
             }
         }
@@ -362,7 +380,7 @@ impl LineMarkers {
             .filter(|m| {
                 !matches!(
                     m.kind,
-                    MarkerKind::ListItem { .. } | MarkerKind::TaskList { .. }
+                    MarkerKind::ListItem { .. } | MarkerKind::Checkbox { .. }
                 )
             })
             .map(|m| match &m.kind {
@@ -383,7 +401,7 @@ impl LineMarkers {
             .filter(|m| {
                 !matches!(
                     m.kind,
-                    MarkerKind::ListItem { .. } | MarkerKind::TaskList { .. } | MarkerKind::Indent
+                    MarkerKind::ListItem { .. } | MarkerKind::Checkbox { .. } | MarkerKind::Indent
                 )
             })
             .map(|m| m.kind.continuation())
@@ -400,8 +418,11 @@ impl LineMarkers {
                 MarkerKind::BlockQuote => {
                     result.push_str("> ");
                 }
-                MarkerKind::ListItem { ordered: false, .. } | MarkerKind::TaskList { .. } => {
+                MarkerKind::ListItem { ordered: false, .. } => {
                     result.push_str("  ");
+                }
+                MarkerKind::Checkbox { .. } => {
+                    // Checkbox doesn't contribute to nested indent - it's rendered inline
                 }
                 MarkerKind::ListItem { ordered: true, .. } => {
                     let indent_len = m.range.end - m.range.start;
@@ -441,24 +462,8 @@ impl MarkerKind {
                 ..
             } => unordered_marker.map_or("• ", |m| m.bullet()),
             MarkerKind::ListItem { ordered: true, .. } => "",
-            MarkerKind::TaskList {
-                checked: false,
-                unordered_marker,
-            } => match unordered_marker {
-                Some(UnorderedMarker::Minus) => "• [ ] ",
-                Some(UnorderedMarker::Star) => "◦ [ ] ",
-                Some(UnorderedMarker::Plus) => "‣ [ ] ",
-                None => "• [ ] ",
-            },
-            MarkerKind::TaskList {
-                checked: true,
-                unordered_marker,
-            } => match unordered_marker {
-                Some(UnorderedMarker::Minus) => "• [x] ",
-                Some(UnorderedMarker::Star) => "◦ [x] ",
-                Some(UnorderedMarker::Plus) => "‣ [x] ",
-                None => "• [x] ",
-            },
+            MarkerKind::Checkbox { checked: false } => "[ ] ",
+            MarkerKind::Checkbox { checked: true } => "[x] ",
             MarkerKind::Heading(_) => "",
             MarkerKind::CodeBlockFence { .. } => "",
             MarkerKind::ThematicBreak => "",
@@ -472,7 +477,7 @@ impl MarkerKind {
             MarkerKind::BlockQuote => "> ",
             MarkerKind::ListItem { ordered: false, .. } => "- ",
             MarkerKind::ListItem { ordered: true, .. } => "1. ",
-            MarkerKind::TaskList { .. } => "- [ ] ",
+            MarkerKind::Checkbox { .. } => "[ ] ",
             MarkerKind::Heading(_) => "",
             MarkerKind::CodeBlockFence { .. } => "",
             MarkerKind::ThematicBreak => "",
@@ -489,10 +494,7 @@ impl MarkerKind {
     /// Containers are structures where Enter creates siblings or exits,
     /// as opposed to plain text where Enter creates paragraph breaks.
     pub fn is_container(&self) -> bool {
-        matches!(
-            self,
-            MarkerKind::ListItem { .. } | MarkerKind::BlockQuote | MarkerKind::TaskList { .. }
-        )
+        matches!(self, MarkerKind::ListItem { .. } | MarkerKind::BlockQuote)
     }
 }
 
@@ -873,7 +875,7 @@ pub fn collect_node_infos(root: &Node) -> ParsedNodes {
 /// Takes a pre-computed nodes vec from `collect_nodes()` for efficiency.
 pub fn markers_at(nodes: &[Node], rope: &Rope, line_start: usize, line_end: usize) -> Vec<Marker> {
     let mut markers = Vec::new();
-    let mut pending_task: Option<(bool, usize)> = None;
+    let mut pending_task: Option<(bool, Range<usize>)> = None;
 
     let end_idx = find_node_index(nodes, line_end + 1);
 
@@ -910,24 +912,16 @@ pub fn markers_at(nodes: &[Node], rope: &Rope, line_start: usize, line_end: usiz
                     markers.push(ind);
                 }
 
-                if let Some((checked, checkbox_end)) = pending_task.take() {
-                    if let Some(Marker {
-                        kind:
-                            MarkerKind::ListItem {
-                                unordered_marker, ..
-                            },
-                        range,
-                    }) = marker
-                    {
-                        markers.push(Marker {
-                            kind: MarkerKind::TaskList {
-                                checked,
-                                unordered_marker,
-                            },
-                            range: range.start..checkbox_end,
-                        });
-                    }
-                } else if let Some(m) = marker {
+                // If there's a pending checkbox, add it as a separate Checkbox marker
+                if let Some((checked, checkbox_range)) = pending_task.take() {
+                    markers.push(Marker {
+                        kind: MarkerKind::Checkbox { checked },
+                        range: checkbox_range,
+                    });
+                }
+
+                // Always add the list item marker
+                if let Some(m) = marker {
                     markers.push(m);
                 }
             }
@@ -943,20 +937,22 @@ pub fn markers_at(nodes: &[Node], rope: &Rope, line_start: usize, line_end: usiz
                 }
             }
             "task_list_marker_unchecked" => {
+                let checkbox_start = start;
                 let range_end = if rope.get_byte(end) == Some(b' ') {
                     end + 1
                 } else {
                     end
                 };
-                pending_task = Some((false, range_end));
+                pending_task = Some((false, checkbox_start..range_end));
             }
             "task_list_marker_checked" => {
+                let checkbox_start = start;
                 let range_end = if rope.get_byte(end) == Some(b' ') {
                     end + 1
                 } else {
                     end
                 };
-                pending_task = Some((true, range_end));
+                pending_task = Some((true, checkbox_start..range_end));
             }
             "atx_h1_marker" | "atx_h2_marker" | "atx_h3_marker" | "atx_h4_marker"
             | "atx_h5_marker" | "atx_h6_marker" => {
@@ -1071,7 +1067,7 @@ pub fn markers_at_from_infos(
     line_end: usize,
 ) -> Vec<Marker> {
     let mut markers = Vec::new();
-    let mut pending_task: Option<(bool, usize)> = None;
+    let mut pending_task: Option<(bool, Range<usize>)> = None;
 
     let end_idx = find_node_info_index(nodes, line_end + 1);
 
@@ -1105,24 +1101,16 @@ pub fn markers_at_from_infos(
                     markers.push(ind);
                 }
 
-                if let Some((checked, checkbox_end)) = pending_task.take() {
-                    if let Some(Marker {
-                        kind:
-                            MarkerKind::ListItem {
-                                unordered_marker, ..
-                            },
-                        range,
-                    }) = marker
-                    {
-                        markers.push(Marker {
-                            kind: MarkerKind::TaskList {
-                                checked,
-                                unordered_marker,
-                            },
-                            range: range.start..checkbox_end,
-                        });
-                    }
-                } else if let Some(m) = marker {
+                // If there's a pending checkbox, add it as a separate Checkbox marker
+                if let Some((checked, checkbox_range)) = pending_task.take() {
+                    markers.push(Marker {
+                        kind: MarkerKind::Checkbox { checked },
+                        range: checkbox_range,
+                    });
+                }
+
+                // Always add the list item marker
+                if let Some(m) = marker {
                     markers.push(m);
                 }
             }
@@ -1138,20 +1126,22 @@ pub fn markers_at_from_infos(
                 }
             }
             "task_list_marker_unchecked" => {
+                let checkbox_start = start;
                 let range_end = if rope.get_byte(end) == Some(b' ') {
                     end + 1
                 } else {
                     end
                 };
-                pending_task = Some((false, range_end));
+                pending_task = Some((false, checkbox_start..range_end));
             }
             "task_list_marker_checked" => {
+                let checkbox_start = start;
                 let range_end = if rope.get_byte(end) == Some(b' ') {
                     end + 1
                 } else {
                     end
                 };
-                pending_task = Some((true, range_end));
+                pending_task = Some((true, checkbox_start..range_end));
             }
             "atx_h1_marker" | "atx_h2_marker" | "atx_h3_marker" | "atx_h4_marker"
             | "atx_h5_marker" | "atx_h6_marker" => {
@@ -1275,14 +1265,14 @@ mod tests {
         matches!(kind, MarkerKind::ListItem { ordered: true, .. })
     }
 
-    // Helper to check if marker is an unchecked task
-    fn is_task_unchecked(kind: &MarkerKind) -> bool {
-        matches!(kind, MarkerKind::TaskList { checked: false, .. })
+    // Helper to check if marker is an unchecked checkbox
+    fn is_checkbox_unchecked(kind: &MarkerKind) -> bool {
+        matches!(kind, MarkerKind::Checkbox { checked: false })
     }
 
-    // Helper to check if marker is a checked task
-    fn is_task_checked(kind: &MarkerKind) -> bool {
-        matches!(kind, MarkerKind::TaskList { checked: true, .. })
+    // Helper to check if marker is a checked checkbox
+    fn is_checkbox_checked(kind: &MarkerKind) -> bool {
+        matches!(kind, MarkerKind::Checkbox { checked: true })
     }
 
     fn print_tree(node: &tree_sitter::Node, text: &str, indent: usize) {
@@ -1432,9 +1422,10 @@ mod tests {
         let buf: Buffer = "- [ ] task\n\n  nested\n".parse().unwrap();
         let lines = buf.lines();
 
-        // Line 0: task list item
-        assert_eq!(lines[0].markers.len(), 1);
-        assert!(is_task_unchecked(&lines[0].markers[0].kind));
+        // Line 0: task list item - now has 2 markers (Checkbox + ListItem)
+        assert_eq!(lines[0].markers.len(), 2);
+        assert!(is_checkbox_unchecked(&lines[0].markers[0].kind));
+        assert!(is_unordered_list(&lines[0].markers[1].kind));
 
         // Line 1: blank
         assert!(lines[1].markers.is_empty());
@@ -1531,11 +1522,14 @@ mod tests {
         let buf: Buffer = "- [ ] Todo\n- [x] Done\n".parse().unwrap();
         let lines = buf.lines();
 
-        // TaskList is a single combined marker for "- [ ] " or "- [x] "
-        assert_eq!(lines[0].markers.len(), 1);
-        assert!(is_task_unchecked(&lines[0].markers[0].kind));
-        assert_eq!(lines[1].markers.len(), 1);
-        assert!(is_task_checked(&lines[1].markers[0].kind));
+        // Task list now has 2 markers: Checkbox + ListItem
+        assert_eq!(lines[0].markers.len(), 2);
+        assert!(is_checkbox_unchecked(&lines[0].markers[0].kind));
+        assert!(is_unordered_list(&lines[0].markers[1].kind));
+
+        assert_eq!(lines[1].markers.len(), 2);
+        assert!(is_checkbox_checked(&lines[1].markers[0].kind));
+        assert!(is_unordered_list(&lines[1].markers[1].kind));
     }
 
     #[test]
@@ -1925,11 +1919,8 @@ mod tests {
         let line_unchecked = make_line(
             0..15,
             vec![Marker {
-                kind: MarkerKind::TaskList {
-                    checked: false,
-                    unordered_marker: Some(UnorderedMarker::Minus),
-                },
-                range: 0..6,
+                kind: MarkerKind::Checkbox { checked: false },
+                range: 2..6,
             }],
         );
         assert_eq!(line_unchecked.checkbox(), Some(false));
@@ -1937,11 +1928,8 @@ mod tests {
         let line_checked = make_line(
             0..15,
             vec![Marker {
-                kind: MarkerKind::TaskList {
-                    checked: true,
-                    unordered_marker: Some(UnorderedMarker::Minus),
-                },
-                range: 0..6,
+                kind: MarkerKind::Checkbox { checked: true },
+                range: 2..6,
             }],
         );
         assert_eq!(line_checked.checkbox(), Some(true));
@@ -2084,6 +2072,16 @@ mod tests {
         let buf: Buffer = "just text\n".parse().unwrap();
         let lines = buf.lines();
         assert_eq!(lines[0].marker_width(), 0);
+    }
+
+    #[test]
+    fn test_marker_width_task_list() {
+        // Task list "- [ ] " is 6 chars total, but marker_width should be 2
+        // because only the list marker "- " contributes to wrap indent.
+        // The checkbox "[ ] " is rendered inline and doesn't contribute.
+        let buf: Buffer = "- [ ] task\n".parse().unwrap();
+        let lines = buf.lines();
+        assert_eq!(lines[0].marker_width(), 2); // Not 6!
     }
 
     #[test]

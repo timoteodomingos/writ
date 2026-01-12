@@ -627,12 +627,11 @@ impl EditorState {
                 return;
             };
 
-            let has_list = ctx.line.markers.iter().any(|m| {
-                matches!(
-                    m.kind,
-                    MarkerKind::ListItem { .. } | MarkerKind::TaskList { .. }
-                )
-            });
+            let has_list = ctx
+                .line
+                .markers
+                .iter()
+                .any(|m| matches!(m.kind, MarkerKind::ListItem { .. }));
             let has_blockquote = ctx
                 .line
                 .markers
@@ -2301,8 +2300,11 @@ mod tests {
 
         #[test]
         fn backspace_deletes_entire_task_list_marker() {
-            // Task list marker "- [ ] " should be atomic
+            // Task list now has separate Checkbox and ListItem markers
+            // First backspace deletes the checkbox, second deletes the list marker
             let mut state = editor_with_cursor("- [ ] |");
+            state.delete_backward();
+            assert_editor_eq(&state, "- |");
             state.delete_backward();
             assert_editor_eq(&state, "|");
         }
@@ -2310,6 +2312,8 @@ mod tests {
         #[test]
         fn backspace_deletes_checked_task_list_marker() {
             let mut state = editor_with_cursor("- [x] |");
+            state.delete_backward();
+            assert_editor_eq(&state, "- |");
             state.delete_backward();
             assert_editor_eq(&state, "|");
         }

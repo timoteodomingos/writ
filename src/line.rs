@@ -193,6 +193,9 @@ impl Line {
     fn content_range(&self) -> Range<usize> {
         let range = &self.line.range;
 
+        // Use marker_range() which excludes Checkbox markers.
+        // The checkbox text "[ ] " will be part of the content and rendered
+        // inline (not as a spacer), which gives correct wrap indent.
         if let Some(marker_range) = self.line.marker_range() {
             marker_range.end..range.end
         } else {
@@ -434,6 +437,18 @@ impl Line {
             boundaries.push(marker_range.end);
         }
 
+        // Add checkbox boundary so it gets styled separately from content
+        if let Some(checkbox_marker) = self
+            .line
+            .markers
+            .iter()
+            .find(|m| matches!(m.kind, MarkerKind::Checkbox { .. }))
+        {
+            // Just the "[ ]" part, not trailing space
+            boundaries.push(checkbox_marker.range.start);
+            boundaries.push(checkbox_marker.range.start + 3);
+        }
+
         for region in &self.inline_styles {
             if region.full_range.end > content_range.start
                 && region.full_range.start < content_range.end
@@ -538,6 +553,16 @@ impl Line {
             let mut is_strikethrough = false;
             let mut is_link = false;
 
+            // Check if this span is within the checkbox text "[ ]" (excluding trailing space)
+            // The marker range includes trailing space, so we use range.start..range.start+3
+            let is_checkbox = self
+                .line
+                .markers
+                .iter()
+                .find(|m| matches!(m.kind, MarkerKind::Checkbox { .. }))
+                .map(|m| m.range.start..m.range.start + 3) // Just "[ ]", not the trailing space
+                .is_some_and(|r| start < r.end && end > r.start);
+
             for (style_range, region) in &style_ranges {
                 if style_range.start <= start && end <= style_range.end {
                     is_bold = is_bold || region.style.bold;
@@ -556,7 +581,7 @@ impl Line {
                 .as_ref()
                 .is_some_and(|r| start < r.end && end > r.start);
 
-            let base_font = if is_code || is_code_block || in_ordered_marker {
+            let base_font = if is_code || is_code_block || in_ordered_marker || is_checkbox {
                 base_code_font
             } else {
                 base_text_font
@@ -578,7 +603,7 @@ impl Line {
 
             let color: Hsla = if is_strikethrough {
                 self.theme.border_color.into()
-            } else if is_link {
+            } else if is_link || is_checkbox {
                 self.theme.link_color.into()
             } else if let Some(highlight_color) = self.get_highlight_color_for_range(start, end) {
                 highlight_color.into()
@@ -1159,83 +1184,11 @@ impl RenderOnce for Line {
 
                     spacers.push(marker_label);
                 }
-                MarkerKind::TaskList {
-                    checked,
-                    unordered_marker,
-                } => {
-                    let marker_chars = marker.range.len();
-                    let spacer_width = self.theme.monospace_char_width * marker_chars as f32;
-
-                    let checkbox_str = if *checked { "[x] " } else { "[ ] " };
-                    let bullet = unordered_marker.map_or("• ", |m| m.bullet());
-
-                    let marker_start = marker.range.start;
-                    let bullet_div = div()
-                        .font_family(self.theme.code_font.family.clone())
-                        .text_color(self.theme.text_color)
-                        .child(bullet.to_string())
-                        .on_mouse_down(
-                            MouseButton::Left,
-                            move |event: &MouseDownEvent, window, cx| {
-                                cx.stop_propagation();
-                                window.dispatch_action(
-                                    Box::new(DispatchEditorAction(EditorAction::Click {
-                                        offset: marker_start,
-                                        shift: event.modifiers.shift,
-                                        click_count: event.click_count,
-                                    })),
-                                    cx,
-                                );
-                            },
-                        );
-
-                    let line_number = self.line.line_number;
-                    let checkbox_div = div()
-                        .font_family(self.theme.code_font.family.clone())
-                        .text_color(self.theme.link_color)
-                        .cursor(CursorStyle::PointingHand)
-                        .child(checkbox_str.to_string())
-                        .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
-                            cx.stop_propagation();
-                            window.dispatch_action(
-                                Box::new(DispatchEditorAction(EditorAction::ToggleCheckbox {
-                                    line_number,
-                                })),
-                                cx,
-                            );
-                        });
-
-                    let mut marker_label = div()
-                        .relative()
-                        .w(spacer_width)
-                        .min_h_full()
-                        .flex()
-                        .flex_row()
-                        .child(bullet_div)
-                        .child(checkbox_div);
-
-                    if self.marker_in_selection(&marker.range) {
-                        marker_label = marker_label.bg(self.theme.selection_color);
-                    }
-                    if cursor_in_this_marker {
-                        marker_label =
-                            marker_label.child(self.render_spacer_cursor(cursor_char_offset));
-                    }
-                    let marker_start = marker.range.start;
-                    marker_label =
-                        marker_label.on_mouse_move(move |event: &MouseMoveEvent, window, cx| {
-                            if event.pressed_button == Some(MouseButton::Left) {
-                                cx.stop_propagation();
-                                window.dispatch_action(
-                                    Box::new(DispatchEditorAction(EditorAction::Drag {
-                                        offset: marker_start,
-                                    })),
-                                    cx,
-                                );
-                            }
-                        });
-
-                    spacers.push(marker_label);
+                MarkerKind::Checkbox { .. } => {
+                    // Checkbox is rendered inline with the text, not as a spacer.
+                    // The "[ ] " text is part of content_range and will be rendered
+                    // in the styled text section. Click handling is done there.
+                    // This gives correct wrap indent (only list marker width, not checkbox).
                 }
             }
         }
@@ -1315,13 +1268,13 @@ impl RenderOnce for Line {
             let line_number = self.line.line_number;
             let hidden_regions = hidden_regions.clone();
 
+            // Find the checkbox click range in the content.
+            // The checkbox "[ ]" or "[x]" is now rendered as part of content, not substitution.
             let checkbox_click_range: Option<std::ops::Range<usize>> =
                 if self.line.checkbox().is_some() {
-                    self.get_substitution().and_then(|prefix| {
-                        let start = prefix.find('[')?;
-                        let end = prefix.find(']').map(|i| i + 1)?;
-                        Some(start..end)
-                    })
+                    // The checkbox is at the start of the content (after list marker spacer)
+                    // It's 4 chars: "[ ] " or "[x] "
+                    Some(prefix_len..prefix_len + 4)
                 } else {
                     None
                 };
@@ -1400,12 +1353,10 @@ impl RenderOnce for Line {
             let line_range_for_move = self.line.range.clone();
             let content_range = content_range_for_handlers;
 
+            // Checkbox hover range - checkbox is now at start of content (after spacer)
             let checkbox_hover_range: Option<Range<usize>> = if self.line.checkbox().is_some() {
-                self.get_substitution().and_then(|prefix| {
-                    let start = prefix.find('[')?;
-                    let end = prefix.find(']').map(|i| i + 1)?;
-                    Some(start..end)
-                })
+                // The checkbox is 4 chars: "[ ] " or "[x] "
+                Some(prefix_len..prefix_len + 4)
             } else {
                 None
             };
