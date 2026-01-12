@@ -1544,10 +1544,13 @@ impl Editor {
                 {
                     self.hovering_checkbox = *over_checkbox;
                     self.hovering_link_region = *over_link;
+                    cx.notify();
                 }
+                return; // Only notify if hover state actually changed
             }
             EditorAction::OpenLink { url } => {
                 let _ = open::that(url);
+                return; // Opening a link doesn't change editor state
             }
         }
         cx.notify();
