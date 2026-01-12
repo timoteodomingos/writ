@@ -437,16 +437,19 @@ impl Line {
             boundaries.push(marker_range.end);
         }
 
-        // Add checkbox boundary so it gets styled separately from content
-        if let Some(checkbox_marker) = self
+        // Add checkbox boundary so it gets styled separately from content.
+        // The checkbox marker range includes trailing space "[ ] ", but we only
+        // want to style "[ ]" (3 bytes) with link_color.
+        let checkbox_style_range: Option<std::ops::Range<usize>> = self
             .line
             .markers
             .iter()
             .find(|m| matches!(m.kind, MarkerKind::Checkbox { .. }))
-        {
-            // Just the "[ ]" part, not trailing space
-            boundaries.push(checkbox_marker.range.start);
-            boundaries.push(checkbox_marker.range.start + 3);
+            .map(|m| m.range.start..m.range.start + 3);
+
+        if let Some(ref range) = checkbox_style_range {
+            boundaries.push(range.start);
+            boundaries.push(range.end);
         }
 
         for region in &self.inline_styles {
@@ -553,15 +556,10 @@ impl Line {
             let mut is_strikethrough = false;
             let mut is_link = false;
 
-            // Check if this span is within the checkbox text "[ ]" (excluding trailing space)
-            // The marker range includes trailing space, so we use range.start..range.start+3
-            let is_checkbox = self
-                .line
-                .markers
-                .iter()
-                .find(|m| matches!(m.kind, MarkerKind::Checkbox { .. }))
-                .map(|m| m.range.start..m.range.start + 3) // Just "[ ]", not the trailing space
-                .is_some_and(|r| start < r.end && end > r.start);
+            // Check if this span is within the checkbox text "[ ]"
+            let is_checkbox = checkbox_style_range
+                .as_ref()
+                .is_some_and(|r| start >= r.start && end <= r.end);
 
             for (style_range, region) in &style_ranges {
                 if style_range.start <= start && end <= style_range.end {
