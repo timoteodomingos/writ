@@ -2,7 +2,7 @@ mod action;
 mod config;
 mod theme;
 
-pub use action::{Direction, EditorAction};
+pub use action::{Direction, DispatchEditorAction, EditorAction};
 pub use config::EditorConfig;
 pub use theme::EditorTheme;
 
@@ -32,9 +32,7 @@ use crate::title_bar::FileInfo;
 
 use crate::buffer::Buffer;
 use crate::cursor::{Cursor, Selection};
-use crate::line::{
-    ClickAtOffset, DragToOffset, Line, LineTheme, OpenLink, ToggleCheckbox, UpdateHover,
-};
+use crate::line::{Line, LineTheme};
 use crate::marker::{LineMarkers, MarkerKind};
 use crate::paste::{PasteContext, transform_paste};
 
@@ -1468,7 +1466,24 @@ impl Editor {
     /// Execute an editor action programmatically.
     ///
     /// This is useful for scripted demos or external control of the editor.
+    /// Also used as the unified handler for GPUI-dispatched actions.
     pub fn execute(&mut self, action: EditorAction, _window: &mut Window, cx: &mut Context<Self>) {
+        if self.input_blocked {
+            // Allow hover updates even when input is blocked
+            if let EditorAction::UpdateHover {
+                over_checkbox,
+                over_link,
+            } = action
+                && (self.hovering_checkbox != over_checkbox
+                    || self.hovering_link_region != over_link)
+            {
+                self.hovering_checkbox = over_checkbox;
+                self.hovering_link_region = over_link;
+                cx.notify();
+            }
+            return;
+        }
+
         match action {
             EditorAction::Type(c) => {
                 self.insert_text(&c.to_string());
@@ -1493,6 +1508,36 @@ impl Editor {
             }
             EditorAction::Move(direction) => {
                 self.move_in_direction(direction, false);
+            }
+            EditorAction::Click {
+                offset,
+                shift,
+                click_count,
+            } => {
+                self.state.handle_click(offset, shift, click_count);
+            }
+            EditorAction::Drag { offset } => {
+                if !self.in_drag_scroll_zone {
+                    self.state.handle_drag(offset);
+                    self.is_selecting = true;
+                }
+            }
+            EditorAction::ToggleCheckbox { line_number } => {
+                self.toggle_checkbox(line_number, cx);
+                return; // toggle_checkbox calls cx.notify() itself
+            }
+            EditorAction::UpdateHover {
+                over_checkbox,
+                over_link,
+            } => {
+                if self.hovering_checkbox != over_checkbox || self.hovering_link_region != over_link
+                {
+                    self.hovering_checkbox = over_checkbox;
+                    self.hovering_link_region = over_link;
+                }
+            }
+            EditorAction::OpenLink { url } => {
+                let _ = open::that(&url);
             }
         }
         cx.notify();
@@ -1637,51 +1682,11 @@ impl Render for Editor {
             .key_context("Editor")
             .on_key_down(cx.listener(Self::on_key_down))
             .on_modifiers_changed(cx.listener(Self::on_modifiers_changed))
-            .on_action(
-                cx.listener(|editor: &mut Editor, action: &ClickAtOffset, _window, cx| {
-                    if editor.input_blocked {
-                        return;
-                    }
-                    editor
-                        .state
-                        .handle_click(action.offset, action.shift, action.click_count);
-                    cx.notify();
-                }),
-            )
-            .on_action(
-                cx.listener(|editor: &mut Editor, action: &DragToOffset, _window, cx| {
-                    if editor.input_blocked || editor.in_drag_scroll_zone {
-                        return;
-                    }
-                    editor.state.handle_drag(action.offset);
-                    editor.is_selecting = true;
-                    cx.notify();
-                }),
-            )
             .on_action(cx.listener(
-                |editor: &mut Editor, action: &ToggleCheckbox, _window, cx| {
-                    if editor.input_blocked {
-                        return;
-                    }
-                    editor.toggle_checkbox(action.line_number, cx);
+                |editor: &mut Editor, action: &DispatchEditorAction, window, cx| {
+                    editor.execute(action.0.clone(), window, cx);
                 },
             ))
-            .on_action(
-                cx.listener(|editor: &mut Editor, action: &UpdateHover, _window, cx| {
-                    if editor.hovering_checkbox != action.over_checkbox
-                        || editor.hovering_link_region != action.over_link
-                    {
-                        editor.hovering_checkbox = action.over_checkbox;
-                        editor.hovering_link_region = action.over_link;
-                        cx.notify();
-                    }
-                }),
-            )
-            .on_action(
-                cx.listener(|_editor: &mut Editor, action: &OpenLink, _window, _cx| {
-                    let _ = open::that(&action.url);
-                }),
-            )
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|editor, event: &gpui::MouseDownEvent, window, cx| {

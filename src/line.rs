@@ -3,48 +3,16 @@ use std::ops::Range;
 use std::path::PathBuf;
 
 use gpui::{
-    Action, App, CursorStyle, Font, FontStyle, FontWeight, Hsla, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, RenderOnce, Rgba, ScrollAnchor, SharedString, StyledText,
-    TextRun, Window, canvas, div, img, point, prelude::*, px, rems,
+    App, CursorStyle, Font, FontStyle, FontWeight, Hsla, IntoElement, MouseButton, MouseDownEvent,
+    MouseMoveEvent, RenderOnce, Rgba, ScrollAnchor, SharedString, StyledText, TextRun, Window,
+    canvas, div, img, point, prelude::*, px, rems,
 };
 use ropey::Rope;
 
+use crate::editor::{DispatchEditorAction, EditorAction};
 use crate::highlight::HighlightSpan;
 use crate::inline::StyledRegion;
 use crate::marker::{LineMarkers, MarkerKind};
-
-#[derive(Clone, PartialEq, Debug, Action)]
-#[action(no_json)]
-pub struct ClickAtOffset {
-    pub offset: usize,
-    pub shift: bool,
-    pub click_count: usize,
-}
-
-#[derive(Clone, PartialEq, Debug, Action)]
-#[action(no_json)]
-pub struct DragToOffset {
-    pub offset: usize,
-}
-
-#[derive(Clone, PartialEq, Debug, Action)]
-#[action(no_json)]
-pub struct ToggleCheckbox {
-    pub line_number: usize,
-}
-
-#[derive(Clone, PartialEq, Debug, Action)]
-#[action(no_json)]
-pub struct UpdateHover {
-    pub over_checkbox: bool,
-    pub over_link: bool,
-}
-
-#[derive(Clone, PartialEq, Debug, Action)]
-#[action(no_json)]
-pub struct OpenLink {
-    pub url: String,
-}
 
 /// (opening_start, opening_end, closing_start, closing_end) for collapsed markdown syntax.
 pub type HiddenRegion = (usize, usize, usize, usize);
@@ -937,19 +905,19 @@ impl RenderOnce for Line {
                 move |event: &MouseDownEvent, window, cx| {
                     if event.modifiers.control || event.modifiers.platform {
                         window.dispatch_action(
-                            Box::new(OpenLink {
+                            Box::new(DispatchEditorAction(EditorAction::OpenLink {
                                 url: open_url.clone(),
-                            }),
+                            })),
                             cx,
                         );
                         return;
                     }
                     window.dispatch_action(
-                        Box::new(ClickAtOffset {
+                        Box::new(DispatchEditorAction(EditorAction::Click {
                             offset: line_end,
                             shift: event.modifiers.shift,
                             click_count: event.click_count,
-                        }),
+                        })),
                         cx,
                     );
                 },
@@ -1038,11 +1006,11 @@ impl RenderOnce for Line {
                         move |event: &MouseDownEvent, window, cx| {
                             cx.stop_propagation();
                             window.dispatch_action(
-                                Box::new(ClickAtOffset {
+                                Box::new(DispatchEditorAction(EditorAction::Click {
                                     offset: marker_start,
                                     shift: event.modifiers.shift,
                                     click_count: event.click_count,
-                                }),
+                                })),
                                 cx,
                             );
                         },
@@ -1052,9 +1020,9 @@ impl RenderOnce for Line {
                         if event.pressed_button == Some(MouseButton::Left) {
                             cx.stop_propagation();
                             window.dispatch_action(
-                                Box::new(DragToOffset {
+                                Box::new(DispatchEditorAction(EditorAction::Drag {
                                     offset: marker_start,
-                                }),
+                                })),
                                 cx,
                             );
                         }
@@ -1102,11 +1070,11 @@ impl RenderOnce for Line {
                                 let buffer_offset = line_range.start + visual_index;
                                 let buffer_offset = buffer_offset.min(line_range.end);
                                 window.dispatch_action(
-                                    Box::new(ClickAtOffset {
+                                    Box::new(DispatchEditorAction(EditorAction::Click {
                                         offset: buffer_offset,
                                         shift: event.modifiers.shift,
                                         click_count: event.click_count,
-                                    }),
+                                    })),
                                     cx,
                                 );
                             },
@@ -1131,11 +1099,11 @@ impl RenderOnce for Line {
                         move |event: &MouseDownEvent, window, cx| {
                             cx.stop_propagation();
                             window.dispatch_action(
-                                Box::new(ClickAtOffset {
+                                Box::new(DispatchEditorAction(EditorAction::Click {
                                     offset: marker_start,
                                     shift: event.modifiers.shift,
                                     click_count: event.click_count,
-                                }),
+                                })),
                                 cx,
                             );
                         },
@@ -1145,9 +1113,9 @@ impl RenderOnce for Line {
                         if event.pressed_button == Some(MouseButton::Left) {
                             cx.stop_propagation();
                             window.dispatch_action(
-                                Box::new(DragToOffset {
+                                Box::new(DispatchEditorAction(EditorAction::Drag {
                                     offset: marker_start,
-                                }),
+                                })),
                                 cx,
                             );
                         }
@@ -1196,11 +1164,11 @@ impl RenderOnce for Line {
                         move |event: &MouseDownEvent, window, cx| {
                             cx.stop_propagation();
                             window.dispatch_action(
-                                Box::new(ClickAtOffset {
+                                Box::new(DispatchEditorAction(EditorAction::Click {
                                     offset: marker_start,
                                     shift: event.modifiers.shift,
                                     click_count: event.click_count,
-                                }),
+                                })),
                                 cx,
                             );
                         },
@@ -1211,9 +1179,9 @@ impl RenderOnce for Line {
                             if event.pressed_button == Some(MouseButton::Left) {
                                 cx.stop_propagation();
                                 window.dispatch_action(
-                                    Box::new(DragToOffset {
+                                    Box::new(DispatchEditorAction(EditorAction::Drag {
                                         offset: marker_start,
-                                    }),
+                                    })),
                                     cx,
                                 );
                             }
@@ -1241,11 +1209,11 @@ impl RenderOnce for Line {
                             move |event: &MouseDownEvent, window, cx| {
                                 cx.stop_propagation();
                                 window.dispatch_action(
-                                    Box::new(ClickAtOffset {
+                                    Box::new(DispatchEditorAction(EditorAction::Click {
                                         offset: marker_start,
                                         shift: event.modifiers.shift,
                                         click_count: event.click_count,
-                                    }),
+                                    })),
                                     cx,
                                 );
                             },
@@ -1259,7 +1227,12 @@ impl RenderOnce for Line {
                         .child(checkbox_str.to_string())
                         .on_mouse_down(MouseButton::Left, move |_event, window, cx| {
                             cx.stop_propagation();
-                            window.dispatch_action(Box::new(ToggleCheckbox { line_number }), cx);
+                            window.dispatch_action(
+                                Box::new(DispatchEditorAction(EditorAction::ToggleCheckbox {
+                                    line_number,
+                                })),
+                                cx,
+                            );
                         });
 
                     let mut marker_label = div()
@@ -1284,9 +1257,9 @@ impl RenderOnce for Line {
                             if event.pressed_button == Some(MouseButton::Left) {
                                 cx.stop_propagation();
                                 window.dispatch_action(
-                                    Box::new(DragToOffset {
+                                    Box::new(DispatchEditorAction(EditorAction::Drag {
                                         offset: marker_start,
-                                    }),
+                                    })),
                                     cx,
                                 );
                             }
@@ -1406,7 +1379,12 @@ impl RenderOnce for Line {
                         && visual_index >= range.start
                         && visual_index < range.end
                     {
-                        window.dispatch_action(Box::new(ToggleCheckbox { line_number }), cx);
+                        window.dispatch_action(
+                            Box::new(DispatchEditorAction(EditorAction::ToggleCheckbox {
+                                line_number,
+                            })),
+                            cx,
+                        );
                         return;
                     }
 
@@ -1423,7 +1401,12 @@ impl RenderOnce for Line {
                     if event.modifiers.control || event.modifiers.platform {
                         for (range, url) in &link_regions {
                             if buffer_offset >= range.start && buffer_offset <= range.end {
-                                window.dispatch_action(Box::new(OpenLink { url: url.clone() }), cx);
+                                window.dispatch_action(
+                                    Box::new(DispatchEditorAction(EditorAction::OpenLink {
+                                        url: url.clone(),
+                                    })),
+                                    cx,
+                                );
                                 return;
                             }
                         }
@@ -1431,11 +1414,11 @@ impl RenderOnce for Line {
 
                     window.prevent_default();
                     window.dispatch_action(
-                        Box::new(ClickAtOffset {
+                        Box::new(DispatchEditorAction(EditorAction::Click {
                             offset: buffer_offset,
                             shift: event.modifiers.shift,
                             click_count: event.click_count,
-                        }),
+                        })),
                         cx,
                     );
                 },
@@ -1480,9 +1463,9 @@ impl RenderOnce for Line {
                         line_range_for_move.end,
                     );
                     window.dispatch_action(
-                        Box::new(DragToOffset {
+                        Box::new(DispatchEditorAction(EditorAction::Drag {
                             offset: buffer_offset,
-                        }),
+                        })),
                         cx,
                     );
                 }
@@ -1509,10 +1492,10 @@ impl RenderOnce for Line {
                     .any(|range| buffer_offset >= range.start && buffer_offset < range.end);
 
                 window.dispatch_action(
-                    Box::new(UpdateHover {
+                    Box::new(DispatchEditorAction(EditorAction::UpdateHover {
                         over_checkbox: hovering_checkbox,
                         over_link: hovering_link_region,
-                    }),
+                    })),
                     cx,
                 );
             });

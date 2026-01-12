@@ -1,8 +1,10 @@
+use gpui::Action;
+
 /// An action that can be executed on the editor programmatically.
 ///
 /// Use with [`Editor::execute`](super::Editor::execute) to control the editor
 /// from code, such as in scripted demos.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum EditorAction {
     /// Insert a character at the cursor.
     Type(char),
@@ -20,13 +22,35 @@ pub enum EditorAction {
     Backspace,
     /// Move the cursor in a direction.
     Move(Direction),
+    /// Click at a buffer offset.
+    Click {
+        offset: usize,
+        shift: bool,
+        click_count: usize,
+    },
+    /// Drag to extend selection to a buffer offset.
+    Drag { offset: usize },
+    /// Toggle a checkbox on a line.
+    ToggleCheckbox { line_number: usize },
+    /// Update hover state.
+    UpdateHover {
+        over_checkbox: bool,
+        over_link: bool,
+    },
+    /// Open a link URL.
+    OpenLink { url: String },
 }
 
 /// Cursor movement direction.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum Direction {
     Left,
     Right,
     Up,
     Down,
 }
+
+/// Wrapper to dispatch EditorAction via GPUI's action system.
+#[derive(Clone, PartialEq, Debug, Action)]
+#[action(no_json)]
+pub struct DispatchEditorAction(pub EditorAction);
