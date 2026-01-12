@@ -3,7 +3,7 @@ use std::ops::Range;
 use std::path::PathBuf;
 
 use gpui::{
-    App, CursorStyle, Font, FontStyle, FontWeight, Hsla, IntoElement, MouseButton, MouseDownEvent,
+    App, Font, FontStyle, FontWeight, Hsla, IntoElement, MouseButton, MouseDownEvent,
     MouseMoveEvent, RenderOnce, Rgba, ScrollAnchor, SharedString, StyledText, TextRun, Window,
     canvas, div, img, point, prelude::*, px, rems,
 };
