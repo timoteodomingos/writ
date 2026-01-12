@@ -557,22 +557,179 @@ impl EditorState {
         result
     }
 
-    /// Find the byte range of the list_item containing the given byte offset.
-    /// Returns None if not inside a list_item.
-    fn find_list_item_range(&self, byte_offset: usize) -> Option<std::ops::Range<usize>> {
+    /// Find the list_item node containing the given byte offset.
+    fn find_list_item_node(&self, byte_offset: usize) -> Option<tree_sitter::Node<'_>> {
         let tree = self.buffer.tree()?;
         let root = tree.block_tree().root_node();
         let node = root.descendant_for_byte_range(byte_offset, byte_offset)?;
 
-        // Walk up to find the containing list_item
         let mut current = Some(node);
         while let Some(n) = current {
             if n.kind() == "list_item" {
-                return Some(n.start_byte()..n.end_byte());
+                return Some(n);
             }
             current = n.parent();
         }
         None
+    }
+
+    /// Find all checkboxes nested within a list_item node.
+    /// Returns Vec of (checkbox_byte_offset, is_checked).
+    fn find_nested_checkboxes(&self, list_item_node: tree_sitter::Node) -> Vec<(usize, bool)> {
+        let mut checkboxes = Vec::new();
+        let mut cursor = list_item_node.walk();
+
+        loop {
+            let node = cursor.node();
+            match node.kind() {
+                "task_list_marker_checked" => {
+                    checkboxes.push((node.start_byte(), true));
+                }
+                "task_list_marker_unchecked" => {
+                    checkboxes.push((node.start_byte(), false));
+                }
+                _ => {}
+            }
+
+            if cursor.goto_first_child() {
+                continue;
+            }
+            if cursor.goto_next_sibling() {
+                continue;
+            }
+            loop {
+                if !cursor.goto_parent() {
+                    return checkboxes;
+                }
+                if cursor.node().id() == list_item_node.id() {
+                    return checkboxes;
+                }
+                if cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+        }
+    }
+
+    /// Find the parent list_item's checkbox, if any.
+    /// Returns (checkbox_byte_offset, is_checked).
+    fn find_parent_checkbox(&self, list_item_start: usize) -> Option<(usize, bool)> {
+        let tree = self.buffer.tree()?;
+        let root = tree.block_tree().root_node();
+        let node = root.descendant_for_byte_range(list_item_start, list_item_start)?;
+
+        // Find our list_item first
+        let mut current = Some(node);
+        let mut our_list_item = None;
+        while let Some(n) = current {
+            if n.kind() == "list_item" {
+                our_list_item = Some(n);
+                break;
+            }
+            current = n.parent();
+        }
+
+        // Walk up to find parent list_item
+        let our_list_item = our_list_item?;
+        let mut current = our_list_item.parent();
+        while let Some(n) = current {
+            if n.kind() == "list_item" {
+                // Found parent list_item, find its checkbox among direct children
+                let mut cursor = n.walk();
+                if cursor.goto_first_child() {
+                    loop {
+                        let child = cursor.node();
+                        match child.kind() {
+                            "task_list_marker_checked" => {
+                                return Some((child.start_byte(), true));
+                            }
+                            "task_list_marker_unchecked" => {
+                                return Some((child.start_byte(), false));
+                            }
+                            _ => {}
+                        }
+                        if !cursor.goto_next_sibling() {
+                            break;
+                        }
+                    }
+                }
+                return None;
+            }
+            current = n.parent();
+        }
+        None
+    }
+
+    /// Find all sibling checkboxes (same nesting level).
+    /// Returns Vec of (checkbox_byte_offset, is_checked).
+    fn find_sibling_checkboxes(&self, list_item_start: usize) -> Vec<(usize, bool)> {
+        let tree = match self.buffer.tree() {
+            Some(t) => t,
+            None => return Vec::new(),
+        };
+        let root = tree.block_tree().root_node();
+        let node = match root.descendant_for_byte_range(list_item_start, list_item_start) {
+            Some(n) => n,
+            None => return Vec::new(),
+        };
+
+        // Find our list_item
+        let mut current = Some(node);
+        let mut our_list_item = None;
+        while let Some(n) = current {
+            if n.kind() == "list_item" {
+                our_list_item = Some(n);
+                break;
+            }
+            current = n.parent();
+        }
+
+        let our_list_item = match our_list_item {
+            Some(n) => n,
+            None => return Vec::new(),
+        };
+
+        // Get parent list node
+        let parent_list = match our_list_item.parent() {
+            Some(p) if p.kind() == "list" => p,
+            _ => return Vec::new(),
+        };
+
+        // Iterate all list_item children and collect their checkboxes
+        let mut siblings = Vec::new();
+        let mut cursor = parent_list.walk();
+        if cursor.goto_first_child() {
+            loop {
+                let child = cursor.node();
+                if child.kind() == "list_item" {
+                    // Find checkbox in this list_item (direct child only)
+                    let mut inner_cursor = child.walk();
+                    if inner_cursor.goto_first_child() {
+                        loop {
+                            let inner_child = inner_cursor.node();
+                            match inner_child.kind() {
+                                "task_list_marker_checked" => {
+                                    siblings.push((inner_child.start_byte(), true));
+                                    break;
+                                }
+                                "task_list_marker_unchecked" => {
+                                    siblings.push((inner_child.start_byte(), false));
+                                    break;
+                                }
+                                _ => {}
+                            }
+                            if !inner_cursor.goto_next_sibling() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                if !cursor.goto_next_sibling() {
+                    break;
+                }
+            }
+        }
+        siblings
     }
 
     /// Set the line prefix, replacing current markers.
@@ -736,6 +893,213 @@ impl EditorState {
 
     pub fn handle_drag(&mut self, buffer_offset: usize) {
         self.selection = self.selection.extend_to(buffer_offset);
+    }
+
+    /// Toggle a checkbox on the given line, propagating to children and parents.
+    pub fn toggle_checkbox_for_test(&mut self, line_number: usize) {
+        let (is_checked, checkbox_byte_start) = {
+            if line_number >= self.buffer.line_count() {
+                return;
+            }
+            let line = self.buffer.line_markers(line_number);
+
+            let Some(is_checked) = line.checkbox() else {
+                return;
+            };
+
+            let line_text = self.buffer.slice_cow(line.range.clone());
+            let checkbox_pattern = if is_checked { "[x]" } else { "[ ]" };
+            let alt_pattern = if is_checked { "[X]" } else { "" };
+
+            let checkbox_offset = line_text.find(checkbox_pattern).or_else(|| {
+                if !alt_pattern.is_empty() {
+                    line_text.find(alt_pattern)
+                } else {
+                    None
+                }
+            });
+
+            let Some(relative_offset) = checkbox_offset else {
+                return;
+            };
+
+            let checkbox_byte_start = line.range.start + relative_offset;
+            (is_checked, checkbox_byte_start)
+        };
+
+        let new_checked = !is_checked;
+        let mut cursor_pos = self.cursor().offset;
+
+        // Find the list_item node for this checkbox - use checkbox_byte_start for accurate node finding
+        let list_item_node = self.find_list_item_node(checkbox_byte_start);
+
+        // Collect all checkboxes to toggle (clicked + nested children)
+        let mut checkboxes_to_toggle: Vec<(usize, bool)> = Vec::new();
+
+        if let Some(node) = list_item_node {
+            // Get all nested checkboxes within this list_item
+            let nested = self.find_nested_checkboxes(node);
+            for (offset, currently_checked) in nested {
+                // Only toggle if state differs from target
+                if currently_checked != new_checked {
+                    checkboxes_to_toggle.push((offset, currently_checked));
+                }
+            }
+        } else {
+            // No list_item found, just toggle the clicked checkbox
+            checkboxes_to_toggle.push((checkbox_byte_start, is_checked));
+        }
+
+        // Sort by offset descending so we can modify without invalidating earlier offsets
+        checkboxes_to_toggle.sort_by(|a, b| b.0.cmp(&a.0));
+
+        // Toggle each checkbox
+        for (offset, _currently_checked) in &checkboxes_to_toggle {
+            let content_start = offset + 1; // skip '['
+            let content_end = content_start + 1;
+            let new_content = if new_checked { "x" } else { " " };
+            self.buffer
+                .replace(content_start..content_end, new_content, cursor_pos);
+        }
+
+        // Handle strikethrough for each toggled checkbox's line
+        // Process in reverse order (highest offset first) since strikethrough changes byte offsets
+        for (offset, _) in &checkboxes_to_toggle {
+            let line_idx = self.buffer.byte_to_line(*offset);
+            let adjustment = self.toggle_line_strikethrough(line_idx, new_checked, cursor_pos);
+            cursor_pos = (cursor_pos as isize + adjustment) as usize;
+        }
+
+        // Propagate upward: if checking and all siblings are now checked, check parent
+        // If unchecking, uncheck parent if it was checked
+        self.propagate_checkbox_up(checkbox_byte_start, new_checked, &mut cursor_pos);
+
+        self.selection = Selection::new(cursor_pos, cursor_pos);
+    }
+
+    /// Propagate checkbox state upward through parent list items.
+    fn propagate_checkbox_up(
+        &mut self,
+        list_item_start: usize,
+        checked: bool,
+        cursor_pos: &mut usize,
+    ) {
+        // Find parent checkbox
+        let parent_info = self.find_parent_checkbox(list_item_start);
+        let Some((parent_offset, parent_checked)) = parent_info else {
+            return;
+        };
+
+        if checked {
+            // When checking: only auto-check parent if ALL siblings are now checked
+            let siblings = self.find_sibling_checkboxes(list_item_start);
+            let all_checked = siblings.iter().all(|(_, is_checked)| *is_checked);
+
+            if all_checked && !parent_checked {
+                // Check the parent
+                let content_start = parent_offset + 1;
+                let content_end = content_start + 1;
+                self.buffer
+                    .replace(content_start..content_end, "x", *cursor_pos);
+
+                // Toggle strikethrough for parent's direct content line
+                let parent_line = self.buffer.byte_to_line(parent_offset);
+                let adjustment = self.toggle_line_strikethrough(parent_line, true, *cursor_pos);
+                *cursor_pos = (*cursor_pos as isize + adjustment) as usize;
+
+                // Recursively propagate up
+                self.propagate_checkbox_up(parent_offset, true, cursor_pos);
+            }
+        } else {
+            // When unchecking: uncheck parent if it was checked
+            if parent_checked {
+                let content_start = parent_offset + 1;
+                let content_end = content_start + 1;
+                self.buffer
+                    .replace(content_start..content_end, " ", *cursor_pos);
+
+                // Remove strikethrough from parent's direct content line
+                let parent_line = self.buffer.byte_to_line(parent_offset);
+                let adjustment = self.toggle_line_strikethrough(parent_line, false, *cursor_pos);
+                *cursor_pos = (*cursor_pos as isize + adjustment) as usize;
+
+                // Recursively propagate up
+                self.propagate_checkbox_up(parent_offset, false, cursor_pos);
+            }
+        }
+    }
+
+    /// Add or remove strikethrough (`~~`) from a line's content.
+    fn toggle_line_strikethrough(
+        &mut self,
+        line_idx: usize,
+        add_strikethrough: bool,
+        cursor_pos: usize,
+    ) -> isize {
+        if line_idx >= self.buffer.line_count() {
+            return 0;
+        }
+        let line = self.buffer.line_markers(line_idx);
+
+        let content_start = line.content_start();
+        let content_end = line.range.end;
+
+        if content_start >= content_end {
+            return 0;
+        }
+
+        let content = self.buffer.slice_cow(content_start..content_end);
+        let trimmed = content.trim();
+
+        if trimmed.is_empty() {
+            return 0;
+        }
+
+        if add_strikethrough {
+            if trimmed.starts_with("~~") && trimmed.ends_with("~~") {
+                return 0;
+            }
+
+            let leading_ws = content.len() - content.trim_start().len();
+            let trailing_ws = content.len() - content.trim_end().len();
+
+            let text_start = content_start + leading_ws;
+            let text_end = content_end - trailing_ws;
+
+            self.buffer.insert(text_end, "~~", cursor_pos);
+            self.buffer.insert(text_start, "~~", cursor_pos);
+
+            let mut adjustment: isize = 0;
+            if cursor_pos > text_start {
+                adjustment += 2;
+            }
+            if cursor_pos > text_end {
+                adjustment += 2;
+            }
+            adjustment
+        } else {
+            let leading_ws = content.len() - content.trim_start().len();
+            let text_start = content_start + leading_ws;
+
+            if trimmed.starts_with("~~") && trimmed.ends_with("~~") && trimmed.len() >= 4 {
+                let trailing_ws = content.len() - content.trim_end().len();
+                let text_end = content_end - trailing_ws;
+
+                self.buffer.delete((text_end - 2)..text_end, cursor_pos);
+                self.buffer.delete(text_start..(text_start + 2), cursor_pos);
+
+                let mut adjustment: isize = 0;
+                if cursor_pos > text_start + 2 {
+                    adjustment -= 2;
+                }
+                if cursor_pos > text_end {
+                    adjustment -= 2;
+                }
+                adjustment
+            } else {
+                0
+            }
+        }
     }
 }
 
@@ -1019,148 +1383,8 @@ impl Editor {
     }
 
     fn toggle_checkbox(&mut self, line_number: usize, cx: &mut Context<Self>) {
-        let (is_checked, checkbox_content_start, checkbox_content_end, line_range_start) = {
-            if line_number >= self.state.buffer.line_count() {
-                return;
-            }
-            let line = self.state.buffer.line_markers(line_number);
-
-            let Some(is_checked) = line.checkbox() else {
-                return;
-            };
-
-            let line_text = self.state.buffer.slice_cow(line.range.clone());
-            let checkbox_pattern = if is_checked { "[x]" } else { "[ ]" };
-            let alt_pattern = if is_checked { "[X]" } else { "" };
-
-            let checkbox_offset = line_text.find(checkbox_pattern).or_else(|| {
-                if !alt_pattern.is_empty() {
-                    line_text.find(alt_pattern)
-                } else {
-                    None
-                }
-            });
-
-            let Some(relative_offset) = checkbox_offset else {
-                return;
-            };
-
-            let checkbox_content_start = line.range.start + relative_offset + 1;
-            let checkbox_content_end = checkbox_content_start + 1;
-            (
-                is_checked,
-                checkbox_content_start,
-                checkbox_content_end,
-                line.range.start,
-            )
-        };
-
-        let new_content = if is_checked { " " } else { "x" };
-        let mut cursor_pos = self.cursor().offset;
-
-        let list_item_range = self.state.find_list_item_range(line_range_start);
-
-        self.state.buffer.replace(
-            checkbox_content_start..checkbox_content_end,
-            new_content,
-            cursor_pos,
-        );
-
-        if let Some(item_range) = list_item_range {
-            let start_line = self.state.buffer.byte_to_line(item_range.start);
-            let end_line = self
-                .state
-                .buffer
-                .byte_to_line(item_range.end.saturating_sub(1));
-
-            for line_idx in (start_line..=end_line).rev() {
-                let adjustment = self.toggle_line_strikethrough(line_idx, !is_checked, cursor_pos);
-                cursor_pos = (cursor_pos as isize + adjustment) as usize;
-            }
-        }
-
-        self.state.selection = Selection::new(cursor_pos, cursor_pos);
-
+        self.state.toggle_checkbox_for_test(line_number);
         cx.notify();
-    }
-
-    /// Add or remove strikethrough (`~~`) from a line's content.
-    /// Only wraps the text content after all markers (including indent).
-    /// Returns the cursor adjustment (positive if content added before cursor, negative if removed).
-    fn toggle_line_strikethrough(
-        &mut self,
-        line_idx: usize,
-        add_strikethrough: bool,
-        cursor_pos: usize,
-    ) -> isize {
-        if line_idx >= self.state.buffer.line_count() {
-            return 0;
-        }
-        let line = self.state.buffer.line_markers(line_idx);
-
-        let content_start = line.content_start();
-        let content_end = line.range.end;
-
-        if content_start >= content_end {
-            return 0;
-        }
-
-        let content = self.state.buffer.slice_cow(content_start..content_end);
-        let trimmed = content.trim();
-
-        if trimmed.is_empty() {
-            return 0;
-        }
-
-        if add_strikethrough {
-            if trimmed.starts_with("~~") && trimmed.ends_with("~~") {
-                return 0;
-            }
-
-            let leading_ws = content.len() - content.trim_start().len();
-            let trailing_ws = content.len() - content.trim_end().len();
-
-            let text_start = content_start + leading_ws;
-            let text_end = content_end - trailing_ws;
-
-            self.state.buffer.insert(text_end, "~~", cursor_pos);
-            self.state.buffer.insert(text_start, "~~", cursor_pos);
-
-            let mut adjustment: isize = 0;
-            if cursor_pos > text_start {
-                adjustment += 2; // opening ~~ inserted before cursor
-            }
-            if cursor_pos > text_end {
-                adjustment += 2; // closing ~~ inserted before cursor
-            }
-            adjustment
-        } else {
-            let leading_ws = content.len() - content.trim_start().len();
-            let text_start = content_start + leading_ws;
-
-            if trimmed.starts_with("~~") && trimmed.ends_with("~~") && trimmed.len() >= 4 {
-                let trailing_ws = content.len() - content.trim_end().len();
-                let text_end = content_end - trailing_ws;
-
-                self.state
-                    .buffer
-                    .delete((text_end - 2)..text_end, cursor_pos);
-                self.state
-                    .buffer
-                    .delete(text_start..(text_start + 2), cursor_pos);
-
-                let mut adjustment: isize = 0;
-                if cursor_pos > text_start + 2 {
-                    adjustment -= 2; // opening ~~ removed before cursor
-                }
-                if cursor_pos > text_end {
-                    adjustment -= 2; // closing ~~ removed before cursor
-                }
-                adjustment
-            } else {
-                0
-            }
-        }
     }
 
     fn insert_text(&mut self, text: &str) {
@@ -2564,6 +2788,99 @@ mod tests {
             assert_editor_eq(&state, "> |1. ");
             state.move_left();
             assert_editor_eq(&state, "|> 1. ");
+        }
+    }
+
+    mod checkbox_propagation_tests {
+        use super::*;
+
+        #[test]
+        fn check_parent_checks_all_children() {
+            let mut state = editor_with_cursor("- [ ] |parent\n  - [ ] child1\n  - [ ] child2\n");
+            state.toggle_checkbox_for_test(0);
+            let text = state.text();
+            assert!(text.contains("[x] ~~parent~~"), "parent should be checked");
+            assert!(text.contains("[x] ~~child1~~"), "child1 should be checked");
+            assert!(text.contains("[x] ~~child2~~"), "child2 should be checked");
+        }
+
+        #[test]
+        fn uncheck_parent_unchecks_all_children() {
+            let mut state =
+                editor_with_cursor("- [x] ~~|parent~~\n  - [x] ~~child1~~\n  - [x] ~~child2~~\n");
+            state.toggle_checkbox_for_test(0);
+            let text = state.text();
+            assert!(text.contains("[ ] parent"), "parent should be unchecked");
+            assert!(text.contains("[ ] child1"), "child1 should be unchecked");
+            assert!(text.contains("[ ] child2"), "child2 should be unchecked");
+            assert!(!text.contains("~~"), "no strikethrough should remain");
+        }
+
+        #[test]
+        fn check_all_siblings_checks_parent() {
+            let mut state =
+                editor_with_cursor("- [ ] parent\n  - [x] ~~child1~~\n  - [ ] |child2\n");
+            state.toggle_checkbox_for_test(2);
+            let text = state.text();
+            assert!(
+                text.contains("[x] ~~parent~~"),
+                "parent should be auto-checked"
+            );
+            assert!(
+                text.contains("[x] ~~child1~~"),
+                "child1 should remain checked"
+            );
+            assert!(text.contains("[x] ~~child2~~"), "child2 should be checked");
+        }
+
+        #[test]
+        fn uncheck_child_unchecks_parent() {
+            let mut state =
+                editor_with_cursor("- [x] ~~parent~~\n  - [x] ~~|child1~~\n  - [x] ~~child2~~\n");
+            state.toggle_checkbox_for_test(1);
+            let text = state.text();
+            assert!(text.contains("[ ] parent"), "parent should be unchecked");
+            assert!(text.contains("[ ] child1"), "child1 should be unchecked");
+            assert!(
+                text.contains("[x] ~~child2~~"),
+                "child2 should remain checked"
+            );
+        }
+
+        #[test]
+        fn deeply_nested_propagation_down() {
+            let mut state = editor_with_cursor("- [ ] |level1\n  - [ ] level2\n    - [ ] level3\n");
+            state.toggle_checkbox_for_test(0);
+            let text = state.text();
+            assert!(text.contains("[x] ~~level1~~"), "level1 should be checked");
+            assert!(text.contains("[x] ~~level2~~"), "level2 should be checked");
+            assert!(text.contains("[x] ~~level3~~"), "level3 should be checked");
+        }
+
+        #[test]
+        fn deeply_nested_propagation_up() {
+            let mut state = editor_with_cursor("- [ ] level1\n  - [ ] level2\n    - [ ] |level3\n");
+            state.toggle_checkbox_for_test(2);
+            let text = state.text();
+            assert!(
+                text.contains("[x] ~~level1~~"),
+                "level1 should be auto-checked"
+            );
+            assert!(
+                text.contains("[x] ~~level2~~"),
+                "level2 should be auto-checked"
+            );
+            assert!(text.contains("[x] ~~level3~~"), "level3 should be checked");
+        }
+
+        #[test]
+        fn mixed_siblings_parent_stays_unchecked() {
+            let mut state = editor_with_cursor("- [ ] parent\n  - [ ] |child1\n  - [ ] child2\n");
+            state.toggle_checkbox_for_test(1);
+            let text = state.text();
+            assert!(text.contains("[ ] parent"), "parent should stay unchecked");
+            assert!(text.contains("[x] ~~child1~~"), "child1 should be checked");
+            assert!(text.contains("[ ] child2"), "child2 should stay unchecked");
         }
     }
 }
