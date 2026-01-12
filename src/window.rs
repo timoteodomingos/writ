@@ -6,7 +6,7 @@ use gpui::{
 
 use crate::{editor::EditorTheme, title_bar::title_bar};
 
-actions!(window, [CloseWindow, Quit]);
+actions!(window, [CloseWindow, Quit, MinimizeWindow, ZoomWindow]);
 
 #[derive(IntoElement)]
 pub struct WindowShadow {

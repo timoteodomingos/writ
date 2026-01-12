@@ -1,9 +1,7 @@
-use gpui::{
-    App, ClickEvent, ElementId, Fill, Global, MouseButton, ReadGlobal, Window, div, prelude::*,
-    rems,
-};
+use gpui::{Action, App, ElementId, Fill, Global, MouseButton, ReadGlobal, div, prelude::*, rems};
 
 use crate::editor::EditorTheme;
+use crate::window::{CloseWindow, MinimizeWindow, ZoomWindow};
 
 pub struct FileInfo {
     pub path: std::path::PathBuf,
@@ -15,7 +13,7 @@ impl Global for FileInfo {}
 fn traffic_light(
     id: impl Into<ElementId>,
     bg: impl Into<Fill>,
-    on_click: impl Fn(&ClickEvent, &mut Window, &mut App) + 'static,
+    action: impl Action,
 ) -> impl IntoElement {
     div()
         .id(id)
@@ -26,7 +24,12 @@ fn traffic_light(
         .cursor_pointer()
         .hover(|style| style.opacity(0.7))
         .child(div().w(rems(1.0)).h(rems(1.0)).rounded_full().bg(bg))
-        .on_click(on_click)
+        .on_click({
+            let action = action.boxed_clone();
+            move |_, window, cx| {
+                window.dispatch_action(action.boxed_clone(), cx);
+            }
+        })
 }
 
 pub fn title_bar(theme: &EditorTheme, cx: &mut App) -> impl IntoElement {
@@ -90,19 +93,9 @@ pub fn title_bar(theme: &EditorTheme, cx: &mut App) -> impl IntoElement {
                 .child(traffic_light(
                     "minimize-button",
                     theme.orange,
-                    |_, window, _| {
-                        window.minimize_window();
-                    },
+                    MinimizeWindow,
                 ))
-                .child(traffic_light(
-                    "maximize-button",
-                    theme.green,
-                    |_, window, _| {
-                        window.zoom_window();
-                    },
-                ))
-                .child(traffic_light("quit-button", theme.red, |_, window, _| {
-                    window.remove_window();
-                })),
+                .child(traffic_light("maximize-button", theme.green, ZoomWindow))
+                .child(traffic_light("quit-button", theme.red, CloseWindow)),
         )
 }

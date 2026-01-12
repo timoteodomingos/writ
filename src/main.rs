@@ -13,7 +13,7 @@ use writ::{
     editor::{Editor, EditorAction, EditorConfig, EditorTheme},
     http,
     title_bar::FileInfo,
-    window::{CloseWindow, Quit, window_shadow},
+    window::{CloseWindow, MinimizeWindow, Quit, ZoomWindow, window_shadow},
 };
 
 /// Load a file and return its content.
@@ -85,6 +85,12 @@ impl Render for Root {
                 .track_focus(&self.focus_handle)
                 .on_action(|CloseWindow, window, _| {
                     window.remove_window();
+                })
+                .on_action(|MinimizeWindow, window, _| {
+                    window.minimize_window();
+                })
+                .on_action(|ZoomWindow, window, _| {
+                    window.zoom_window();
                 })
                 .on_action(|Quit, _, cx| {
                     cx.quit();
