@@ -82,7 +82,6 @@ pub struct Line {
     base_path: Option<PathBuf>,
     substitution: Option<String>,
     fence_visible: bool,
-    is_selecting: bool,
 }
 
 impl Line {
@@ -96,7 +95,6 @@ impl Line {
         code_highlights: Vec<(HighlightSpan, Rgba)>,
         base_path: Option<PathBuf>,
         fence_visible: bool,
-        is_selecting: bool,
     ) -> Self {
         let substitution = {
             let s = line.substitution_rope(&rope);
@@ -113,7 +111,6 @@ impl Line {
             base_path,
             substitution,
             fence_visible,
-            is_selecting,
         }
     }
 
@@ -420,8 +417,7 @@ impl Line {
         }
 
         let mut boundaries: Vec<usize> = vec![content_range.start, content_range.end];
-        let show_all_markers =
-            self.selection_on_line() || (self.is_selecting && self.cursor_on_line());
+        let show_all_markers = false;
 
         if self.line.heading_level().is_some()
             && let Some(marker_range) = self.line.marker_range()
@@ -642,11 +638,6 @@ impl Line {
     }
 
     fn hidden_bytes_before(&self, offset: usize, content_range: &Range<usize>) -> usize {
-        // When selection is on line or actively selecting on this line, all markers are revealed
-        if self.selection_on_line() || (self.is_selecting && self.cursor_on_line()) {
-            return 0;
-        }
-
         let mut hidden = 0usize;
 
         // For headings, the marker is hidden when cursor is not on line
@@ -1206,8 +1197,7 @@ impl RenderOnce for Line {
             0
         };
 
-        let show_all_markers =
-            self.selection_on_line() || (self.is_selecting && self.cursor_on_line());
+        let show_all_markers = false;
         let cursor_offset = self.cursor_offset;
         let hidden_regions: Vec<(usize, usize, usize, usize)> = if show_all_markers {
             Vec::new()

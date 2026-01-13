@@ -1885,7 +1885,6 @@ impl Render for Editor {
         let theme_for_highlights = self.config.theme.clone();
         let snapshot = self.state.buffer.render_snapshot();
         let cursor_code_block = self.state.cursor_code_block_range();
-        let is_selecting = self.is_selecting;
 
         let line_list = div().id("line-list").size_full().child(
             list(self.list_state.clone(), move |ix, _window, _cx| {
@@ -1916,7 +1915,6 @@ impl Render for Editor {
                     code_highlights,
                     base_path.clone(),
                     fence_visible,
-                    is_selecting,
                 );
 
                 // Add top padding to first line, bottom padding to last line
