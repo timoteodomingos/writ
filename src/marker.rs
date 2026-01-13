@@ -135,6 +135,23 @@ impl LineMarkers {
         Some(start..end)
     }
 
+    /// Returns the range of prefix markers (Indent, BlockQuote) that are rendered as spacers.
+    /// Excludes CodeBlockFence markers. Used by fence lines to know where fence content starts.
+    pub fn prefix_marker_range(&self) -> Option<Range<usize>> {
+        let prefix_markers: Vec<_> = self
+            .markers
+            .iter()
+            .filter(|m| matches!(m.kind, MarkerKind::Indent | MarkerKind::BlockQuote))
+            .collect();
+
+        if prefix_markers.is_empty() {
+            return None;
+        }
+        let start = prefix_markers.last()?.range.start;
+        let end = prefix_markers.first()?.range.end;
+        Some(start..end)
+    }
+
     /// Returns the byte offset where content starts (after all markers).
     pub fn content_start(&self) -> usize {
         self.full_marker_range()

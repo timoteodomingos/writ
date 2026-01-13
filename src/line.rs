@@ -356,7 +356,13 @@ impl Line {
         if self.line.is_fence() {
             let is_visible =
                 self.cursor_on_line() || self.selection_on_line() || self.fence_visible;
-            let fence_text = self.slice(self.line.range.clone());
+            // Use content after prefix markers (Indent, BlockQuote) but include the fence itself
+            let fence_start = self
+                .line
+                .prefix_marker_range()
+                .map(|r| r.end)
+                .unwrap_or(self.line.range.start);
+            let fence_text = self.slice(fence_start..self.line.range.end);
             let backticks: String = fence_text.chars().take_while(|&c| c == '`').collect();
             let language = &fence_text[backticks.len()..];
 
@@ -697,8 +703,15 @@ impl Line {
     }
 
     fn buffer_to_visual_pos(&self, buffer_offset: usize, display_text: &str) -> usize {
-        let content_range = if self.line.is_fence()
-            || self.line.is_thematic_break()
+        let content_range = if self.line.is_fence() {
+            // Fence content starts after prefix markers (Indent, BlockQuote)
+            let start = self
+                .line
+                .prefix_marker_range()
+                .map(|r| r.end)
+                .unwrap_or(self.line.range.start);
+            start..self.line.range.end
+        } else if self.line.is_thematic_break()
             || (self.line.heading_level().is_some()
                 && (self.cursor_on_line() || self.selection_on_line()))
         {
@@ -1163,7 +1176,7 @@ impl RenderOnce for Line {
             }
         }
 
-        if self.line.in_code_block {
+        if self.is_code_block_line() {
             line_div = line_div.text_size(rems(0.9));
         }
 
@@ -1179,10 +1192,15 @@ impl RenderOnce for Line {
         }
         line_div = line_div.child(text_container);
 
-        let content_range_for_handlers = if self.line.is_fence()
-            || self.line.is_thematic_break()
-            || self.line.heading_level().is_some()
-        {
+        let content_range_for_handlers = if self.line.is_fence() {
+            // Fence content starts after prefix markers (Indent, BlockQuote)
+            let start = self
+                .line
+                .prefix_marker_range()
+                .map(|r| r.end)
+                .unwrap_or(self.line.range.start);
+            start..self.line.range.end
+        } else if self.line.is_thematic_break() || self.line.heading_level().is_some() {
             self.line.range.clone()
         } else {
             self.content_range()
