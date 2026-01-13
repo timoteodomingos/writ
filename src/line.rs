@@ -4,8 +4,8 @@ use std::path::PathBuf;
 
 use gpui::{
     App, Font, FontStyle, FontWeight, Hsla, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, RenderOnce, Rgba, ScrollAnchor, SharedString, StyledText, TextRun, Window,
-    canvas, div, img, point, prelude::*, px, rems,
+    MouseMoveEvent, RenderOnce, Rgba, SharedString, StyledText, TextRun, Window, canvas, div, img,
+    point, prelude::*, px, rems,
 };
 use ropey::Rope;
 
@@ -80,7 +80,6 @@ pub struct Line {
     selection_range: Option<Range<usize>>,
     code_highlights: Vec<(HighlightSpan, Rgba)>,
     base_path: Option<PathBuf>,
-    scroll_anchor: Option<ScrollAnchor>,
     substitution: Option<String>,
     fence_visible: bool,
     is_selecting: bool,
@@ -112,7 +111,6 @@ impl Line {
             selection_range,
             code_highlights,
             base_path,
-            scroll_anchor: None,
             substitution,
             fence_visible,
             is_selecting,
@@ -128,11 +126,6 @@ impl Line {
             Some(s) => Cow::Borrowed(s),
             None => Cow::Owned(slice.to_string()),
         }
-    }
-
-    pub fn with_scroll_anchor(mut self, anchor: Option<ScrollAnchor>) -> Self {
-        self.scroll_anchor = anchor;
-        self
     }
 
     fn cursor_on_line(&self) -> bool {
@@ -1424,10 +1417,9 @@ impl RenderOnce for Line {
                             let _ = open::that(&open_url);
                         }
                     },
-                ))
-                .anchor_scroll(self.scroll_anchor);
+                ));
         }
 
-        line_div.anchor_scroll(self.scroll_anchor)
+        line_div
     }
 }

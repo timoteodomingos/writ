@@ -1547,6 +1547,8 @@ impl Editor {
                     if key_char == ">" {
                         self.state.maybe_complete_blockquote_marker();
                     }
+
+                    self.scroll_to_cursor_pending = true;
                 }
             }
         }
@@ -1846,7 +1848,24 @@ impl Render for Editor {
         let cursor_line_changed = self.last_cursor_line != Some(cursor_line);
         self.last_cursor_line = Some(cursor_line);
 
-        if cursor_line_changed {
+        // When scroll is requested (e.g., typing), check if cursor line is near
+        // the bottom edge and scroll to provide buffer for line height growth.
+        if self.scroll_to_cursor_pending {
+            self.scroll_to_cursor_pending = false;
+            let scroll_buffer = rems(1.6).to_pixels(window.rem_size());
+            if let Some(cursor_bounds) = self.list_state.bounds_for_item(cursor_line) {
+                let viewport = self.list_state.viewport_bounds();
+                let cursor_bottom = cursor_bounds.origin.y + cursor_bounds.size.height;
+                let viewport_bottom = viewport.origin.y + viewport.size.height;
+                // Only scroll if cursor is near bottom edge (within buffer zone)
+                if cursor_bottom > viewport_bottom - scroll_buffer {
+                    self.list_state.scroll_to_reveal_item(cursor_line);
+                    self.list_state.scroll_by(scroll_buffer);
+                }
+            } else {
+                self.list_state.scroll_to_reveal_item(cursor_line);
+            }
+        } else if cursor_line_changed {
             if let Some(cursor_bounds) = self.list_state.bounds_for_item(cursor_line) {
                 let viewport = self.list_state.viewport_bounds();
                 let cursor_top = cursor_bounds.origin.y;
