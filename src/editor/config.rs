@@ -31,6 +31,8 @@ pub struct EditorConfig {
     pub padding_x: Rems,
     /// Vertical padding (top and bottom).
     pub padding_y: Rems,
+    /// Line height for text lines.
+    pub line_height: Rems,
 }
 
 impl Default for EditorConfig {
@@ -42,6 +44,7 @@ impl Default for EditorConfig {
             base_path: None,
             padding_x: Rems(0.0),
             padding_y: Rems(0.0),
+            line_height: Rems(1.6),
         }
     }
 }

@@ -170,6 +170,7 @@ fn main() {
                     base_path: file_path.parent().map(|p| p.to_path_buf()),
                     padding_x: Rems(2.0),
                     padding_y: Rems(1.6),
+                    line_height: Rems(1.6),
                 };
 
                 // Create editor with file content and config

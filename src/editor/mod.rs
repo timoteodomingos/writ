@@ -1932,6 +1932,7 @@ impl Render for Editor {
             text_font: font(&self.config.text_font),
             code_font,
             monospace_char_width,
+            line_height: self.config.line_height,
         };
         let cursor_offset = self.state.selection.head;
         let selection_range = if self.state.selection.is_collapsed() {
@@ -1950,7 +1951,7 @@ impl Render for Editor {
         // the bottom edge and scroll to provide buffer for line height growth.
         if self.scroll_to_cursor_pending {
             self.scroll_to_cursor_pending = false;
-            let scroll_buffer = rems(1.6).to_pixels(window.rem_size());
+            let scroll_buffer = self.config.line_height.to_pixels(window.rem_size());
             if let Some(cursor_bounds) = self.list_state.bounds_for_item(cursor_line) {
                 let viewport = self.list_state.viewport_bounds();
                 let cursor_bottom = cursor_bounds.origin.y + cursor_bounds.size.height;
@@ -1981,6 +1982,7 @@ impl Render for Editor {
 
         let line_theme_for_list = line_theme.clone();
         let theme_for_highlights = self.config.theme.clone();
+        let line_height = self.config.line_height;
         let snapshot = self.state.buffer.render_snapshot();
         let cursor_code_block = self.state.cursor_code_block_range();
 
@@ -2019,7 +2021,7 @@ impl Render for Editor {
                 let is_first = ix == 0;
                 let is_last = ix == snapshot.line_count().saturating_sub(1);
                 div()
-                    .when(is_first, |d| d.pt(rems(1.6)))
+                    .when(is_first, |d| d.pt(line_height))
                     .when(is_last, |d| d.pb(rems(4.8)))
                     .child(line_element)
                     .into_any_element()
@@ -2091,8 +2093,9 @@ impl Render for Editor {
                     let window_bounds = window.bounds();
 
                     // Create "hot zones" at the edges that trigger scrolling
-                    // Use the minimum of viewport edge and window edge for each boundary
-                    let zone_size = px(120.0);
+                    // Zone size is one line height - scrolling triggers when mouse enters
+                    // this margin or goes past the viewport entirely
+                    let zone_size = editor.config.line_height.to_pixels(window.rem_size());
 
                     // For top: use viewport top (content starts there)
                     let top_threshold = viewport.origin.y + zone_size;
@@ -2133,6 +2136,12 @@ impl Render for Editor {
                     }
                     editor.last_drag_scroll = Some(now);
 
+                    // Scroll by one line height in the appropriate direction
+                    // Using scroll_by instead of scroll_to_reveal_item gives smoother
+                    // scrolling through wrapped lines (doesn't jump entire item)
+                    let scroll_amount = if direction < 0 { -zone_size } else { zone_size };
+                    editor.list_state.scroll_by(scroll_amount);
+
                     // Move cursor one line in the appropriate direction
                     let cursor = editor.state.selection.cursor();
                     let new_cursor = if direction < 0 {
@@ -2141,7 +2150,6 @@ impl Render for Editor {
                         cursor.move_down(&editor.state.buffer)
                     };
                     editor.state.selection = editor.state.selection.extend_to(new_cursor.offset);
-                    editor.request_scroll_to_cursor();
                     cx.notify();
                 },
             ))
