@@ -61,9 +61,9 @@ pub fn status_bar(cx: &App) -> impl IntoElement {
     let config = Config::global(cx);
 
     // Scroll indicator: Top/Bot/All or percentage
-    let scroll_str = if info.total_lines <= 1 {
-        "All".to_string()
-    } else if info.first_visible_line == 0 && info.last_visible_line >= info.total_lines - 1 {
+    let scroll_str = if info.total_lines <= 1
+        || (info.first_visible_line == 0 && info.last_visible_line >= info.total_lines - 1)
+    {
         "All".to_string()
     } else if info.first_visible_line == 0 {
         "Top".to_string()

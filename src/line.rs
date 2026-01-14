@@ -780,23 +780,22 @@ impl Line {
                 // at cursor_pos. At wrap boundaries, position_for_index(n) returns end-of-row
                 // position. Check if next char exists and is on a different row - if so, use
                 // the y from next char's position with x=0 (start of that row).
-                if cursor_pos < text_layout.len() {
-                    if let Some(next_pos) = text_layout.position_for_index(cursor_pos + 1) {
-                        if let Some(curr_pos) = text_layout.position_for_index(cursor_pos) {
-                            let line_height = text_layout.line_height();
-                            let curr_row = (curr_pos.y / line_height).floor();
-                            let next_row = (next_pos.y / line_height).floor();
-                            // At wrap boundary: curr is at end of row, next is at start of new row
-                            if next_row > curr_row {
-                                // The cursor should appear at the start of the wrapped row.
-                                // Use x from first char (index 0) to get the row start position.
-                                let row_start_x = text_layout
-                                    .position_for_index(0)
-                                    .map(|p| p.x)
-                                    .unwrap_or(px(0.0));
-                                return Some(point(row_start_x, next_pos.y));
-                            }
-                        }
+                if cursor_pos < text_layout.len()
+                    && let Some(next_pos) = text_layout.position_for_index(cursor_pos + 1)
+                    && let Some(curr_pos) = text_layout.position_for_index(cursor_pos)
+                {
+                    let line_height = text_layout.line_height();
+                    let curr_row = (curr_pos.y / line_height).floor();
+                    let next_row = (next_pos.y / line_height).floor();
+                    // At wrap boundary: curr is at end of row, next is at start of new row
+                    if next_row > curr_row {
+                        // The cursor should appear at the start of the wrapped row.
+                        // Use x from first char (index 0) to get the row start position.
+                        let row_start_x = text_layout
+                            .position_for_index(0)
+                            .map(|p| p.x)
+                            .unwrap_or(px(0.0));
+                        return Some(point(row_start_x, next_pos.y));
                     }
                 }
                 text_layout.position_for_index(cursor_pos)
