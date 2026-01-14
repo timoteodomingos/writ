@@ -52,11 +52,22 @@ pub struct LineContext {
     pub prev_line: Option<LineMarkers>,
 }
 
+/// Cached tab cycle states for a specific line.
+#[derive(Clone, Default)]
+struct TabCycleCache {
+    /// The line index this cache is for.
+    line_idx: usize,
+    /// The cached cycle states.
+    states: Vec<String>,
+}
+
 /// Core editing state that can be used without GPUI context.
 /// This contains the buffer and selection, and all editing logic.
 pub struct EditorState {
     pub buffer: Buffer,
     pub selection: Selection,
+    /// Cached tab cycle states to avoid recalculating mid-cycle.
+    tab_cycle_cache: Option<TabCycleCache>,
 }
 
 impl EditorState {
@@ -65,6 +76,7 @@ impl EditorState {
         Self {
             buffer,
             selection: Selection::new(0, 0),
+            tab_cycle_cache: None,
         }
     }
 
@@ -120,6 +132,8 @@ impl EditorState {
 
     /// Insert text at the current cursor position.
     pub fn insert_text(&mut self, text: &str) {
+        // Clear tab cycle cache since content is changing
+        self.tab_cycle_cache = None;
         let cursor_before = self.cursor().offset;
         let insert_pos = if !self.selection.is_collapsed() {
             let range = self.selection.range();
@@ -290,7 +304,7 @@ impl EditorState {
 
     /// Tab: cycle forward through nesting states based on tree-sitter context.
     pub fn tab(&mut self) {
-        let Some((states, current_idx)) = self.tab_cycle_state_from_tree() else {
+        let Some((states, current_idx, prefix_end)) = self.get_tab_cycle_state() else {
             return;
         };
 
@@ -299,12 +313,12 @@ impl EditorState {
         }
 
         let next_idx = (current_idx + 1) % states.len();
-        self.set_line_prefix(&states[next_idx]);
+        self.set_line_prefix(&states[next_idx], prefix_end);
     }
 
     /// Shift+Tab: cycle backward through nesting states.
     fn shift_tab_cycle(&mut self) {
-        let Some((states, current_idx)) = self.tab_cycle_state_from_tree() else {
+        let Some((states, current_idx, prefix_end)) = self.get_tab_cycle_state() else {
             return;
         };
 
@@ -317,31 +331,66 @@ impl EditorState {
         } else {
             current_idx - 1
         };
-        self.set_line_prefix(&states[prev_idx]);
+        self.set_line_prefix(&states[prev_idx], prefix_end);
     }
 
-    /// Determine the tab cycle states and current position using tree-sitter.
-    fn tab_cycle_state_from_tree(&self) -> Option<(Vec<String>, usize)> {
+    /// Get tab cycle states, using cache if available for current line.
+    /// Returns (states, current_idx, prefix_end) where prefix_end is where the prefix ends.
+    fn get_tab_cycle_state(&mut self) -> Option<(Vec<String>, usize, usize)> {
         let cursor_offset = self.cursor().offset;
-        let states = self.build_cycle_states_from_tree(cursor_offset);
+        let line_idx = self.buffer.byte_to_line(cursor_offset);
+        let line_start = self.buffer.line_to_byte(line_idx);
+
+        // Check if we have a valid cache for this line
+        let states = if let Some(ref cache) = self.tab_cycle_cache {
+            if cache.line_idx == line_idx {
+                cache.states.clone()
+            } else {
+                // Different line, recalculate and cache
+                let states = self.build_cycle_states_from_tree(cursor_offset);
+                self.tab_cycle_cache = Some(TabCycleCache {
+                    line_idx,
+                    states: states.clone(),
+                });
+                states
+            }
+        } else {
+            // No cache, calculate and cache
+            let states = self.build_cycle_states_from_tree(cursor_offset);
+            self.tab_cycle_cache = Some(TabCycleCache {
+                line_idx,
+                states: states.clone(),
+            });
+            states
+        };
 
         if states.len() <= 1 {
             return None;
         }
 
-        let line_idx = self.buffer.byte_to_line(cursor_offset);
-        let line_start = self.buffer.line_to_byte(line_idx);
-        let current_prefix = self
+        // Find which state matches the current line's prefix
+        // We check if the line starts with each state (longest match wins)
+        let line_end = self
             .buffer
-            .slice_cow(line_start..cursor_offset)
-            .into_owned();
+            .line_to_byte(line_idx + 1)
+            .min(self.buffer.len_bytes());
+        let line_text = self.buffer.slice_cow(line_start..line_end);
 
-        let current_idx = states
-            .iter()
-            .position(|s| s == &current_prefix)
-            .unwrap_or(0);
+        let mut best_match: Option<(usize, &str)> = None;
+        for (idx, state) in states.iter().enumerate() {
+            if line_text.starts_with(state)
+                && (best_match.is_none() || state.len() > best_match.unwrap().1.len())
+            {
+                best_match = Some((idx, state));
+            }
+        }
 
-        Some((states, current_idx))
+        let (current_idx, prefix_end) = match best_match {
+            Some((idx, state)) => (idx, line_start + state.len()),
+            None => (0, line_start), // Default to empty prefix at index 0
+        };
+
+        Some((states, current_idx, prefix_end))
     }
 
     /// Build tab cycle states by walking up the tree-sitter parse tree.
@@ -732,24 +781,34 @@ impl EditorState {
         siblings
     }
 
-    /// Set the line prefix, replacing current markers.
-    fn set_line_prefix(&mut self, new_prefix: &str) {
+    /// Set the line prefix, replacing current markers up to prefix_end.
+    /// Preserves any content after prefix_end and adjusts cursor position.
+    fn set_line_prefix(&mut self, new_prefix: &str, prefix_end: usize) {
         let cursor_offset = self.cursor().offset;
         let line_idx = self.buffer.byte_to_line(cursor_offset);
         let line_start = self.buffer.line_to_byte(line_idx);
 
-        let current_prefix_end = cursor_offset;
+        let old_prefix_len = prefix_end - line_start;
+        let new_prefix_len = new_prefix.len();
+        let len_diff = new_prefix_len as isize - old_prefix_len as isize;
 
-        if current_prefix_end > line_start {
-            self.buffer
-                .delete(line_start..current_prefix_end, cursor_offset);
+        // Delete old prefix
+        if prefix_end > line_start {
+            self.buffer.delete(line_start..prefix_end, cursor_offset);
         }
 
+        // Insert new prefix
         if !new_prefix.is_empty() {
             self.buffer.insert(line_start, new_prefix, line_start);
         }
 
-        let new_cursor = line_start + new_prefix.len();
+        // Adjust cursor: if cursor was after prefix, shift by the length difference
+        // If cursor was in the prefix area, move to end of new prefix
+        let new_cursor = if cursor_offset >= prefix_end {
+            (cursor_offset as isize + len_diff) as usize
+        } else {
+            line_start + new_prefix_len
+        };
         self.selection = Selection::new(new_cursor, new_cursor);
     }
 
@@ -832,6 +891,8 @@ impl EditorState {
     /// Delete backward (backspace). Simple: delete one unit.
     /// Markers and indents are atomic - deleted as a whole.
     pub fn delete_backward(&mut self) {
+        // Clear tab cycle cache since content is changing
+        self.tab_cycle_cache = None;
         if !self.selection.is_collapsed() {
             self.delete_selection();
             return;
@@ -863,6 +924,8 @@ impl EditorState {
 
     /// Delete the character after the cursor, or the selection if active.
     pub fn delete_forward(&mut self) {
+        // Clear tab cycle cache since content is changing
+        self.tab_cycle_cache = None;
         if !self.selection.is_collapsed() {
             self.delete_selection();
         } else if self.cursor().offset < self.buffer.len_bytes() {
@@ -1036,6 +1099,8 @@ impl EditorState {
         add_strikethrough: bool,
         cursor_pos: usize,
     ) -> isize {
+        // Clear tab cycle cache since content is changing
+        self.tab_cycle_cache = None;
         if line_idx >= self.buffer.line_count() {
             return 0;
         }
@@ -2591,6 +2656,31 @@ mod tests {
             state.tab();
             state.tab();
             assert_editor_eq(&state, "- item\n|");
+        }
+
+        #[test]
+        fn tab_cycles_ordered_list_after_checkbox() {
+            // Bug case: ordered list preceded by checkbox content
+            // Cycle should be: "" -> "2. " -> "   1. " -> "" (3 states)
+            let mut state = editor_with_cursor("## Writ\n- [ ] item\n\n1. hey\n|");
+
+            state.tab();
+            assert_editor_eq(&state, "## Writ\n- [ ] item\n\n1. hey\n2. |");
+
+            state.tab();
+            assert_editor_eq(&state, "## Writ\n- [ ] item\n\n1. hey\n   1. |");
+
+            state.tab();
+            assert_editor_eq(&state, "## Writ\n- [ ] item\n\n1. hey\n|");
+        }
+
+        #[test]
+        fn tab_indents_line_with_content() {
+            // Tab should cycle the prefix even when there's content after it
+            // Content is preserved and cursor stays in place relative to content
+            let mut state = editor_with_cursor("1. hey\n2. asdf|");
+            state.tab();
+            assert_editor_eq(&state, "1. hey\n   1. asdf|"); // nested, content preserved
         }
 
         #[test]
