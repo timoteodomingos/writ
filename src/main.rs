@@ -200,6 +200,11 @@ fn main() {
                     })
                     .detach();
 
+                    cx.observe_global::<StatusBarInfo>(|_, cx| {
+                        cx.notify();
+                    })
+                    .detach();
+
                     Root {
                         focus_handle: cx.focus_handle(),
                         editor,

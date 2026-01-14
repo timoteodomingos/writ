@@ -63,6 +63,8 @@ pub struct LineTheme {
     pub code_color: Rgba,
     pub fence_color: Rgba,
     pub fence_lang_color: Rgba,
+    pub checkbox_unchecked_color: Rgba,
+    pub checkbox_checked_color: Rgba,
     pub text_font: Font,
     pub code_font: Font,
     /// Width of a single monospace character in the code font.
@@ -542,7 +544,7 @@ impl Line {
             let mut is_code = false;
             let mut is_strikethrough = false;
             let mut is_link = false;
-            let mut is_checkbox = false;
+            let mut checkbox_state: Option<bool> = None; // None = not checkbox, Some(false) = unchecked, Some(true) = checked
 
             for (style_range, region) in &style_ranges {
                 if style_range.start <= start && end <= style_range.end {
@@ -551,14 +553,22 @@ impl Line {
                     is_code = is_code || region.style.code;
                     is_strikethrough = is_strikethrough || region.style.strikethrough;
                     is_link = is_link || region.link_url.is_some();
-                    is_checkbox = is_checkbox || region.checkbox.is_some();
+                    if checkbox_state.is_none() && region.checkbox.is_some() {
+                        checkbox_state = region.checkbox;
+                    }
 
-                    if is_bold && is_italic && is_code && is_strikethrough && is_link && is_checkbox
+                    if is_bold
+                        && is_italic
+                        && is_code
+                        && is_strikethrough
+                        && is_link
+                        && checkbox_state.is_some()
                     {
                         break;
                     }
                 }
             }
+            let is_checkbox = checkbox_state.is_some();
 
             let in_ordered_marker = ordered_marker_range
                 .as_ref()
@@ -586,7 +596,13 @@ impl Line {
 
             let color: Hsla = if is_strikethrough {
                 self.theme.border_color.into()
-            } else if is_link || is_checkbox {
+            } else if let Some(checked) = checkbox_state {
+                if checked {
+                    self.theme.checkbox_checked_color.into()
+                } else {
+                    self.theme.checkbox_unchecked_color.into()
+                }
+            } else if is_link {
                 self.theme.link_color.into()
             } else if let Some(highlight_color) = self.get_highlight_color_for_range(start, end) {
                 highlight_color.into()

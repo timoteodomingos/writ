@@ -3,6 +3,7 @@
 //! This module provides types for representing markers (blockquotes, lists,
 //! headings, etc.) and functions for extracting them from the parse tree.
 
+use crate::status_bar::ContextMarker;
 use ropey::Rope;
 use std::ops::Range;
 use tree_sitter::Node;
@@ -159,41 +160,41 @@ impl LineMarkers {
             .unwrap_or(self.range.start)
     }
 
-    /// Build a context markers string for display in the status bar.
-    /// E.g. "> - [ ]" for a checkbox in a list in a blockquote.
-    pub fn context_string(&self) -> String {
-        let mut parts = Vec::new();
+    /// Build typed context markers for display in the status bar.
+    /// E.g. [BlockQuote, UnorderedList, CheckboxUnchecked] for a checkbox in a list in a blockquote.
+    pub fn context_markers(&self) -> Vec<ContextMarker> {
+        let mut markers = Vec::new();
 
         // Markers are stored innermost-first, so reverse to get outermost-first
         for marker in self.markers.iter().rev() {
-            let s = match &marker.kind {
-                MarkerKind::BlockQuote => ">".to_string(),
-                MarkerKind::ListItem { ordered: false, .. } => "-".to_string(),
-                MarkerKind::ListItem { ordered: true, .. } => "1.".to_string(),
+            let cm = match &marker.kind {
+                MarkerKind::BlockQuote => ContextMarker::BlockQuote,
+                MarkerKind::ListItem { ordered: false, .. } => ContextMarker::UnorderedList,
+                MarkerKind::ListItem { ordered: true, .. } => ContextMarker::OrderedList,
                 MarkerKind::Checkbox { checked } => {
-                    if *checked { "[x]" } else { "[ ]" }.to_string()
+                    if *checked {
+                        ContextMarker::CheckboxChecked
+                    } else {
+                        ContextMarker::CheckboxUnchecked
+                    }
                 }
-                MarkerKind::Indent => "_".to_string(),
+                MarkerKind::Indent => ContextMarker::Indent,
                 MarkerKind::CodeBlockFence {
                     language,
                     is_opening,
                 } => {
                     if *is_opening {
-                        if let Some(lang) = language {
-                            format!("```{}", lang)
-                        } else {
-                            "```".to_string()
-                        }
+                        ContextMarker::CodeBlock(language.clone())
                     } else {
-                        "```".to_string()
+                        ContextMarker::CodeBlock(None)
                     }
                 }
                 MarkerKind::Heading(_) | MarkerKind::ThematicBreak => continue,
             };
-            parts.push(s);
+            markers.push(cm);
         }
 
-        parts.join(" ")
+        markers
     }
 
     /// Returns the width of the marker (including trailing space) relative to line start.

@@ -1890,16 +1890,33 @@ impl Render for Editor {
         let line_start = self.state.buffer.line_to_byte(cursor_line);
         let cursor_col = cursor_offset - line_start;
         let line_markers = self.state.buffer.line_markers(cursor_line);
-        let context_markers = line_markers.context_string();
+        let context_markers = line_markers.context_markers();
         let heading_level = self.find_current_heading(cursor_line);
         let total_lines = self.state.buffer.line_count();
 
+        let first_visible_line = self.list_state.logical_scroll_top().item_ix;
+        // Estimate last visible line by scanning from first visible until out of viewport
+        let viewport = self.list_state.viewport_bounds();
+        let mut last_visible_line = first_visible_line;
+        for i in first_visible_line..total_lines {
+            if let Some(bounds) = self.list_state.bounds_for_item(i) {
+                if bounds.origin.y <= viewport.origin.y + viewport.size.height {
+                    last_visible_line = i;
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
         cx.set_global(StatusBarInfo {
             context_markers,
             heading_level,
             cursor_line: cursor_line + 1, // 1-indexed
             cursor_col: cursor_col + 1,   // 1-indexed
             total_lines,
+            first_visible_line,
+            last_visible_line,
         });
 
         let theme = self.config.theme.clone();
@@ -1929,6 +1946,8 @@ impl Render for Editor {
             code_color: theme.pink,
             fence_color: theme.comment,
             fence_lang_color: theme.green,
+            checkbox_unchecked_color: theme.orange,
+            checkbox_checked_color: theme.green,
             text_font: font(&self.config.text_font),
             code_font,
             monospace_char_width,
