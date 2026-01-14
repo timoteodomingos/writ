@@ -1,4 +1,4 @@
-use gpui::{Rgba, rgb};
+use gpui::{Global, Rgba, rgb};
 
 use crate::highlight::HIGHLIGHT_NAMES;
 
@@ -96,3 +96,5 @@ impl Default for EditorTheme {
         Self::dracula()
     }
 }
+
+impl Global for EditorTheme {}

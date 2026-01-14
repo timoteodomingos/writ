@@ -50,5 +50,6 @@ pub mod line;
 pub mod marker;
 pub mod parser;
 pub mod paste;
+pub mod status_bar;
 pub mod title_bar;
 pub mod window;

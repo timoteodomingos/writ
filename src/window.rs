@@ -4,7 +4,7 @@ use gpui::{
     px,
 };
 
-use crate::{editor::EditorTheme, title_bar::title_bar};
+use crate::{editor::EditorTheme, status_bar::status_bar, title_bar::title_bar};
 
 actions!(window, [CloseWindow, Quit, MinimizeWindow, ZoomWindow]);
 
@@ -156,7 +156,11 @@ impl RenderOnce for WindowShadow {
                     .flex()
                     .flex_col()
                     .child(title_bar(theme, cx))
-                    .children(self.children),
+                    .child(
+                        // Content area
+                        div().flex_1().min_h_0().w_full().children(self.children),
+                    )
+                    .child(status_bar(cx)),
             )
     }
 }

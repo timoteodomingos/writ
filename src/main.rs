@@ -12,6 +12,7 @@ use writ::{
     demo::{DemoStep, DemoTiming, demo_script},
     editor::{Editor, EditorAction, EditorConfig, EditorTheme},
     http,
+    status_bar::StatusBarInfo,
     title_bar::FileInfo,
     window::{CloseWindow, MinimizeWindow, Quit, ZoomWindow, window_shadow},
 };
@@ -133,6 +134,8 @@ fn main() {
             path: file_path.clone(),
             dirty: false,
         });
+        cx.set_global(StatusBarInfo::default());
+        cx.set_global(EditorTheme::default());
         cx.set_global(config);
         cx.bind_keys([
             KeyBinding::new("ctrl-w", CloseWindow, None),

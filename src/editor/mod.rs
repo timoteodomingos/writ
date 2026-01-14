@@ -28,6 +28,7 @@ impl Render for EmptyDragView {
     }
 }
 
+use crate::status_bar::StatusBarInfo;
 use crate::title_bar::FileInfo;
 
 use crate::buffer::Buffer;
@@ -1367,6 +1368,20 @@ impl Editor {
         self.state.buffer.len_bytes() == 0
     }
 
+    /// Find the nearest heading above or at the given line.
+    /// Returns the heading level (1-6) if found, None otherwise.
+    fn find_current_heading(&self, from_line: usize) -> Option<u8> {
+        for line_idx in (0..=from_line).rev() {
+            let markers = self.state.buffer.line_markers(line_idx);
+            for marker in &markers.markers {
+                if let MarkerKind::Heading(level) = marker.kind {
+                    return Some(level);
+                }
+            }
+        }
+        None
+    }
+
     /// Replace the entire buffer contents, resetting cursor to the start.
     pub fn set_text(&mut self, content: &str, cx: &mut Context<Self>) {
         self.state.buffer = content.parse().unwrap_or_default();
@@ -1868,6 +1883,24 @@ impl Render for Editor {
                 dirty: self.state.buffer.is_dirty(),
             });
         }
+
+        // Update status bar info
+        let cursor_offset = self.state.cursor().offset;
+        let cursor_line = self.state.buffer.byte_to_line(cursor_offset);
+        let line_start = self.state.buffer.line_to_byte(cursor_line);
+        let cursor_col = cursor_offset - line_start;
+        let line_markers = self.state.buffer.line_markers(cursor_line);
+        let context_markers = line_markers.context_string();
+        let heading_level = self.find_current_heading(cursor_line);
+        let total_lines = self.state.buffer.line_count();
+
+        cx.set_global(StatusBarInfo {
+            context_markers,
+            heading_level,
+            cursor_line: cursor_line + 1, // 1-indexed
+            cursor_col: cursor_col + 1,   // 1-indexed
+            total_lines,
+        });
 
         let theme = self.config.theme.clone();
         let code_font = font(&self.config.code_font);
