@@ -28,7 +28,7 @@ impl Render for EmptyDragView {
     }
 }
 
-use crate::status_bar::StatusBarInfo;
+use crate::status_bar::{ContextMarker, StatusBarInfo};
 use crate::title_bar::FileInfo;
 
 use crate::buffer::Buffer;
@@ -683,6 +683,144 @@ impl EditorState {
                 }
             }
         }
+    }
+
+    /// Build full nested context markers by walking up the tree-sitter tree.
+    /// Returns markers from outermost to innermost (e.g., `> - [x] - [ ]`).
+    pub fn build_nested_context(&self, cursor_offset: usize) -> Vec<ContextMarker> {
+        let Some(tree) = self.buffer.tree() else {
+            return Vec::new();
+        };
+
+        let root = tree.block_tree().root_node();
+
+        // Handle edge case: cursor at end of file
+        let lookup_offset = if cursor_offset > 0
+            && root
+                .descendant_for_byte_range(cursor_offset, cursor_offset)
+                .map(|n| n.kind() == "document")
+                .unwrap_or(true)
+        {
+            cursor_offset - 1
+        } else {
+            cursor_offset
+        };
+
+        let Some(node) = root.descendant_for_byte_range(lookup_offset, lookup_offset) else {
+            return Vec::new();
+        };
+
+        // Walk up from current node, collecting context from each relevant ancestor
+        let mut markers_reversed = Vec::new();
+        let mut current = Some(node);
+
+        while let Some(n) = current {
+            match n.kind() {
+                "block_quote" => {
+                    markers_reversed.push(ContextMarker::BlockQuote);
+                }
+                "list_item" => {
+                    // Check if this list_item has a checkbox
+                    let mut has_checkbox = false;
+                    let mut cursor = n.walk();
+                    if cursor.goto_first_child() {
+                        loop {
+                            let child = cursor.node();
+                            match child.kind() {
+                                "task_list_marker_checked" => {
+                                    markers_reversed.push(ContextMarker::CheckboxChecked);
+                                    has_checkbox = true;
+                                    break;
+                                }
+                                "task_list_marker_unchecked" => {
+                                    markers_reversed.push(ContextMarker::CheckboxUnchecked);
+                                    has_checkbox = true;
+                                    break;
+                                }
+                                _ => {}
+                            }
+                            if !cursor.goto_next_sibling() {
+                                break;
+                            }
+                        }
+                    }
+
+                    // Determine if ordered or unordered list by checking parent
+                    if let Some(parent) = n.parent() {
+                        if parent.kind() == "list" {
+                            // Check first child to determine list type
+                            let mut list_cursor = parent.walk();
+                            if list_cursor.goto_first_child() {
+                                let first_item = list_cursor.node();
+                                if first_item.kind() == "list_item" {
+                                    let mut item_cursor = first_item.walk();
+                                    if item_cursor.goto_first_child() {
+                                        loop {
+                                            let child = item_cursor.node();
+                                            if child.kind().starts_with("list_marker_") {
+                                                if child.kind().contains("dot")
+                                                    || child.kind().contains("parenthesis")
+                                                {
+                                                    markers_reversed
+                                                        .push(ContextMarker::OrderedList);
+                                                } else {
+                                                    markers_reversed
+                                                        .push(ContextMarker::UnorderedList);
+                                                }
+                                                break;
+                                            }
+                                            if !item_cursor.goto_next_sibling() {
+                                                break;
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    // If we added checkbox but no list marker yet, we need to add the list marker
+                    // This happens when walking and we find checkbox first
+                    if has_checkbox
+                        && markers_reversed.len() > 0
+                        && !matches!(
+                            markers_reversed.last(),
+                            Some(ContextMarker::OrderedList) | Some(ContextMarker::UnorderedList)
+                        )
+                    {
+                        // Already handled above
+                    }
+                }
+                "fenced_code_block" => {
+                    // Find info_string for language
+                    let mut cursor = n.walk();
+                    let mut language = None;
+                    if cursor.goto_first_child() {
+                        loop {
+                            let child = cursor.node();
+                            if child.kind() == "info_string" {
+                                language = Some(
+                                    self.buffer
+                                        .slice_cow(child.start_byte()..child.end_byte())
+                                        .to_string(),
+                                );
+                                break;
+                            }
+                            if !cursor.goto_next_sibling() {
+                                break;
+                            }
+                        }
+                    }
+                    markers_reversed.push(ContextMarker::CodeBlock(language));
+                }
+                _ => {}
+            }
+            current = n.parent();
+        }
+
+        // Reverse to get outermost-to-innermost order
+        markers_reversed.reverse();
+        markers_reversed
     }
 
     /// Find the parent list_item's checkbox, if any.
@@ -2023,8 +2161,8 @@ impl Render for Editor {
         let cursor_line = self.state.buffer.byte_to_line(cursor_offset);
         let line_start = self.state.buffer.line_to_byte(cursor_line);
         let cursor_col = cursor_offset - line_start;
-        let line_markers = self.state.buffer.line_markers(cursor_line);
-        let context_markers = line_markers.context_markers();
+        // Build full nested context by walking up the tree
+        let context_markers = self.state.build_nested_context(cursor_offset);
         let heading_level = self.find_current_heading(cursor_line);
         let total_lines = self.state.buffer.line_count();
 
@@ -3277,6 +3415,72 @@ mod tests {
             assert!(text.contains("[x] ~~child1~~"), "child1 should be checked");
             assert!(text.contains("[ ] child2"), "child2 should stay unchecked");
         }
+    }
+}
+
+#[cfg(test)]
+mod nested_context_tests {
+    use super::*;
+
+    #[test]
+    fn nested_context_simple_list() {
+        let state = EditorState::new("- item\n");
+        let cursor_offset = 2; // on "item"
+        let markers = state.build_nested_context(cursor_offset);
+        assert_eq!(markers.len(), 1);
+        assert!(matches!(markers[0], ContextMarker::UnorderedList));
+    }
+
+    #[test]
+    fn nested_context_nested_list() {
+        let state = EditorState::new("- parent\n  - child\n");
+        let cursor_offset = 14; // on "child"
+        let markers = state.build_nested_context(cursor_offset);
+        // Should show: - -
+        assert_eq!(markers.len(), 2);
+        assert!(matches!(markers[0], ContextMarker::UnorderedList));
+        assert!(matches!(markers[1], ContextMarker::UnorderedList));
+    }
+
+    #[test]
+    fn nested_context_checkbox_nested() {
+        let state = EditorState::new("- [x] parent\n  - [ ] child\n");
+        let cursor_offset = 20; // on "child"
+        let markers = state.build_nested_context(cursor_offset);
+        // Should show: - [x] - [ ]
+        assert_eq!(markers.len(), 4);
+        assert!(matches!(markers[0], ContextMarker::UnorderedList));
+        assert!(matches!(markers[1], ContextMarker::CheckboxChecked));
+        assert!(matches!(markers[2], ContextMarker::UnorderedList));
+        assert!(matches!(markers[3], ContextMarker::CheckboxUnchecked));
+    }
+
+    #[test]
+    fn nested_context_blockquote_list() {
+        let state = EditorState::new("> - item\n");
+        let cursor_offset = 4; // on "item"
+        let markers = state.build_nested_context(cursor_offset);
+        // Should show: > -
+        assert_eq!(markers.len(), 2);
+        assert!(matches!(markers[0], ContextMarker::BlockQuote));
+        assert!(matches!(markers[1], ContextMarker::UnorderedList));
+    }
+
+    #[test]
+    fn nested_context_ordered_list() {
+        let state = EditorState::new("1. first\n2. second\n");
+        let cursor_offset = 12; // on "second"
+        let markers = state.build_nested_context(cursor_offset);
+        assert_eq!(markers.len(), 1);
+        assert!(matches!(markers[0], ContextMarker::OrderedList));
+    }
+
+    #[test]
+    fn nested_context_empty_line() {
+        let state = EditorState::new("hello\n");
+        let cursor_offset = 2; // on "llo"
+        let markers = state.build_nested_context(cursor_offset);
+        assert_eq!(markers.len(), 0);
     }
 }
 

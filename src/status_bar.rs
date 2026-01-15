@@ -20,8 +20,8 @@ impl ContextMarker {
     pub fn as_str(&self) -> String {
         match self {
             ContextMarker::BlockQuote => ">".to_string(),
-            ContextMarker::UnorderedList => "•".to_string(),
-            ContextMarker::OrderedList => "1.".to_string(),
+            ContextMarker::UnorderedList => "-".to_string(),
+            ContextMarker::OrderedList => "#.".to_string(),
             ContextMarker::CheckboxUnchecked => "[ ]".to_string(),
             ContextMarker::CheckboxChecked => "[x]".to_string(),
             ContextMarker::Indent => "  ".to_string(),
