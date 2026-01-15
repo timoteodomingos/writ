@@ -3,7 +3,6 @@
 //! This module provides types for representing markers (blockquotes, lists,
 //! headings, etc.) and functions for extracting them from the parse tree.
 
-use crate::status_bar::ContextMarker;
 use ropey::Rope;
 use std::ops::Range;
 use tree_sitter::Node;
@@ -158,43 +157,6 @@ impl LineMarkers {
         self.full_marker_range()
             .map(|r| r.end)
             .unwrap_or(self.range.start)
-    }
-
-    /// Build typed context markers for display in the status bar.
-    /// E.g. [BlockQuote, UnorderedList, CheckboxUnchecked] for a checkbox in a list in a blockquote.
-    pub fn context_markers(&self) -> Vec<ContextMarker> {
-        let mut markers = Vec::new();
-
-        // Markers are stored innermost-first, so reverse to get outermost-first
-        for marker in self.markers.iter().rev() {
-            let cm = match &marker.kind {
-                MarkerKind::BlockQuote => ContextMarker::BlockQuote,
-                MarkerKind::ListItem { ordered: false, .. } => ContextMarker::UnorderedList,
-                MarkerKind::ListItem { ordered: true, .. } => ContextMarker::OrderedList,
-                MarkerKind::Checkbox { checked } => {
-                    if *checked {
-                        ContextMarker::CheckboxChecked
-                    } else {
-                        ContextMarker::CheckboxUnchecked
-                    }
-                }
-                MarkerKind::Indent => ContextMarker::Indent,
-                MarkerKind::CodeBlockFence {
-                    language,
-                    is_opening,
-                } => {
-                    if *is_opening {
-                        ContextMarker::CodeBlock(language.clone())
-                    } else {
-                        ContextMarker::CodeBlock(None)
-                    }
-                }
-                MarkerKind::Heading(_) | MarkerKind::ThematicBreak => continue,
-            };
-            markers.push(cm);
-        }
-
-        markers
     }
 
     /// Returns the width of the marker (including trailing space) relative to line start.
