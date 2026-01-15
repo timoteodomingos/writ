@@ -9,7 +9,7 @@ A hybrid markdown editor combining raw text editing with live inline rendering.
 ## Install
 
 ```bash
-cargo install writ
+cargo install writ --locked
 ```
 
 ## Usage
