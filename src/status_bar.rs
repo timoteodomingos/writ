@@ -77,13 +77,79 @@ pub fn status_bar(cx: &App) -> impl IntoElement {
     // Position: Ln 42, Col 15
     let position_str = format!("Ln {}, Col {}", info.cursor_line, info.cursor_col);
 
-    // Build context marker string
-    let marker_str: String = info
-        .context_markers
-        .iter()
-        .map(|m| m.as_str())
-        .collect::<Vec<_>>()
-        .join(" ");
+    // Color palette for nesting depth (cycles when exhausted)
+    let depth_colors = [
+        theme.cyan,
+        theme.purple,
+        theme.green,
+        theme.orange,
+        theme.pink,
+        theme.yellow,
+    ];
+
+    // Build colored marker elements, tracking depth
+    // Each "level" is a blockquote, list item, or code block
+    // Checkboxes share the same color as their parent list marker
+    // Nested checkboxes after first show as `]` or `x]` (e.g., `- [x]] ]x]`)
+    let mut depth = 0;
+    let mut marker_elements: Vec<gpui::AnyElement> = Vec::new();
+    let mut prev_was_checkbox = false;
+
+    for (i, marker) in info.context_markers.iter().enumerate() {
+        // Skip list marker if previous was checkbox
+        let is_list_marker = matches!(
+            marker,
+            ContextMarker::UnorderedList | ContextMarker::OrderedList
+        );
+        if is_list_marker && prev_was_checkbox {
+            // Still increment depth for this level
+            if i > 0 {
+                depth += 1;
+            }
+            continue;
+        }
+
+        // Increment depth before block-level markers (except first)
+        // This groups list marker + checkbox at the same depth
+        if i > 0 {
+            match marker {
+                ContextMarker::BlockQuote
+                | ContextMarker::UnorderedList
+                | ContextMarker::OrderedList
+                | ContextMarker::CodeBlock(_) => {
+                    depth += 1;
+                }
+                _ => {}
+            }
+        }
+
+        // Determine display string and whether to add space
+        let (display_str, needs_space) = match marker {
+            // Nested checkbox: show as ` ]` or `x]` (space for unchecked, x for checked)
+            ContextMarker::CheckboxUnchecked if prev_was_checkbox => (" ]".to_string(), false),
+            ContextMarker::CheckboxChecked if prev_was_checkbox => ("x]".to_string(), false),
+            // Normal marker
+            _ => (marker.as_str(), true),
+        };
+
+        // Add space separator between markers (except for nested checkboxes)
+        if !marker_elements.is_empty() && needs_space {
+            marker_elements.push(div().child(" ").into_any_element());
+        }
+
+        let color = depth_colors[depth % depth_colors.len()];
+        marker_elements.push(
+            div()
+                .text_color(color)
+                .child(display_str)
+                .into_any_element(),
+        );
+
+        prev_was_checkbox = matches!(
+            marker,
+            ContextMarker::CheckboxChecked | ContextMarker::CheckboxUnchecked
+        );
+    }
 
     div()
         .w_full()
@@ -103,13 +169,15 @@ pub fn status_bar(cx: &App) -> impl IntoElement {
                 .flex_row()
                 .justify_between()
                 .child(
-                    // Left: context markers
+                    // Left: context markers with depth colors
                     div()
                         .flex_1()
                         .min_w_0()
                         .whitespace_nowrap()
                         .overflow_hidden()
-                        .child(marker_str),
+                        .flex()
+                        .flex_row()
+                        .children(marker_elements),
                 )
                 .child(
                     // Right: heading, position, lines, scroll
