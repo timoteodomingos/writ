@@ -146,6 +146,11 @@ impl EditorState {
         self.buffer.insert(insert_pos, text, insert_pos);
         let new_pos = insert_pos + text.len();
         self.selection = Selection::new(new_pos, new_pos);
+
+        // After inserting, propagate checkbox state if this line has a checkbox.
+        // This handles the case where tab cycling created an incomplete checkbox line
+        // (e.g., "- [ ] ") and typing content makes it parseable by tree-sitter.
+        self.propagate_checkbox_after_edit();
     }
 
     fn find_line_at(&self, byte_pos: usize) -> Option<(usize, LineMarkers)> {
@@ -315,6 +320,9 @@ impl EditorState {
 
         let next_idx = (current_idx + 1) % states.len();
         self.set_line_prefix(&states[next_idx], prefix_end);
+
+        // After changing structure, propagate checkbox state if this line has a checkbox
+        self.propagate_checkbox_after_edit();
     }
 
     /// Shift+Tab: cycle backward through nesting states.
@@ -333,6 +341,9 @@ impl EditorState {
             current_idx - 1
         };
         self.set_line_prefix(&states[prev_idx], prefix_end);
+
+        // After changing structure, propagate checkbox state if this line has a checkbox
+        self.propagate_checkbox_after_edit();
     }
 
     /// Get tab cycle states, using cache if available for current line.
@@ -342,13 +353,16 @@ impl EditorState {
         let line_idx = self.buffer.byte_to_line(cursor_offset);
         let line_start = self.buffer.line_to_byte(line_idx);
 
+        // Get current line's checkbox state to pass to state builder
+        let current_checkbox = self.buffer.line_markers(line_idx).checkbox();
+
         // Check if we have a valid cache for this line
         let states = if let Some(ref cache) = self.tab_cycle_cache {
             if cache.line_idx == line_idx {
                 cache.states.clone()
             } else {
                 // Different line, recalculate and cache
-                let states = self.build_cycle_states_from_tree(cursor_offset);
+                let states = self.build_cycle_states_from_tree(cursor_offset, current_checkbox);
                 self.tab_cycle_cache = Some(TabCycleCache {
                     line_idx,
                     states: states.clone(),
@@ -357,7 +371,7 @@ impl EditorState {
             }
         } else {
             // No cache, calculate and cache
-            let states = self.build_cycle_states_from_tree(cursor_offset);
+            let states = self.build_cycle_states_from_tree(cursor_offset, current_checkbox);
             self.tab_cycle_cache = Some(TabCycleCache {
                 line_idx,
                 states: states.clone(),
@@ -396,7 +410,12 @@ impl EditorState {
 
     /// Build tab cycle states by walking up the tree-sitter parse tree.
     /// The cycle is determined by context ABOVE the current line, not by current line content.
-    pub fn build_cycle_states_from_tree(&self, cursor_offset: usize) -> Vec<String> {
+    /// If `checkbox_state` is Some, task list markers will use that state instead of the parent's.
+    pub fn build_cycle_states_from_tree(
+        &self,
+        cursor_offset: usize,
+        checkbox_state: Option<bool>,
+    ) -> Vec<String> {
         let Some(tree) = self.buffer.tree() else {
             return vec![String::new()];
         };
@@ -467,8 +486,13 @@ impl EditorState {
                         is_ordered = true;
                     }
                     "task_list_marker_checked" | "task_list_marker_unchecked" => {
-                        marker_text
-                            .push_str(&self.buffer.slice_cow(child.start_byte()..child.end_byte()));
+                        // Use the current line's checkbox state if provided.
+                        // If None (line has no checkbox yet), default to unchecked.
+                        let checkbox_text = match checkbox_state {
+                            Some(true) => "[x]",
+                            Some(false) | None => "[ ]",
+                        };
+                        marker_text.push_str(checkbox_text);
                         marker_text.push(' ');
                     }
                     _ => {}
@@ -896,6 +920,7 @@ impl EditorState {
         self.tab_cycle_cache = None;
         if !self.selection.is_collapsed() {
             self.delete_selection();
+            self.propagate_checkbox_after_edit();
             return;
         }
 
@@ -908,12 +933,14 @@ impl EditorState {
         if let Some((marker_range, _is_indent)) = self.backspace_range_with_type(cursor_pos) {
             self.buffer.delete(marker_range.clone(), cursor_pos);
             self.selection = Selection::new(marker_range.start, marker_range.start);
+            self.propagate_checkbox_after_edit();
             return;
         }
 
         let new_pos = cursor_pos - 1;
         self.buffer.delete(new_pos..cursor_pos, cursor_pos);
         self.selection = Selection::new(new_pos, new_pos);
+        self.propagate_checkbox_after_edit();
     }
 
     fn delete_selection(&mut self) {
@@ -935,6 +962,7 @@ impl EditorState {
             self.buffer
                 .delete(cursor_before..next.offset, cursor_before);
         }
+        self.propagate_checkbox_after_edit();
     }
 
     pub fn handle_click(&mut self, buffer_offset: usize, shift_held: bool, click_count: usize) {
@@ -1090,6 +1118,112 @@ impl EditorState {
                 // Recursively propagate up
                 self.propagate_checkbox_up(parent_offset, false, cursor_pos);
             }
+        }
+    }
+
+    /// Propagate checkbox state after tab cycling changes the structure.
+    /// Propagate checkbox state after editing (insert/delete).
+    /// If current line has a checkbox, propagate from it.
+    /// If not, check if we're inside a parent checkbox and re-evaluate it.
+    fn propagate_checkbox_after_edit(&mut self) {
+        let cursor_offset = self.cursor().offset;
+        let line_idx = self.buffer.byte_to_line(cursor_offset);
+        let markers = self.buffer.line_markers(line_idx);
+
+        if let Some(is_checked) = markers.checkbox() {
+            // Current line has a checkbox - propagate from it
+            let line_text = self.buffer.slice_cow(markers.range.clone());
+            let checkbox_pattern = if is_checked { "[x]" } else { "[ ]" };
+            let alt_pattern = if is_checked { "[X]" } else { "" };
+
+            let checkbox_offset = line_text.find(checkbox_pattern).or_else(|| {
+                if !alt_pattern.is_empty() {
+                    line_text.find(alt_pattern)
+                } else {
+                    None
+                }
+            });
+
+            if let Some(relative_offset) = checkbox_offset {
+                let checkbox_byte_start = markers.range.start + relative_offset;
+                let mut cursor_pos = cursor_offset;
+                self.propagate_checkbox_up(checkbox_byte_start, is_checked, &mut cursor_pos);
+                self.selection = Selection::new(cursor_pos, cursor_pos);
+            }
+        } else {
+            // No checkbox on current line - maybe we deleted one.
+            // Check if there's a parent checkbox that needs re-evaluation.
+            self.propagate_from_parent_checkbox();
+        }
+    }
+
+    /// When current line has no checkbox, find parent checkbox and re-evaluate it.
+    fn propagate_from_parent_checkbox(&mut self) {
+        let cursor_offset = self.cursor().offset;
+
+        // Try to find a parent checkbox using tree-sitter.
+        // If cursor is at end of file or outside a node, try one position back.
+        let parent_info = self.find_parent_checkbox(cursor_offset).or_else(|| {
+            if cursor_offset > 0 {
+                self.find_parent_checkbox(cursor_offset - 1)
+            } else {
+                None
+            }
+        });
+
+        let Some(parent_info) = parent_info else {
+            return;
+        };
+
+        // Also need to find siblings from a valid position
+        let sibling_offset =
+            if self.find_sibling_checkboxes(cursor_offset).is_empty() && cursor_offset > 0 {
+                cursor_offset - 1
+            } else {
+                cursor_offset
+            };
+
+        let (parent_checkbox_offset, parent_checked) = parent_info;
+
+        // Find siblings using the adjusted offset
+        let siblings = self.find_sibling_checkboxes(sibling_offset);
+
+        // If no siblings with checkboxes, nothing to propagate
+        if siblings.is_empty() {
+            // No sibling checkboxes - if parent was checked, it should stay checked
+            // (the deleted item wasn't affecting the parent's state)
+            return;
+        }
+
+        let all_siblings_checked = siblings.iter().all(|(_, checked)| *checked);
+        let mut cursor_pos = cursor_offset;
+
+        if all_siblings_checked && !parent_checked {
+            // All remaining siblings are checked, check the parent
+            let content_start = parent_checkbox_offset + 1;
+            let content_end = content_start + 1;
+            self.buffer
+                .replace(content_start..content_end, "x", cursor_pos);
+
+            let parent_line = self.buffer.byte_to_line(parent_checkbox_offset);
+            let adjustment = self.toggle_line_strikethrough(parent_line, true, cursor_pos);
+            cursor_pos = (cursor_pos as isize + adjustment) as usize;
+
+            self.propagate_checkbox_up(parent_checkbox_offset, true, &mut cursor_pos);
+            self.selection = Selection::new(cursor_pos, cursor_pos);
+        } else if !all_siblings_checked && parent_checked {
+            // Some siblings unchecked, uncheck the parent
+            let content_start = parent_checkbox_offset + 1;
+            let content_end = content_start + 1;
+            self.buffer
+                .replace(content_start..content_end, " ", cursor_pos);
+
+            let parent_line = self.buffer.byte_to_line(parent_checkbox_offset);
+            let adjustment = self.toggle_line_strikethrough(parent_line, false, cursor_pos);
+            cursor_pos = (cursor_pos as isize + adjustment) as usize;
+
+            self.propagate_checkbox_up(parent_checkbox_offset, false, &mut cursor_pos);
+            self.selection = Selection::new(cursor_pos, cursor_pos);
         }
     }
 
@@ -2741,6 +2875,100 @@ mod tests {
             let mut state = editor_with_cursor("1. hey\n2. asdf|");
             state.tab();
             assert_editor_eq(&state, "1. hey\n   1. asdf|"); // nested, content preserved
+        }
+
+        #[test]
+        fn tab_preserves_unchecked_checkbox_state() {
+            // Tab cycling preserves the current line's checkbox state
+            // Propagation doesn't happen because tree-sitter can't parse incomplete lines
+            let mut state = editor_with_cursor("- [x] hey\n- [ ] |");
+            state.tab();
+            // Checkbox stays unchecked (from current line), no propagation
+            assert_editor_eq(&state, "- [x] hey\n  - [ ] |");
+            state.tab();
+            assert_editor_eq(&state, "- [x] hey\n|");
+            state.tab();
+            assert_editor_eq(&state, "- [x] hey\n- [ ] |");
+        }
+
+        #[test]
+        fn tab_preserves_checked_checkbox_state() {
+            // Tab cycling preserves the current line's checkbox state
+            let mut state = editor_with_cursor("- [ ] hey\n- [x] |");
+            state.tab();
+            // Checkbox stays checked (from current line), no propagation
+            assert_editor_eq(&state, "- [ ] hey\n  - [x] |");
+            state.tab();
+            assert_editor_eq(&state, "- [ ] hey\n|");
+            state.tab();
+            assert_editor_eq(&state, "- [ ] hey\n- [x] |");
+        }
+
+        #[test]
+        fn tab_new_checkbox_defaults_unchecked() {
+            // Starting from empty line, new checkboxes default to unchecked
+            let mut state = editor_with_cursor("- [x] ~~hey~~\n|");
+            state.tab(); // sibling: - [ ] |
+            assert_editor_eq(&state, "- [x] ~~hey~~\n- [ ] |");
+            state.tab(); // nested: - [ ] |
+            assert_editor_eq(&state, "- [x] ~~hey~~\n  - [ ] |");
+        }
+
+        #[test]
+        fn typing_after_tab_propagates_checkbox() {
+            // Tab creates incomplete line "- [ ] |" which tree-sitter can't parse.
+            // Once we type content, tree-sitter recognizes it and propagation happens.
+            let mut state = editor_with_cursor("- [x] hey\n|");
+            state.tab(); // "- [ ] |" - incomplete, no propagation yet
+            assert_editor_eq(&state, "- [x] hey\n- [ ] |");
+            state.tab(); // nest it: "  - [ ] |"
+            assert_editor_eq(&state, "- [x] hey\n  - [ ] |");
+            // Type a character - now tree-sitter can parse, propagation unchecks parent
+            state.insert_text("a");
+            assert_editor_eq(&state, "- [ ] hey\n  - [ ] a|");
+        }
+
+        #[test]
+        fn delete_backward_propagates_checkbox() {
+            // Deleting content can affect checkbox propagation
+            let mut state = editor_with_cursor("- [x] hey\n  - [ ] ab|");
+            // Delete 'b' - still has content, propagation runs (parent stays unchecked)
+            state.delete_backward();
+            assert_editor_eq(&state, "- [ ] hey\n  - [ ] a|");
+        }
+
+        #[test]
+        fn delete_forward_propagates_checkbox() {
+            // Deleting content forward can affect checkbox propagation
+            let mut state = editor_with_cursor("- [x] hey\n  - [ ] |ab");
+            // Delete 'a' - still has content, propagation runs
+            state.delete_forward();
+            assert_editor_eq(&state, "- [ ] hey\n  - [ ] |b");
+        }
+
+        #[test]
+        fn delete_checkbox_marker_rechecks_parent() {
+            // Start with checked parent and one checked nested child
+            let mut state = editor_with_cursor("- [x] ~~parent~~\n  - [x] ~~nested~~\n|");
+            // Tab twice to create a new nested unchecked checkbox
+            state.tab();
+            state.tab();
+            assert_editor_eq(&state, "- [x] ~~parent~~\n  - [x] ~~nested~~\n  - [ ] |");
+            // Type to make it parseable - this should uncheck the parent
+            state.insert_text("new");
+            assert_editor_eq(&state, "- [ ] parent\n  - [x] ~~nested~~\n  - [ ] new|");
+            // Now delete backwards to remove the unchecked child entirely
+            // First delete the content
+            state.delete_backward();
+            state.delete_backward();
+            state.delete_backward();
+            assert_editor_eq(&state, "- [ ] parent\n  - [x] ~~nested~~\n  - [ ] |");
+            // Delete the checkbox marker
+            state.delete_backward();
+            assert_editor_eq(&state, "- [ ] parent\n  - [x] ~~nested~~\n  - |");
+            // Delete the list marker
+            state.delete_backward();
+            assert_editor_eq(&state, "- [x] ~~parent~~\n  - [x] ~~nested~~\n  |");
         }
 
         #[test]
