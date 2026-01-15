@@ -2,65 +2,13 @@ use gpui::{App, Global, ReadGlobal, div, prelude::*, px, rems};
 
 use crate::config::Config;
 use crate::editor::EditorTheme;
-
-/// Unordered list marker character for status bar display.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum UnorderedListMarker {
-    Minus,
-    Star,
-    Plus,
-}
-
-/// Ordered list marker style for status bar display.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub enum OrderedListStyle {
-    Dot,
-    Parenthesis,
-}
-
-/// A single context marker for the status bar.
-#[derive(Clone, Debug)]
-pub enum ContextMarker {
-    BlockQuote,
-    UnorderedList(UnorderedListMarker),
-    OrderedList {
-        number: u32,
-        style: OrderedListStyle,
-    },
-    CheckboxUnchecked,
-    CheckboxChecked,
-    CodeBlock(Option<String>), // language
-}
-
-impl ContextMarker {
-    /// Convert marker to its string representation.
-    pub fn as_str(&self) -> String {
-        match self {
-            ContextMarker::BlockQuote => ">".to_string(),
-            ContextMarker::UnorderedList(marker) => match marker {
-                UnorderedListMarker::Minus => "-".to_string(),
-                UnorderedListMarker::Star => "*".to_string(),
-                UnorderedListMarker::Plus => "+".to_string(),
-            },
-            ContextMarker::OrderedList { number, style } => match style {
-                OrderedListStyle::Dot => format!("{}.", number),
-                OrderedListStyle::Parenthesis => format!("{})", number),
-            },
-            ContextMarker::CheckboxUnchecked => "[ ]".to_string(),
-            ContextMarker::CheckboxChecked => "[x]".to_string(),
-            ContextMarker::CodeBlock(lang) => lang
-                .as_ref()
-                .map(|l| format!("```{}", l))
-                .unwrap_or_else(|| "```".to_string()),
-        }
-    }
-}
+use crate::marker::MarkerKind;
 
 /// Status bar information updated by the editor on each render.
 #[derive(Clone, Default)]
 pub struct StatusBarInfo {
     /// Context markers for the current line
-    pub context_markers: Vec<ContextMarker>,
+    pub context_markers: Vec<MarkerKind>,
     /// Current heading level (1-6), if cursor is under a heading
     pub heading_level: Option<u8>,
     /// Cursor line (1-indexed)
@@ -110,67 +58,24 @@ pub fn status_bar(cx: &App) -> impl IntoElement {
         theme.yellow,
     ];
 
-    // Build colored marker elements, tracking depth
-    // Each "level" is a blockquote, list item, or code block
-    // Checkboxes share the same color as their parent list marker
-    // Nested checkboxes after first show as `]` or `x]` (e.g., `- [x]] ]x]`)
-    let mut depth = 0;
+    // Build display info using shared logic
+    let display_items = build_context_display(&info.context_markers);
+
+    // Convert to colored UI elements
     let mut marker_elements: Vec<gpui::AnyElement> = Vec::new();
-    let mut prev_was_checkbox = false;
-
-    for (i, marker) in info.context_markers.iter().enumerate() {
-        // Skip list marker if previous was checkbox
-        let is_list_marker = matches!(
-            marker,
-            ContextMarker::UnorderedList(_) | ContextMarker::OrderedList { .. }
-        );
-        if is_list_marker && prev_was_checkbox {
-            // Still increment depth for this level
-            if i > 0 {
-                depth += 1;
-            }
-            continue;
-        }
-
-        // Increment depth before block-level markers (except first)
-        // This groups list marker + checkbox at the same depth
-        if i > 0 {
-            match marker {
-                ContextMarker::BlockQuote
-                | ContextMarker::UnorderedList(_)
-                | ContextMarker::OrderedList { .. }
-                | ContextMarker::CodeBlock(_) => {
-                    depth += 1;
-                }
-                _ => {}
-            }
-        }
-
-        // Determine display string and whether to add space
-        let (display_str, needs_space) = match marker {
-            // Nested checkbox: show as ` ]` or `x]` (space for unchecked, x for checked)
-            ContextMarker::CheckboxUnchecked if prev_was_checkbox => (" ]".to_string(), false),
-            ContextMarker::CheckboxChecked if prev_was_checkbox => ("x]".to_string(), false),
-            // Normal marker
-            _ => (marker.as_str(), true),
-        };
-
-        // Add space separator between markers (except for nested checkboxes)
-        if !marker_elements.is_empty() && needs_space {
+    for (i, (display_str, depth)) in display_items.iter().enumerate() {
+        // Add space separator (nested checkboxes like " ]" already include their space)
+        let needs_space = !display_str.starts_with(' ') && !display_str.starts_with('x');
+        if i > 0 && needs_space {
             marker_elements.push(div().child(" ").into_any_element());
         }
 
-        let color = depth_colors[depth % depth_colors.len()];
+        let color = depth_colors[*depth % depth_colors.len()];
         marker_elements.push(
             div()
                 .text_color(color)
-                .child(display_str)
+                .child(display_str.clone())
                 .into_any_element(),
-        );
-
-        prev_was_checkbox = matches!(
-            marker,
-            ContextMarker::CheckboxChecked | ContextMarker::CheckboxUnchecked
         );
     }
 
@@ -226,19 +131,15 @@ pub fn status_bar(cx: &App) -> impl IntoElement {
 }
 
 /// Build the display string for context markers, handling nested checkbox compaction.
-/// Returns a vector of (display_string, depth) tuples for testing/inspection.
-pub fn build_context_display(markers: &[ContextMarker]) -> Vec<(String, usize)> {
+/// Returns a vector of (display_string, depth) tuples.
+pub fn build_context_display(markers: &[MarkerKind]) -> Vec<(String, usize)> {
     let mut result = Vec::new();
     let mut depth = 0;
     let mut prev_was_checkbox = false;
 
     for (i, marker) in markers.iter().enumerate() {
-        // Skip list marker if previous was checkbox
-        let is_list_marker = matches!(
-            marker,
-            ContextMarker::UnorderedList(_) | ContextMarker::OrderedList { .. }
-        );
-        if is_list_marker && prev_was_checkbox {
+        // Skip list marker if previous was checkbox (they're grouped together)
+        if marker.is_list_item() && prev_was_checkbox {
             if i > 0 {
                 depth += 1;
             }
@@ -246,31 +147,19 @@ pub fn build_context_display(markers: &[ContextMarker]) -> Vec<(String, usize)> 
         }
 
         // Increment depth before block-level markers (except first)
-        if i > 0 {
-            match marker {
-                ContextMarker::BlockQuote
-                | ContextMarker::UnorderedList(_)
-                | ContextMarker::OrderedList { .. }
-                | ContextMarker::CodeBlock(_) => {
-                    depth += 1;
-                }
-                _ => {}
-            }
+        if i > 0 && marker.is_block_level() {
+            depth += 1;
         }
 
-        // Determine display string
+        // Determine display string (nested checkboxes use compact form)
         let display_str = match marker {
-            ContextMarker::CheckboxUnchecked if prev_was_checkbox => " ]".to_string(),
-            ContextMarker::CheckboxChecked if prev_was_checkbox => "x]".to_string(),
-            _ => marker.as_str(),
+            MarkerKind::Checkbox { checked: false } if prev_was_checkbox => " ]".to_string(),
+            MarkerKind::Checkbox { checked: true } if prev_was_checkbox => "x]".to_string(),
+            _ => marker.status_bar_str(),
         };
 
         result.push((display_str, depth));
-
-        prev_was_checkbox = matches!(
-            marker,
-            ContextMarker::CheckboxChecked | ContextMarker::CheckboxUnchecked
-        );
+        prev_was_checkbox = marker.is_checkbox();
     }
 
     result
@@ -279,102 +168,107 @@ pub fn build_context_display(markers: &[ContextMarker]) -> Vec<(String, usize)> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::marker::{OrderedMarker, UnorderedMarker};
 
-    #[test]
-    fn as_str_blockquote() {
-        assert_eq!(ContextMarker::BlockQuote.as_str(), ">");
+    fn unordered_list(marker: UnorderedMarker) -> MarkerKind {
+        MarkerKind::ListItem {
+            ordered: false,
+            unordered_marker: Some(marker),
+            ordered_marker: None,
+            number: None,
+        }
+    }
+
+    fn ordered_list(number: u32, style: OrderedMarker) -> MarkerKind {
+        MarkerKind::ListItem {
+            ordered: true,
+            unordered_marker: None,
+            ordered_marker: Some(style),
+            number: Some(number),
+        }
     }
 
     #[test]
-    fn as_str_unordered_list_minus() {
-        assert_eq!(
-            ContextMarker::UnorderedList(UnorderedListMarker::Minus).as_str(),
-            "-"
-        );
+    fn status_bar_str_blockquote() {
+        assert_eq!(MarkerKind::BlockQuote.status_bar_str(), ">");
     }
 
     #[test]
-    fn as_str_unordered_list_star() {
-        assert_eq!(
-            ContextMarker::UnorderedList(UnorderedListMarker::Star).as_str(),
-            "*"
-        );
+    fn status_bar_str_unordered_list_minus() {
+        assert_eq!(unordered_list(UnorderedMarker::Minus).status_bar_str(), "-");
     }
 
     #[test]
-    fn as_str_unordered_list_plus() {
-        assert_eq!(
-            ContextMarker::UnorderedList(UnorderedListMarker::Plus).as_str(),
-            "+"
-        );
+    fn status_bar_str_unordered_list_star() {
+        assert_eq!(unordered_list(UnorderedMarker::Star).status_bar_str(), "*");
     }
 
     #[test]
-    fn as_str_ordered_list_dot() {
-        assert_eq!(
-            ContextMarker::OrderedList {
-                number: 1,
-                style: OrderedListStyle::Dot
-            }
-            .as_str(),
-            "1."
-        );
-        assert_eq!(
-            ContextMarker::OrderedList {
-                number: 42,
-                style: OrderedListStyle::Dot
-            }
-            .as_str(),
-            "42."
-        );
+    fn status_bar_str_unordered_list_plus() {
+        assert_eq!(unordered_list(UnorderedMarker::Plus).status_bar_str(), "+");
     }
 
     #[test]
-    fn as_str_ordered_list_parenthesis() {
+    fn status_bar_str_ordered_list_dot() {
+        assert_eq!(ordered_list(1, OrderedMarker::Dot).status_bar_str(), "1.");
+        assert_eq!(ordered_list(42, OrderedMarker::Dot).status_bar_str(), "42.");
+    }
+
+    #[test]
+    fn status_bar_str_ordered_list_parenthesis() {
         assert_eq!(
-            ContextMarker::OrderedList {
-                number: 1,
-                style: OrderedListStyle::Parenthesis
-            }
-            .as_str(),
+            ordered_list(1, OrderedMarker::Parenthesis).status_bar_str(),
             "1)"
         );
         assert_eq!(
-            ContextMarker::OrderedList {
-                number: 10,
-                style: OrderedListStyle::Parenthesis
-            }
-            .as_str(),
+            ordered_list(10, OrderedMarker::Parenthesis).status_bar_str(),
             "10)"
         );
     }
 
     #[test]
-    fn as_str_checkbox_unchecked() {
-        assert_eq!(ContextMarker::CheckboxUnchecked.as_str(), "[ ]");
-    }
-
-    #[test]
-    fn as_str_checkbox_checked() {
-        assert_eq!(ContextMarker::CheckboxChecked.as_str(), "[x]");
-    }
-
-    #[test]
-    fn as_str_code_block_no_language() {
-        assert_eq!(ContextMarker::CodeBlock(None).as_str(), "```");
-    }
-
-    #[test]
-    fn as_str_code_block_with_language() {
+    fn status_bar_str_checkbox_unchecked() {
         assert_eq!(
-            ContextMarker::CodeBlock(Some("rust".to_string())).as_str(),
+            MarkerKind::Checkbox { checked: false }.status_bar_str(),
+            "[ ]"
+        );
+    }
+
+    #[test]
+    fn status_bar_str_checkbox_checked() {
+        assert_eq!(
+            MarkerKind::Checkbox { checked: true }.status_bar_str(),
+            "[x]"
+        );
+    }
+
+    #[test]
+    fn status_bar_str_code_block_no_language() {
+        assert_eq!(
+            MarkerKind::CodeBlockFence {
+                language: None,
+                is_opening: true
+            }
+            .status_bar_str(),
+            "```"
+        );
+    }
+
+    #[test]
+    fn status_bar_str_code_block_with_language() {
+        assert_eq!(
+            MarkerKind::CodeBlockFence {
+                language: Some("rust".to_string()),
+                is_opening: true
+            }
+            .status_bar_str(),
             "```rust"
         );
     }
 
     #[test]
     fn display_simple_list() {
-        let markers = vec![ContextMarker::UnorderedList(UnorderedListMarker::Minus)];
+        let markers = vec![unordered_list(UnorderedMarker::Minus)];
         let display = build_context_display(&markers);
         assert_eq!(display, vec![("-".to_string(), 0)]);
     }
@@ -382,8 +276,8 @@ mod tests {
     #[test]
     fn display_nested_lists() {
         let markers = vec![
-            ContextMarker::UnorderedList(UnorderedListMarker::Minus),
-            ContextMarker::UnorderedList(UnorderedListMarker::Minus),
+            unordered_list(UnorderedMarker::Minus),
+            unordered_list(UnorderedMarker::Minus),
         ];
         let display = build_context_display(&markers);
         assert_eq!(display, vec![("-".to_string(), 0), ("-".to_string(), 1)]);
@@ -393,8 +287,8 @@ mod tests {
     fn display_list_with_checkbox() {
         // - [x] displays as "- [x]" at same depth
         let markers = vec![
-            ContextMarker::UnorderedList(UnorderedListMarker::Minus),
-            ContextMarker::CheckboxChecked,
+            unordered_list(UnorderedMarker::Minus),
+            MarkerKind::Checkbox { checked: true },
         ];
         let display = build_context_display(&markers);
         assert_eq!(display, vec![("-".to_string(), 0), ("[x]".to_string(), 0)]);
@@ -404,10 +298,10 @@ mod tests {
     fn display_nested_checkboxes_compact() {
         // - [x] - [ ] displays as "- [x] ]" (nested checkbox compacted)
         let markers = vec![
-            ContextMarker::UnorderedList(UnorderedListMarker::Minus),
-            ContextMarker::CheckboxChecked,
-            ContextMarker::UnorderedList(UnorderedListMarker::Minus),
-            ContextMarker::CheckboxUnchecked,
+            unordered_list(UnorderedMarker::Minus),
+            MarkerKind::Checkbox { checked: true },
+            unordered_list(UnorderedMarker::Minus),
+            MarkerKind::Checkbox { checked: false },
         ];
         let display = build_context_display(&markers);
         // After [x], the next - is skipped, depth increments, then [ ] shows as " ]"
@@ -425,10 +319,10 @@ mod tests {
     fn display_nested_checked_checkbox_compact() {
         // - [ ] - [x] displays as "- [ ]x]"
         let markers = vec![
-            ContextMarker::UnorderedList(UnorderedListMarker::Minus),
-            ContextMarker::CheckboxUnchecked,
-            ContextMarker::UnorderedList(UnorderedListMarker::Minus),
-            ContextMarker::CheckboxChecked,
+            unordered_list(UnorderedMarker::Minus),
+            MarkerKind::Checkbox { checked: false },
+            unordered_list(UnorderedMarker::Minus),
+            MarkerKind::Checkbox { checked: true },
         ];
         let display = build_context_display(&markers);
         assert_eq!(
@@ -444,8 +338,8 @@ mod tests {
     #[test]
     fn display_blockquote_list() {
         let markers = vec![
-            ContextMarker::BlockQuote,
-            ContextMarker::UnorderedList(UnorderedListMarker::Minus),
+            MarkerKind::BlockQuote,
+            unordered_list(UnorderedMarker::Minus),
         ];
         let display = build_context_display(&markers);
         assert_eq!(display, vec![(">".to_string(), 0), ("-".to_string(), 1)]);
@@ -453,17 +347,17 @@ mod tests {
 
     #[test]
     fn display_ordered_list() {
-        let markers = vec![ContextMarker::OrderedList {
-            number: 3,
-            style: OrderedListStyle::Dot,
-        }];
+        let markers = vec![ordered_list(3, OrderedMarker::Dot)];
         let display = build_context_display(&markers);
         assert_eq!(display, vec![("3.".to_string(), 0)]);
     }
 
     #[test]
     fn display_code_block() {
-        let markers = vec![ContextMarker::CodeBlock(Some("python".to_string()))];
+        let markers = vec![MarkerKind::CodeBlockFence {
+            language: Some("python".to_string()),
+            is_opening: true,
+        }];
         let display = build_context_display(&markers);
         assert_eq!(display, vec![("```python".to_string(), 0)]);
     }
@@ -472,13 +366,13 @@ mod tests {
     fn display_deeply_nested() {
         // > - [x] - [ ] - [x]
         let markers = vec![
-            ContextMarker::BlockQuote,
-            ContextMarker::UnorderedList(UnorderedListMarker::Minus),
-            ContextMarker::CheckboxChecked,
-            ContextMarker::UnorderedList(UnorderedListMarker::Minus),
-            ContextMarker::CheckboxUnchecked,
-            ContextMarker::UnorderedList(UnorderedListMarker::Minus),
-            ContextMarker::CheckboxChecked,
+            MarkerKind::BlockQuote,
+            unordered_list(UnorderedMarker::Minus),
+            MarkerKind::Checkbox { checked: true },
+            unordered_list(UnorderedMarker::Minus),
+            MarkerKind::Checkbox { checked: false },
+            unordered_list(UnorderedMarker::Minus),
+            MarkerKind::Checkbox { checked: true },
         ];
         let display = build_context_display(&markers);
         // > at depth 0, - [x] at depth 1, ] at depth 2, x] at depth 3
@@ -498,13 +392,13 @@ mod tests {
     fn depth_cycles_after_six() {
         // 7 nested lists should cycle back to depth 0 for color
         let markers = vec![
-            ContextMarker::UnorderedList(UnorderedListMarker::Minus),
-            ContextMarker::UnorderedList(UnorderedListMarker::Minus),
-            ContextMarker::UnorderedList(UnorderedListMarker::Minus),
-            ContextMarker::UnorderedList(UnorderedListMarker::Minus),
-            ContextMarker::UnorderedList(UnorderedListMarker::Minus),
-            ContextMarker::UnorderedList(UnorderedListMarker::Minus),
-            ContextMarker::UnorderedList(UnorderedListMarker::Minus),
+            unordered_list(UnorderedMarker::Minus),
+            unordered_list(UnorderedMarker::Minus),
+            unordered_list(UnorderedMarker::Minus),
+            unordered_list(UnorderedMarker::Minus),
+            unordered_list(UnorderedMarker::Minus),
+            unordered_list(UnorderedMarker::Minus),
+            unordered_list(UnorderedMarker::Minus),
         ];
         let display = build_context_display(&markers);
         assert_eq!(display.len(), 7);

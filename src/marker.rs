@@ -65,10 +65,10 @@ pub enum MarkerKind {
     BlockQuote,
     ListItem {
         ordered: bool,
-        #[allow(dead_code)]
         unordered_marker: Option<UnorderedMarker>,
-        #[allow(dead_code)]
         ordered_marker: Option<OrderedMarker>,
+        /// The number for ordered lists (e.g., 1, 2, 3)
+        number: Option<u32>,
     },
     /// A checkbox marker: `[ ]` or `[x]` (rendered inline, not as spacer)
     Checkbox {
@@ -513,6 +513,64 @@ impl MarkerKind {
     pub fn is_container(&self) -> bool {
         matches!(self, MarkerKind::ListItem { .. } | MarkerKind::BlockQuote)
     }
+
+    /// Returns true if this is a list marker (ordered or unordered).
+    pub fn is_list_item(&self) -> bool {
+        matches!(self, MarkerKind::ListItem { .. })
+    }
+
+    /// Returns true if this is a block-level marker that increases nesting depth.
+    pub fn is_block_level(&self) -> bool {
+        matches!(
+            self,
+            MarkerKind::BlockQuote
+                | MarkerKind::ListItem { .. }
+                | MarkerKind::CodeBlockFence { .. }
+        )
+    }
+
+    /// Returns true if this is a checkbox marker.
+    pub fn is_checkbox(&self) -> bool {
+        matches!(self, MarkerKind::Checkbox { .. })
+    }
+
+    /// Convert marker to its status bar string representation.
+    pub fn status_bar_str(&self) -> String {
+        match self {
+            MarkerKind::BlockQuote => ">".to_string(),
+            MarkerKind::ListItem {
+                ordered: false,
+                unordered_marker,
+                ..
+            } => match unordered_marker {
+                Some(UnorderedMarker::Minus) => "-".to_string(),
+                Some(UnorderedMarker::Star) => "*".to_string(),
+                Some(UnorderedMarker::Plus) => "+".to_string(),
+                None => "-".to_string(),
+            },
+            MarkerKind::ListItem {
+                ordered: true,
+                ordered_marker,
+                number,
+                ..
+            } => {
+                let n = number.unwrap_or(1);
+                match ordered_marker {
+                    Some(OrderedMarker::Dot) | None => format!("{}.", n),
+                    Some(OrderedMarker::Parenthesis) => format!("{})", n),
+                }
+            }
+            MarkerKind::Checkbox { checked: false } => "[ ]".to_string(),
+            MarkerKind::Checkbox { checked: true } => "[x]".to_string(),
+            MarkerKind::CodeBlockFence { language, .. } => language
+                .as_ref()
+                .map(|l| format!("```{}", l))
+                .unwrap_or_else(|| "```".to_string()),
+            MarkerKind::Heading(level) => format!("H{}", level),
+            MarkerKind::ThematicBreak => "---".to_string(),
+            MarkerKind::Indent => "".to_string(),
+        }
+    }
 }
 
 /// Find the index of the first NodeInfo with start_byte >= target.
@@ -608,6 +666,7 @@ fn marker_from_node(
                     ordered: false,
                     unordered_marker,
                     ordered_marker: None,
+                    number: None,
                 },
                 range: (start + marker_start)..end,
             })
@@ -618,11 +677,19 @@ fn marker_from_node(
                 "list_marker_parenthesis" => OrderedMarker::Parenthesis,
                 _ => unreachable!(),
             });
+            // Extract the number from the marker text (e.g., "1. " -> 1)
+            let number = content[marker_start..]
+                .chars()
+                .take_while(|c| c.is_ascii_digit())
+                .collect::<String>()
+                .parse::<u32>()
+                .ok();
             Some(Marker {
                 kind: MarkerKind::ListItem {
                     ordered: true,
                     unordered_marker: None,
                     ordered_marker,
+                    number,
                 },
                 range: (start + marker_start)..end,
             })
@@ -1592,6 +1659,7 @@ mod tests {
                     ordered: false,
                     unordered_marker: Some(UnorderedMarker::Minus),
                     ordered_marker: None,
+                    number: None,
                 },
                 range: 0..2,
             }],
@@ -1610,6 +1678,7 @@ mod tests {
                         ordered: false,
                         unordered_marker: Some(UnorderedMarker::Minus),
                         ordered_marker: None,
+                        number: None,
                     },
                     range: 2..4,
                 },
@@ -1705,6 +1774,7 @@ mod tests {
                     ordered: false,
                     unordered_marker: Some(UnorderedMarker::Minus),
                     ordered_marker: None,
+                    number: None,
                 },
                 range: 0..2,
             }],
@@ -1739,6 +1809,7 @@ mod tests {
                     ordered: false,
                     unordered_marker: Some(UnorderedMarker::Minus),
                     ordered_marker: None,
+                    number: None,
                 },
                 range: 0..2,
             }],
@@ -1756,6 +1827,7 @@ mod tests {
                     ordered: false,
                     unordered_marker: Some(UnorderedMarker::Minus),
                     ordered_marker: None,
+                    number: None,
                 },
                 range: 2..4,
             }],
@@ -1773,6 +1845,7 @@ mod tests {
                     ordered: false,
                     unordered_marker: Some(UnorderedMarker::Minus),
                     ordered_marker: None,
+                    number: None,
                 },
                 range: 0..2,
             }],

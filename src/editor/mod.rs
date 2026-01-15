@@ -28,13 +28,13 @@ impl Render for EmptyDragView {
     }
 }
 
-use crate::status_bar::{ContextMarker, OrderedListStyle, StatusBarInfo, UnorderedListMarker};
+use crate::marker::{LineMarkers, MarkerKind, OrderedMarker, UnorderedMarker};
+use crate::status_bar::StatusBarInfo;
 use crate::title_bar::FileInfo;
 
 use crate::buffer::Buffer;
 use crate::cursor::{Cursor, Selection};
 use crate::line::{Line, LineTheme};
-use crate::marker::{LineMarkers, MarkerKind};
 use crate::paste::{PasteContext, transform_paste};
 
 /// Context about the line at the cursor, used by smart editing actions.
@@ -687,7 +687,7 @@ impl EditorState {
 
     /// Build full nested context markers by walking up the tree-sitter tree.
     /// Returns markers from outermost to innermost (e.g., `> - [x] - [ ]`).
-    pub fn build_nested_context(&self, cursor_offset: usize) -> Vec<ContextMarker> {
+    pub fn build_nested_context(&self, cursor_offset: usize) -> Vec<MarkerKind> {
         let Some(tree) = self.buffer.tree() else {
             return Vec::new();
         };
@@ -717,14 +717,14 @@ impl EditorState {
         while let Some(n) = current {
             match n.kind() {
                 "block_quote" => {
-                    markers_reversed.push(ContextMarker::BlockQuote);
+                    markers_reversed.push(MarkerKind::BlockQuote);
                 }
                 "list_item" => {
                     // Scan direct children for list marker and checkbox
                     // Collect in reverse order (checkbox then list_marker) because
                     // we reverse the whole list at the end, so we want: - [x]
-                    let mut list_marker: Option<ContextMarker> = None;
-                    let mut checkbox: Option<ContextMarker> = None;
+                    let mut list_marker: Option<MarkerKind> = None;
+                    let mut checkbox: Option<MarkerKind> = None;
 
                     let mut cursor = n.walk();
                     if cursor.goto_first_child() {
@@ -732,25 +732,34 @@ impl EditorState {
                             let child = cursor.node();
                             match child.kind() {
                                 "task_list_marker_checked" => {
-                                    checkbox = Some(ContextMarker::CheckboxChecked);
+                                    checkbox = Some(MarkerKind::Checkbox { checked: true });
                                 }
                                 "task_list_marker_unchecked" => {
-                                    checkbox = Some(ContextMarker::CheckboxUnchecked);
+                                    checkbox = Some(MarkerKind::Checkbox { checked: false });
                                 }
                                 "list_marker_minus" => {
-                                    list_marker = Some(ContextMarker::UnorderedList(
-                                        UnorderedListMarker::Minus,
-                                    ));
+                                    list_marker = Some(MarkerKind::ListItem {
+                                        ordered: false,
+                                        unordered_marker: Some(UnorderedMarker::Minus),
+                                        ordered_marker: None,
+                                        number: None,
+                                    });
                                 }
                                 "list_marker_star" => {
-                                    list_marker = Some(ContextMarker::UnorderedList(
-                                        UnorderedListMarker::Star,
-                                    ));
+                                    list_marker = Some(MarkerKind::ListItem {
+                                        ordered: false,
+                                        unordered_marker: Some(UnorderedMarker::Star),
+                                        ordered_marker: None,
+                                        number: None,
+                                    });
                                 }
                                 "list_marker_plus" => {
-                                    list_marker = Some(ContextMarker::UnorderedList(
-                                        UnorderedListMarker::Plus,
-                                    ));
+                                    list_marker = Some(MarkerKind::ListItem {
+                                        ordered: false,
+                                        unordered_marker: Some(UnorderedMarker::Plus),
+                                        ordered_marker: None,
+                                        number: None,
+                                    });
                                 }
                                 "list_marker_dot" | "list_marker_parenthesis" => {
                                     // Extract the number from the marker text
@@ -762,14 +771,19 @@ impl EditorState {
                                         .take_while(|c| c.is_ascii_digit())
                                         .collect::<String>()
                                         .parse::<u32>()
-                                        .unwrap_or(1);
-                                    let style = if child.kind() == "list_marker_dot" {
-                                        OrderedListStyle::Dot
-                                    } else {
-                                        OrderedListStyle::Parenthesis
-                                    };
-                                    list_marker =
-                                        Some(ContextMarker::OrderedList { number, style });
+                                        .ok();
+                                    let ordered_marker =
+                                        Some(if child.kind() == "list_marker_dot" {
+                                            OrderedMarker::Dot
+                                        } else {
+                                            OrderedMarker::Parenthesis
+                                        });
+                                    list_marker = Some(MarkerKind::ListItem {
+                                        ordered: true,
+                                        unordered_marker: None,
+                                        ordered_marker,
+                                        number,
+                                    });
                                 }
                                 _ => {}
                             }
@@ -808,7 +822,10 @@ impl EditorState {
                             }
                         }
                     }
-                    markers_reversed.push(ContextMarker::CodeBlock(language));
+                    markers_reversed.push(MarkerKind::CodeBlockFence {
+                        language,
+                        is_opening: true,
+                    });
                 }
                 _ => {}
             }
@@ -3425,7 +3442,10 @@ mod nested_context_tests {
         let cursor_offset = 2; // on "item"
         let markers = state.build_nested_context(cursor_offset);
         assert_eq!(markers.len(), 1);
-        assert!(matches!(markers[0], ContextMarker::UnorderedList(_)));
+        assert!(matches!(
+            markers[0],
+            MarkerKind::ListItem { ordered: false, .. }
+        ));
     }
 
     #[test]
@@ -3435,8 +3455,14 @@ mod nested_context_tests {
         let markers = state.build_nested_context(cursor_offset);
         // Should show: - -
         assert_eq!(markers.len(), 2);
-        assert!(matches!(markers[0], ContextMarker::UnorderedList(_)));
-        assert!(matches!(markers[1], ContextMarker::UnorderedList(_)));
+        assert!(matches!(
+            markers[0],
+            MarkerKind::ListItem { ordered: false, .. }
+        ));
+        assert!(matches!(
+            markers[1],
+            MarkerKind::ListItem { ordered: false, .. }
+        ));
     }
 
     #[test]
@@ -3446,10 +3472,19 @@ mod nested_context_tests {
         let markers = state.build_nested_context(cursor_offset);
         // Should show: - [x] - [ ]
         assert_eq!(markers.len(), 4);
-        assert!(matches!(markers[0], ContextMarker::UnorderedList(_)));
-        assert!(matches!(markers[1], ContextMarker::CheckboxChecked));
-        assert!(matches!(markers[2], ContextMarker::UnorderedList(_)));
-        assert!(matches!(markers[3], ContextMarker::CheckboxUnchecked));
+        assert!(matches!(
+            markers[0],
+            MarkerKind::ListItem { ordered: false, .. }
+        ));
+        assert!(matches!(markers[1], MarkerKind::Checkbox { checked: true }));
+        assert!(matches!(
+            markers[2],
+            MarkerKind::ListItem { ordered: false, .. }
+        ));
+        assert!(matches!(
+            markers[3],
+            MarkerKind::Checkbox { checked: false }
+        ));
     }
 
     #[test]
@@ -3459,8 +3494,11 @@ mod nested_context_tests {
         let markers = state.build_nested_context(cursor_offset);
         // Should show: > -
         assert_eq!(markers.len(), 2);
-        assert!(matches!(markers[0], ContextMarker::BlockQuote));
-        assert!(matches!(markers[1], ContextMarker::UnorderedList(_)));
+        assert!(matches!(markers[0], MarkerKind::BlockQuote));
+        assert!(matches!(
+            markers[1],
+            MarkerKind::ListItem { ordered: false, .. }
+        ));
     }
 
     #[test]
@@ -3469,7 +3507,10 @@ mod nested_context_tests {
         let cursor_offset = 12; // on "second"
         let markers = state.build_nested_context(cursor_offset);
         assert_eq!(markers.len(), 1);
-        assert!(matches!(markers[0], ContextMarker::OrderedList { .. }));
+        assert!(matches!(
+            markers[0],
+            MarkerKind::ListItem { ordered: true, .. }
+        ));
     }
 
     #[test]
