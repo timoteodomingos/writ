@@ -720,22 +720,29 @@ impl EditorState {
                     markers_reversed.push(ContextMarker::BlockQuote);
                 }
                 "list_item" => {
-                    // Check if this list_item has a checkbox
-                    let mut has_checkbox = false;
+                    // Scan direct children for list marker and checkbox
+                    // Collect in reverse order (checkbox then list_marker) because
+                    // we reverse the whole list at the end, so we want: - [x]
+                    let mut list_marker: Option<ContextMarker> = None;
+                    let mut checkbox: Option<ContextMarker> = None;
+
                     let mut cursor = n.walk();
                     if cursor.goto_first_child() {
                         loop {
                             let child = cursor.node();
                             match child.kind() {
                                 "task_list_marker_checked" => {
-                                    markers_reversed.push(ContextMarker::CheckboxChecked);
-                                    has_checkbox = true;
-                                    break;
+                                    checkbox = Some(ContextMarker::CheckboxChecked);
                                 }
                                 "task_list_marker_unchecked" => {
-                                    markers_reversed.push(ContextMarker::CheckboxUnchecked);
-                                    has_checkbox = true;
-                                    break;
+                                    checkbox = Some(ContextMarker::CheckboxUnchecked);
+                                }
+                                k if k.starts_with("list_marker_") => {
+                                    if k.contains("dot") || k.contains("parenthesis") {
+                                        list_marker = Some(ContextMarker::OrderedList);
+                                    } else {
+                                        list_marker = Some(ContextMarker::UnorderedList);
+                                    }
                                 }
                                 _ => {}
                             }
@@ -745,50 +752,13 @@ impl EditorState {
                         }
                     }
 
-                    // Determine if ordered or unordered list by checking parent
-                    if let Some(parent) = n.parent() {
-                        if parent.kind() == "list" {
-                            // Check first child to determine list type
-                            let mut list_cursor = parent.walk();
-                            if list_cursor.goto_first_child() {
-                                let first_item = list_cursor.node();
-                                if first_item.kind() == "list_item" {
-                                    let mut item_cursor = first_item.walk();
-                                    if item_cursor.goto_first_child() {
-                                        loop {
-                                            let child = item_cursor.node();
-                                            if child.kind().starts_with("list_marker_") {
-                                                if child.kind().contains("dot")
-                                                    || child.kind().contains("parenthesis")
-                                                {
-                                                    markers_reversed
-                                                        .push(ContextMarker::OrderedList);
-                                                } else {
-                                                    markers_reversed
-                                                        .push(ContextMarker::UnorderedList);
-                                                }
-                                                break;
-                                            }
-                                            if !item_cursor.goto_next_sibling() {
-                                                break;
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
+                    // Add in reverse order: checkbox first, then list_marker
+                    // After final reverse, this becomes: list_marker, checkbox (i.e., "- [x]")
+                    if let Some(cb) = checkbox {
+                        markers_reversed.push(cb);
                     }
-
-                    // If we added checkbox but no list marker yet, we need to add the list marker
-                    // This happens when walking and we find checkbox first
-                    if has_checkbox
-                        && markers_reversed.len() > 0
-                        && !matches!(
-                            markers_reversed.last(),
-                            Some(ContextMarker::OrderedList) | Some(ContextMarker::UnorderedList)
-                        )
-                    {
-                        // Already handled above
+                    if let Some(lm) = list_marker {
+                        markers_reversed.push(lm);
                     }
                 }
                 "fenced_code_block" => {
