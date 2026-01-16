@@ -437,10 +437,6 @@ impl EditorState {
             node
         };
 
-        let context_line_idx = self.buffer.byte_to_line(context_node.start_byte());
-        let has_blank_line_gap = cursor_line_idx > context_line_idx + 1;
-        let include_para_indent = has_blank_line_gap || context_node.kind() == "list_item";
-
         let mut nodes_to_process: Vec<tree_sitter::Node> = Vec::new();
         let mut blockquote_prefix = String::new();
         let mut current = Some(context_node);
@@ -533,13 +529,11 @@ impl EditorState {
                 sibling_marker
             ));
 
-            if include_para_indent {
-                states.push(format!(
-                    "{}{}",
-                    blockquote_prefix,
-                    " ".repeat(indent + list_marker_len)
-                ));
-            }
+            states.push(format!(
+                "{}{}",
+                blockquote_prefix,
+                " ".repeat(indent + list_marker_len)
+            ));
         }
 
         if let Some((deepest_indent, deepest_marker, list_marker_len, is_ordered)) =
@@ -2987,17 +2981,20 @@ mod tests {
 
         #[test]
         fn tab_twice_after_list_adds_nested_marker() {
-            // Cycle is: "" -> "- " -> "  - " (no para indent)
+            // Cycle is: "" -> "- " -> "  " -> "  - " -> ""
             let mut state = editor_with_cursor("- item\n|");
             state.tab();
             state.tab();
-            assert_editor_eq(&state, "- item\n  - |");
+            assert_editor_eq(&state, "- item\n  |"); // para indent
+            state.tab();
+            assert_editor_eq(&state, "- item\n  - |"); // nested marker
         }
 
         #[test]
         fn tab_three_times_cycles_back() {
-            // Cycle is: "" -> "- " -> "  - " -> "" (3 states)
+            // Cycle is: "" -> "- " -> "  " -> "  - " -> "" (4 states)
             let mut state = editor_with_cursor("- item\n|");
+            state.tab();
             state.tab();
             state.tab();
             state.tab();
@@ -3007,11 +3004,14 @@ mod tests {
         #[test]
         fn tab_cycles_ordered_list_after_checkbox() {
             // Bug case: ordered list preceded by checkbox content
-            // Cycle should be: "" -> "2. " -> "   1. " -> "" (3 states)
+            // Cycle should be: "" -> "2. " -> "   " -> "   1. " -> "" (4 states)
             let mut state = editor_with_cursor("## Writ\n- [ ] item\n\n1. hey\n|");
 
             state.tab();
             assert_editor_eq(&state, "## Writ\n- [ ] item\n\n1. hey\n2. |");
+
+            state.tab();
+            assert_editor_eq(&state, "## Writ\n- [ ] item\n\n1. hey\n   |"); // para indent
 
             state.tab();
             assert_editor_eq(&state, "## Writ\n- [ ] item\n\n1. hey\n   1. |");
@@ -3026,6 +3026,8 @@ mod tests {
             // Content is preserved and cursor stays in place relative to content
             let mut state = editor_with_cursor("1. hey\n2. asdf|");
             state.tab();
+            assert_editor_eq(&state, "1. hey\n   asdf|"); // para indent, content preserved
+            state.tab();
             assert_editor_eq(&state, "1. hey\n   1. asdf|"); // nested, content preserved
         }
 
@@ -3033,10 +3035,13 @@ mod tests {
         fn tab_preserves_unchecked_checkbox_state() {
             // Tab cycling preserves the current line's checkbox state
             // Propagation doesn't happen because tree-sitter can't parse incomplete lines
+            // Cycle: "" -> "- [ ] " -> "  " -> "  - [ ] " -> ""
             let mut state = editor_with_cursor("- [x] hey\n- [ ] |");
             state.tab();
             // Checkbox stays unchecked (from current line), no propagation
-            assert_editor_eq(&state, "- [x] hey\n  - [ ] |");
+            assert_editor_eq(&state, "- [x] hey\n  |"); // para indent
+            state.tab();
+            assert_editor_eq(&state, "- [x] hey\n  - [ ] |"); // nested
             state.tab();
             assert_editor_eq(&state, "- [x] hey\n|");
             state.tab();
@@ -3046,10 +3051,13 @@ mod tests {
         #[test]
         fn tab_preserves_checked_checkbox_state() {
             // Tab cycling preserves the current line's checkbox state
+            // Cycle: "" -> "- [x] " -> "  " -> "  - [x] " -> ""
             let mut state = editor_with_cursor("- [ ] hey\n- [x] |");
             state.tab();
             // Checkbox stays checked (from current line), no propagation
-            assert_editor_eq(&state, "- [ ] hey\n  - [x] |");
+            assert_editor_eq(&state, "- [ ] hey\n  |"); // para indent
+            state.tab();
+            assert_editor_eq(&state, "- [ ] hey\n  - [x] |"); // nested
             state.tab();
             assert_editor_eq(&state, "- [ ] hey\n|");
             state.tab();
@@ -3059,9 +3067,12 @@ mod tests {
         #[test]
         fn tab_new_checkbox_defaults_unchecked() {
             // Starting from empty line, new checkboxes default to unchecked
+            // Cycle: "" -> "- [ ] " -> "  " -> "  - [ ] " -> ""
             let mut state = editor_with_cursor("- [x] ~~hey~~\n|");
             state.tab(); // sibling: - [ ] |
             assert_editor_eq(&state, "- [x] ~~hey~~\n- [ ] |");
+            state.tab(); // para indent
+            assert_editor_eq(&state, "- [x] ~~hey~~\n  |");
             state.tab(); // nested: - [ ] |
             assert_editor_eq(&state, "- [x] ~~hey~~\n  - [ ] |");
         }
@@ -3070,9 +3081,12 @@ mod tests {
         fn typing_after_tab_propagates_checkbox() {
             // Tab creates incomplete line "- [ ] |" which tree-sitter can't parse.
             // Once we type content, tree-sitter recognizes it and propagation happens.
+            // Cycle: "" -> "- [ ] " -> "  " -> "  - [ ] " -> ""
             let mut state = editor_with_cursor("- [x] hey\n|");
             state.tab(); // "- [ ] |" - incomplete, no propagation yet
             assert_editor_eq(&state, "- [x] hey\n- [ ] |");
+            state.tab(); // para indent
+            assert_editor_eq(&state, "- [x] hey\n  |");
             state.tab(); // nest it: "  - [ ] |"
             assert_editor_eq(&state, "- [x] hey\n  - [ ] |");
             // Type a character - now tree-sitter can parse, propagation unchecks parent
@@ -3101,8 +3115,10 @@ mod tests {
         #[test]
         fn delete_checkbox_marker_rechecks_parent() {
             // Start with checked parent and one checked nested child
+            // Cycle: "" -> "- [ ] " -> "  " -> "  - [ ] " -> ""
             let mut state = editor_with_cursor("- [x] ~~parent~~\n  - [x] ~~nested~~\n|");
-            // Tab twice to create a new nested unchecked checkbox
+            // Tab three times to create a new nested unchecked checkbox (with para indent now in cycle)
+            state.tab();
             state.tab();
             state.tab();
             assert_editor_eq(&state, "- [x] ~~parent~~\n  - [x] ~~nested~~\n  - [ ] |");
@@ -3156,7 +3172,7 @@ mod tests {
 
         #[test]
         fn tab_on_nested_context_cycles() {
-            // Cycle: ["> ", "> - ", ">   - ", ""]
+            // Cycle: ["> ", "> - ", ">   ", ">   - ", ""]
             let mut state = editor_with_cursor("> - item\n|");
 
             state.tab();
@@ -3164,6 +3180,9 @@ mod tests {
 
             state.tab();
             assert_editor_eq(&state, "> - item\n> - |");
+
+            state.tab();
+            assert_editor_eq(&state, "> - item\n>   |"); // para indent
 
             state.tab();
             assert_editor_eq(&state, "> - item\n>   - |");
@@ -3193,7 +3212,10 @@ mod tests {
         #[test]
         fn shift_tab_from_nested_marker_goes_to_marker() {
             // "  - " is nested list, cycle found via ERROR handling
+            // Cycle backwards: "  - " -> "  " -> "- " -> ""
             let mut state = editor_with_cursor("- item\n  - |");
+            state.shift_tab();
+            assert_editor_eq(&state, "- item\n  |"); // para indent
             state.shift_tab();
             assert_editor_eq(&state, "- item\n- |");
         }
@@ -3224,16 +3246,22 @@ mod tests {
         }
 
         #[test]
-        fn tab_no_blank_line_no_para_indent() {
-            // Without blank line, no para indent in cycle
-            // Cycle: ["- ", "  - ", "    - ", ""]
+        fn tab_no_blank_line_includes_para_indent() {
+            // Para indent is now always in cycle, even without blank line
+            // Cycle: ["- ", "  ", "  - ", "    ", "    - ", ""]
             let mut state = editor_with_cursor("- parent item\n  - nested with tab\n|");
 
             state.tab();
             assert_editor_eq(&state, "- parent item\n  - nested with tab\n- |");
 
             state.tab();
+            assert_editor_eq(&state, "- parent item\n  - nested with tab\n  |"); // para indent
+
+            state.tab();
             assert_editor_eq(&state, "- parent item\n  - nested with tab\n  - |");
+
+            state.tab();
+            assert_editor_eq(&state, "- parent item\n  - nested with tab\n    |"); // nested para indent
 
             state.tab();
             assert_editor_eq(&state, "- parent item\n  - nested with tab\n    - |");
@@ -3245,14 +3273,20 @@ mod tests {
         #[test]
         fn tab_with_trailing_newline() {
             // Cursor on line with newline after it - should still cycle correctly
-            // Cycle: ["- ", "  - ", "    - ", ""]
+            // Cycle: ["- ", "  ", "  - ", "    ", "    - ", ""]
             let mut state = editor_with_cursor("- parent item\n  - nested with tab\n|\n");
 
             state.tab();
             assert_editor_eq(&state, "- parent item\n  - nested with tab\n- |\n");
 
             state.tab();
+            assert_editor_eq(&state, "- parent item\n  - nested with tab\n  |\n"); // para indent
+
+            state.tab();
             assert_editor_eq(&state, "- parent item\n  - nested with tab\n  - |\n");
+
+            state.tab();
+            assert_editor_eq(&state, "- parent item\n  - nested with tab\n    |\n"); // nested para indent
 
             state.tab();
             assert_editor_eq(&state, "- parent item\n  - nested with tab\n    - |\n");
