@@ -165,13 +165,26 @@ impl EditorState {
     /// Check if the cursor is inside a code block (between opening and closing fences,
     /// or after an opening fence with no closing fence yet).
     fn cursor_in_code_block(&self) -> bool {
-        let cursor_offset = self.cursor().offset;
+        let Some(tree) = self.buffer.tree() else {
+            return false;
+        };
 
-        self.buffer
-            .parsed()
-            .code_blocks
-            .iter()
-            .any(|cb| cursor_offset >= cb.block_range.start && cursor_offset < cb.block_range.end)
+        let cursor_offset = self.cursor().offset;
+        let root = tree.block_tree().root_node();
+
+        // Find the deepest node at the cursor position and walk up looking for fenced_code_block
+        let Some(node) = root.descendant_for_byte_range(cursor_offset, cursor_offset) else {
+            return false;
+        };
+
+        let mut current = Some(node);
+        while let Some(n) = current {
+            if n.kind() == "fenced_code_block" {
+                return true;
+            }
+            current = n.parent();
+        }
+        false
     }
 
     /// Check if a line has content after its markers.
@@ -977,7 +990,18 @@ impl EditorState {
     }
 
     /// Shift+Enter: continue container (add markers from current line).
+    /// In code blocks, copies leading whitespace for indentation.
     pub fn shift_enter(&mut self) {
+        // In code blocks, copy leading whitespace from current line
+        if self.cursor_in_code_block() {
+            let indent = self.current_line_leading_whitespace();
+            self.insert_text("\n");
+            if !indent.is_empty() {
+                self.insert_text(&indent);
+            }
+            return;
+        }
+
         let Some(ctx) = self.line_context() else {
             self.insert_text("\n");
             return;
@@ -988,6 +1012,19 @@ impl EditorState {
         if !continuation.is_empty() {
             self.insert_text(&continuation);
         }
+    }
+
+    /// Get leading whitespace (spaces/tabs) from the current line.
+    fn current_line_leading_whitespace(&self) -> String {
+        let cursor = self.cursor();
+        let line_start = cursor.move_to_line_start(&self.buffer).offset;
+        let line_end = cursor.move_to_line_end(&self.buffer).offset;
+        let line_text = self.buffer.slice_cow(line_start..line_end);
+
+        line_text
+            .chars()
+            .take_while(|c| *c == ' ' || *c == '\t')
+            .collect()
     }
 
     /// Shift+Alt+Enter: create indented continuation (for nested paragraphs).

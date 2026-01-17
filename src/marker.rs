@@ -834,18 +834,17 @@ pub fn collect_node_infos(root: &Node) -> ParsedNodes {
             let mut content_start: Option<usize> = None;
             let mut content_end: Option<usize> = None;
             let mut info_string_range: Option<Range<usize>> = None;
+            let mut fence_count = 0;
 
             let mut child_cursor = node.walk();
-            let mut seen_opening_fence = false;
             for child in node.children(&mut child_cursor) {
                 match child.kind() {
                     "info_string" => {
                         info_string_range = Some(child.start_byte()..child.end_byte());
                     }
                     "fenced_code_block_delimiter" => {
-                        if !seen_opening_fence {
-                            seen_opening_fence = true;
-                        } else {
+                        fence_count += 1;
+                        if fence_count == 2 {
                             content_end = Some(child.start_byte());
                         }
                     }
@@ -856,7 +855,7 @@ pub fn collect_node_infos(root: &Node) -> ParsedNodes {
                         content_end = Some(child.end_byte());
                     }
                     _ => {
-                        if seen_opening_fence && content_start.is_none() {
+                        if fence_count == 1 && content_start.is_none() {
                             content_start = Some(child.start_byte());
                         }
                     }
