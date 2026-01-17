@@ -268,6 +268,45 @@ impl EditorState {
         true
     }
 
+    /// After typing ` or ~, check if we just completed "```" or "~~~" at line start
+    /// and auto-insert the closing fence.
+    pub fn maybe_complete_code_fence(&mut self) {
+        let cursor_pos = self.cursor().offset;
+        if cursor_pos < 3 {
+            return;
+        }
+
+        // Check we just typed 3 of the same fence character
+        let fence_char = self.buffer.byte_at(cursor_pos - 1);
+        if fence_char != Some(b'`') && fence_char != Some(b'~') {
+            return;
+        }
+        if self.buffer.byte_at(cursor_pos - 2) != fence_char
+            || self.buffer.byte_at(cursor_pos - 3) != fence_char
+        {
+            return;
+        }
+
+        // Check this is at the start of a line (possibly after blockquote markers)
+        let line_idx = self.buffer.byte_to_line(cursor_pos);
+        let line_start = self.buffer.line_to_byte(line_idx);
+        let before_fence = self.buffer.slice_cow(line_start..(cursor_pos - 3));
+        let trimmed = before_fence.trim();
+
+        // Allow only whitespace or blockquote markers before the fence
+        if !trimmed.is_empty() && !trimmed.chars().all(|c| c == '>') {
+            return;
+        }
+
+        // Insert newline + closing fence, cursor stays after opening fence
+        let closing = if fence_char == Some(b'`') {
+            "\n```"
+        } else {
+            "\n~~~"
+        };
+        self.buffer.insert(cursor_pos, closing, cursor_pos);
+    }
+
     /// Try to insert a space. Returns false if space should be ignored
     /// (at line start, or at blockquote content start outside code blocks).
     pub fn try_insert_space(&mut self) -> bool {
@@ -1930,6 +1969,10 @@ impl Editor {
 
                     if key_char == ">" {
                         self.state.maybe_complete_blockquote_marker();
+                    }
+
+                    if key_char == "`" || key_char == "~" {
+                        self.state.maybe_complete_code_fence();
                     }
 
                     self.scroll_to_cursor_pending = true;
