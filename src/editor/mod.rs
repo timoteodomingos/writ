@@ -165,26 +165,13 @@ impl EditorState {
     /// Check if the cursor is inside a code block (between opening and closing fences,
     /// or after an opening fence with no closing fence yet).
     fn cursor_in_code_block(&self) -> bool {
-        self.cursor_code_block_range().is_some()
-    }
-
-    /// Returns the line range (start_line, end_line inclusive) of the code block containing
-    /// the cursor, or None if cursor is not in a code block. The range includes the fence lines.
-    fn cursor_code_block_range(&self) -> Option<(usize, usize)> {
         let cursor_offset = self.cursor().offset;
 
-        for code_block in &self.buffer.parsed().code_blocks {
-            if cursor_offset >= code_block.block_range.start
-                && cursor_offset < code_block.block_range.end
-            {
-                let start_line = self.buffer.byte_to_line(code_block.block_range.start);
-                let end_line = self
-                    .buffer
-                    .byte_to_line(code_block.block_range.end.saturating_sub(1));
-                return Some((start_line, end_line));
-            }
-        }
-        None
+        self.buffer
+            .parsed()
+            .code_blocks
+            .iter()
+            .any(|cb| cursor_offset >= cb.block_range.start && cursor_offset < cb.block_range.end)
     }
 
     /// Check if a line has content after its markers.
@@ -2283,7 +2270,6 @@ impl Render for Editor {
         let theme_for_highlights = self.config.theme.clone();
         let line_height = self.config.line_height;
         let snapshot = self.state.buffer.render_snapshot();
-        let cursor_code_block = self.state.cursor_code_block_range();
 
         let line_list = div().id("line-list").size_full().child(
             list(self.list_state.clone(), move |ix, _window, _cx| {
@@ -2300,10 +2286,6 @@ impl Render for Editor {
                     })
                     .collect();
 
-                let fence_visible = cursor_code_block
-                    .map(|(start, end)| ix >= start && ix <= end)
-                    .unwrap_or(false);
-
                 let line_element = Line::new(
                     line,
                     snapshot.rope.clone(),
@@ -2313,7 +2295,6 @@ impl Render for Editor {
                     selection_range.clone(),
                     code_highlights,
                     base_path.clone(),
-                    fence_visible,
                 );
 
                 // Add top padding to first line, bottom padding to last line

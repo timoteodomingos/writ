@@ -85,7 +85,6 @@ pub struct Line {
     code_highlights: Vec<(HighlightSpan, Rgba)>,
     base_path: Option<PathBuf>,
     substitution: Option<String>,
-    fence_visible: bool,
 }
 
 impl Line {
@@ -98,7 +97,6 @@ impl Line {
         selection_range: Option<Range<usize>>,
         code_highlights: Vec<(HighlightSpan, Rgba)>,
         base_path: Option<PathBuf>,
-        fence_visible: bool,
     ) -> Self {
         let substitution = {
             let s = line.substitution_rope(&rope);
@@ -114,7 +112,6 @@ impl Line {
             code_highlights,
             base_path,
             substitution,
-            fence_visible,
         }
     }
 
@@ -358,8 +355,6 @@ impl Line {
         }
 
         if self.line.is_fence() {
-            let is_visible =
-                self.cursor_on_line() || self.selection_on_line() || self.fence_visible;
             // Use content after prefix markers (Indent, BlockQuote) but include the fence itself
             let fence_start = self
                 .line
@@ -367,34 +362,30 @@ impl Line {
                 .map(|r| r.end)
                 .unwrap_or(self.line.range.start);
             let fence_text = self.slice(fence_start..self.line.range.end);
-            let backticks: String = fence_text.chars().take_while(|&c| c == '`').collect();
-            let language = &fence_text[backticks.len()..];
+            // Fence can be ``` or ~~~
+            let fence_char = fence_text.chars().next().unwrap_or('`');
+            let fence_markers: String = fence_text
+                .chars()
+                .take_while(|&c| c == fence_char && (c == '`' || c == '~'))
+                .collect();
+            let language = &fence_text[fence_markers.len()..];
 
-            let transparent = Rgba {
-                r: 0.0,
-                g: 0.0,
-                b: 0.0,
-                a: 0.0,
-            };
-
-            if !backticks.is_empty() {
-                display_text.push_str(&backticks);
-                let color = if is_visible {
-                    self.theme.fence_color
-                } else {
-                    transparent
-                };
-                runs.push(self.text_run(backticks.len(), self.theme.code_font.clone(), color));
+            if !fence_markers.is_empty() {
+                display_text.push_str(&fence_markers);
+                runs.push(self.text_run(
+                    fence_markers.len(),
+                    self.theme.code_font.clone(),
+                    self.theme.fence_color,
+                ));
             }
 
             if !language.is_empty() {
                 display_text.push_str(language);
-                let color = if is_visible {
-                    self.theme.fence_lang_color
-                } else {
-                    transparent
-                };
-                runs.push(self.text_run(language.len(), self.theme.code_font.clone(), color));
+                runs.push(self.text_run(
+                    language.len(),
+                    self.theme.code_font.clone(),
+                    self.theme.fence_lang_color,
+                ));
             }
 
             return (display_text, runs);
