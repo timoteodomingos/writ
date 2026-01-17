@@ -4,6 +4,9 @@ use std::path::PathBuf;
 use clap::Parser;
 use gpui::Global;
 
+/// Environment variable name for GitHub token (shared between clap and tests)
+pub const GITHUB_TOKEN_ENV: &str = "GITHUB_TOKEN";
+
 #[cfg(target_os = "windows")]
 const DEFAULT_TEXT_FONT: &str = "Segoe UI";
 #[cfg(target_os = "windows")]
@@ -37,6 +40,10 @@ pub struct Config {
     /// Save file automatically on every edit (useful for GhostText integration)
     #[arg(long)]
     pub autosave: bool,
+
+    /// GitHub personal access token for API access (issue/PR references)
+    #[arg(long, env = GITHUB_TOKEN_ENV)]
+    pub github_token: Option<String>,
 }
 
 impl Global for Config {}

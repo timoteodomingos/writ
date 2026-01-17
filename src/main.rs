@@ -112,6 +112,9 @@ impl Focusable for Root {
 }
 
 fn main() {
+    // Install rustls crypto provider (required for TLS/HTTPS)
+    let _ = rustls::crypto::ring::default_provider().install_default();
+
     let config = Config::parse()
         .validate()
         .expect("Failed to validate config");
