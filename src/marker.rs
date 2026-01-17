@@ -1075,6 +1075,9 @@ pub fn markers_at_from_infos(
         }
     }
 
+    // Fallback: tree-sitter doesn't emit fenced_code_block_delimiter for closing
+    // fences without a trailing newline. Detect them manually.
+    // Note: this doesn't handle fences inside blockquotes - that's a tree-sitter limitation.
     if !markers
         .iter()
         .any(|m| matches!(m.kind, MarkerKind::CodeBlockFence { .. }))
@@ -1514,6 +1517,14 @@ mod tests {
 
         // Should have the blockquote marker even though content is indented code
         assert_eq!(kinds(&lines[0].markers), vec![&MarkerKind::BlockQuote]);
+    }
+
+    #[test]
+    fn test_closing_fence_no_trailing_newline() {
+        // Closing fence without trailing newline should still be detected
+        // (tree-sitter doesn't emit the delimiter node without newline, so we detect manually)
+        let buf: Buffer = "```rust\ncode\n```".parse().unwrap();
+        assert!(buf.lines()[2].is_fence());
     }
 
     #[test]
