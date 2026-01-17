@@ -1122,6 +1122,49 @@ impl EditorState {
         None
     }
 
+    /// If cursor is at end of an opening code fence and the code block contains
+    /// only whitespace, return the full block range to delete.
+    fn find_empty_code_block_range(&self, cursor_pos: usize) -> Option<std::ops::Range<usize>> {
+        let tree = self.buffer.tree()?;
+        let root = tree.block_tree().root_node();
+
+        // Find the node at cursor position (look slightly before since cursor is at end of fence)
+        let node = root.descendant_for_byte_range(cursor_pos.saturating_sub(1), cursor_pos)?;
+
+        // Walk up to find fenced_code_block
+        let mut current = Some(node);
+        let code_block = loop {
+            match current {
+                Some(n) if n.kind() == "fenced_code_block" => break n,
+                Some(n) => current = n.parent(),
+                None => return None,
+            }
+        };
+
+        let block_start = code_block.start_byte();
+        let block_end = code_block.end_byte();
+
+        // Find where content starts (after first line / opening fence)
+        let block_text = self.buffer.slice_cow(block_start..block_end);
+        let first_newline = block_text.find('\n')?;
+        let content_start = block_start + first_newline + 1;
+
+        // Check if content (between opening fence and end) is only whitespace + closing fence
+        let content = self.buffer.slice_cow(content_start..block_end);
+        let trimmed = content.trim();
+
+        if trimmed == "```" || trimmed == "~~~" {
+            // Don't include trailing newline after closing fence
+            let mut end = block_end;
+            if self.buffer.byte_at(end.saturating_sub(1)) == Some(b'\n') {
+                end -= 1;
+            }
+            Some(block_start..end)
+        } else {
+            None
+        }
+    }
+
     /// Delete backward (backspace). Simple: delete one unit.
     /// Markers and indents are atomic - deleted as a whole.
     pub fn delete_backward(&mut self) {
@@ -1140,6 +1183,16 @@ impl EditorState {
         let cursor_pos = self.cursor().offset;
 
         if let Some((marker_range, _is_indent)) = self.backspace_range_with_type(cursor_pos) {
+            // Check if we're deleting an opening code fence of an empty code block
+            if let Some(block_range) = self.find_empty_code_block_range(cursor_pos) {
+                // Delete the entire empty code block
+                self.buffer.delete(block_range.clone(), cursor_pos);
+                self.selection = Selection::new(block_range.start, block_range.start);
+                self.propagate_checkbox_after_edit();
+                return;
+            }
+
+            // Otherwise just delete the marker
             self.buffer.delete(marker_range.clone(), cursor_pos);
             self.selection = Selection::new(marker_range.start, marker_range.start);
             self.propagate_checkbox_after_edit();
