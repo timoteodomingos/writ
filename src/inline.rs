@@ -272,8 +272,10 @@ static GITHUB_FILE_URL_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 // General URL pattern for naked URL detection
 static NAKED_URL_RE: LazyLock<Regex> = LazyLock::new(|| {
-    // Match http:// or https:// URLs, stopping at whitespace or certain punctuation
-    Regex::new(r"https?://[^\s<>\[\]()]+").unwrap()
+    // Match http:// or https:// URLs with a valid domain (must have at least one dot)
+    // Domain: letters, digits, hyphens, with at least one dot for TLD
+    // Path/query/fragment: any non-whitespace except certain punctuation
+    Regex::new(r"https?://[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?(?:\.[a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?)+(?::\d+)?(?:/[^\s<>\[\]()]*)?").unwrap()
 });
 
 /// A raw match from regex detection (before validation).
@@ -1390,6 +1392,54 @@ mod tests {
 
         assert_eq!(urls.len(), 1);
         assert!(urls[0].github_ref.is_none());
+    }
+
+    #[test]
+    fn test_invalid_urls_not_matched() {
+        // URL without proper domain (no TLD)
+        let line = "http://g is not a valid URL";
+        let urls = detect_naked_urls(line, 0, &[], &[]);
+        assert!(urls.is_empty(), "http://g should not match");
+
+        // Just protocol with single char
+        let line = "https://x should not match";
+        let urls = detect_naked_urls(line, 0, &[], &[]);
+        assert!(urls.is_empty(), "https://x should not match");
+
+        // Domain without TLD
+        let line = "http://localhost is common but no TLD";
+        let urls = detect_naked_urls(line, 0, &[], &[]);
+        assert!(
+            urls.is_empty(),
+            "http://localhost should not match (no TLD)"
+        );
+    }
+
+    #[test]
+    fn test_valid_urls_matched() {
+        // Standard domain
+        let line = "Visit https://example.com for info";
+        let urls = detect_naked_urls(line, 0, &[], &[]);
+        assert_eq!(urls.len(), 1);
+        assert_eq!(urls[0].url, "https://example.com");
+
+        // Domain with path
+        let line = "See http://foo.bar/path/to/page";
+        let urls = detect_naked_urls(line, 0, &[], &[]);
+        assert_eq!(urls.len(), 1);
+        assert_eq!(urls[0].url, "http://foo.bar/path/to/page");
+
+        // Domain with port
+        let line = "Dev server at http://example.com:8080/api";
+        let urls = detect_naked_urls(line, 0, &[], &[]);
+        assert_eq!(urls.len(), 1);
+        assert_eq!(urls[0].url, "http://example.com:8080/api");
+
+        // Subdomain
+        let line = "Check https://sub.domain.example.org/page";
+        let urls = detect_naked_urls(line, 0, &[], &[]);
+        assert_eq!(urls.len(), 1);
+        assert_eq!(urls[0].url, "https://sub.domain.example.org/page");
     }
 
     #[test]
