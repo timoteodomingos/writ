@@ -199,9 +199,8 @@ fn main() {
                 }
 
                 // Set up GitHub client if token is available
-                if let Some(token) = github_token
-                    && let Ok(client) = GitHubClient::new(token)
-                {
+                if let Some(token) = github_token {
+                    let client = GitHubClient::new(token);
                     editor.update(cx, |editor, _| {
                         editor.set_github_client(client);
                     });

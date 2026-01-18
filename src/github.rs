@@ -89,17 +89,48 @@ impl GitHubValidationCache {
 /// GitHub API client for validating references and autocomplete.
 #[derive(Clone)]
 pub struct GitHubClient {
-    octocrab: Octocrab,
+    /// Token stored for lazy initialization of octocrab.
+    /// Octocrab is built lazily on first use because its construction
+    /// requires a Tokio runtime to be active (for tower's buffer service).
+    token: String,
+    /// Lazily initialized octocrab instance.
+    octocrab: std::cell::OnceCell<Octocrab>,
 }
 
 impl GitHubClient {
     /// Create a new GitHub client with the given personal access token.
     ///
-    /// Note: Requires `rustls::crypto::ring::default_provider().install_default()`
-    /// to be called before use (typically in main()).
-    pub fn new(token: String) -> Result<Self, octocrab::Error> {
-        let octocrab = Octocrab::builder().personal_token(token).build()?;
-        Ok(Self { octocrab })
+    /// Note: The actual octocrab client is built lazily on first use,
+    /// which must happen inside a Tokio runtime context.
+    pub fn new(token: String) -> Self {
+        Self {
+            token,
+            octocrab: std::cell::OnceCell::new(),
+        }
+    }
+
+    /// Get or initialize the octocrab client.
+    /// Uses async_compat to provide a Tokio runtime context for octocrab's tower buffer.
+    async fn client(&self) -> &Octocrab {
+        // OnceCell doesn't have async get_or_init, so we check and init separately.
+        // This is safe because we're single-threaded (Rc-based).
+        if let Some(client) = self.octocrab.get() {
+            return client;
+        }
+
+        // Build octocrab inside compat() to provide Tokio runtime context
+        let client = async {
+            Octocrab::builder()
+                .personal_token(self.token.clone())
+                .build()
+                .expect("Failed to build GitHub client")
+        }
+        .compat()
+        .await;
+
+        // Store it (ignore if another call raced - shouldn't happen in single-threaded)
+        let _ = self.octocrab.set(client);
+        self.octocrab.get().unwrap()
     }
 
     /// Fetch issues matching a number prefix.
@@ -118,7 +149,8 @@ impl GitHubClient {
 
         // Fetch recent issues (sorted by created desc = highest numbers first)
         let result = self
-            .octocrab
+            .client()
+            .await
             .issues(owner, repo)
             .list()
             .state(octocrab::params::State::All)
@@ -140,7 +172,8 @@ impl GitHubClient {
 
     /// Get a single issue by number.
     pub async fn get_issue(&self, owner: &str, repo: &str, number: u64) -> Option<Issue> {
-        self.octocrab
+        self.client()
+            .await
             .issues(owner, repo)
             .get(number)
             .compat()
@@ -156,7 +189,8 @@ impl GitHubClient {
         }
 
         let result = self
-            .octocrab
+            .client()
+            .await
             .search()
             .users(prefix)
             .per_page(limit as u8)
@@ -174,14 +208,20 @@ impl GitHubClient {
     pub async fn get_user(&self, username: &str) -> Option<Author> {
         // Use HTTP API directly since there's no typed method
         let route = format!("/users/{}", username);
-        self.octocrab.get(route, None::<&()>).compat().await.ok()
+        self.client()
+            .await
+            .get(route, None::<&()>)
+            .compat()
+            .await
+            .ok()
     }
 
     /// Get teams for an organization.
     /// Returns up to `limit` teams.
     pub async fn teams_for_org(&self, org: &str, limit: usize) -> Vec<RequestedTeam> {
         let result = self
-            .octocrab
+            .client()
+            .await
             .teams(org)
             .list()
             .per_page(limit as u8)
@@ -198,13 +238,23 @@ impl GitHubClient {
     /// Get a single team by org and slug.
     pub async fn get_team(&self, org: &str, team_slug: &str) -> Option<RequestedTeam> {
         let route = format!("/orgs/{}/teams/{}", org, team_slug);
-        self.octocrab.get(route, None::<&()>).compat().await.ok()
+        self.client()
+            .await
+            .get(route, None::<&()>)
+            .compat()
+            .await
+            .ok()
     }
 
     /// Get a commit by SHA.
     pub async fn get_commit(&self, owner: &str, repo: &str, sha: &str) -> Option<Commit> {
         let route = format!("/repos/{}/{}/commits/{}", owner, repo, sha);
-        self.octocrab.get(route, None::<&()>).compat().await.ok()
+        self.client()
+            .await
+            .get(route, None::<&()>)
+            .compat()
+            .await
+            .ok()
     }
 
     /// Validate a GitHub reference by checking if it exists.
@@ -247,7 +297,7 @@ mod tests {
     #[tokio::test]
     async fn test_issues_matching_prefix() {
         setup_crypto();
-        let client = GitHubClient::new(token_from_env()).unwrap();
+        let client = GitHubClient::new(token_from_env());
         // Use prefix "1512" which matches recent issues (e.g., 151200-151299)
         let issues = client
             .issues_matching_prefix("rust-lang", "rust", "1512", 10)
@@ -266,7 +316,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_issue() {
         setup_crypto();
-        let client = GitHubClient::new(token_from_env()).unwrap();
+        let client = GitHubClient::new(token_from_env());
 
         let issue = client.get_issue("rust-lang", "rust", 1).await;
         assert!(issue.is_some(), "Issue #1 should exist in rust-lang/rust");
@@ -275,7 +325,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_issue_not_found() {
         setup_crypto();
-        let client = GitHubClient::new(token_from_env()).unwrap();
+        let client = GitHubClient::new(token_from_env());
 
         let issue = client.get_issue("rust-lang", "rust", 999999999).await;
         assert!(issue.is_none(), "Non-existent issue should return None");
@@ -284,7 +334,7 @@ mod tests {
     #[tokio::test]
     async fn test_users_matching_prefix() {
         setup_crypto();
-        let client = GitHubClient::new(token_from_env()).unwrap();
+        let client = GitHubClient::new(token_from_env());
         let users = client.users_matching_prefix("torvalds", 10).await;
 
         assert!(
@@ -296,7 +346,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_user() {
         setup_crypto();
-        let client = GitHubClient::new(token_from_env()).unwrap();
+        let client = GitHubClient::new(token_from_env());
 
         let user = client.get_user("torvalds").await;
         assert!(user.is_some(), "torvalds should exist");
@@ -306,7 +356,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_user_not_found() {
         setup_crypto();
-        let client = GitHubClient::new(token_from_env()).unwrap();
+        let client = GitHubClient::new(token_from_env());
 
         let user = client
             .get_user("this-user-definitely-does-not-exist-12345")
@@ -317,7 +367,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_commit() {
         setup_crypto();
-        let client = GitHubClient::new(token_from_env()).unwrap();
+        let client = GitHubClient::new(token_from_env());
 
         // First commit in rust-lang/rust
         let commit = client.get_commit("rust-lang", "rust", "c01efc6").await;
@@ -330,7 +380,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_commit_not_found() {
         setup_crypto();
-        let client = GitHubClient::new(token_from_env()).unwrap();
+        let client = GitHubClient::new(token_from_env());
 
         let commit = client.get_commit("rust-lang", "rust", "0000000").await;
         assert!(commit.is_none(), "Invalid commit should not be found");
