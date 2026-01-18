@@ -4,8 +4,8 @@ use std::path::PathBuf;
 
 use gpui::{
     App, Font, FontStyle, FontWeight, Hsla, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, RenderOnce, Rgba, SharedString, StyledText, TextRun, Window, canvas, div, img,
-    point, prelude::*, px, rems,
+    MouseMoveEvent, RenderOnce, Rgba, SharedString, StyledText, TextRun, Window, black, canvas,
+    div, img, point, prelude::*, px, rems,
 };
 use ropey::Rope;
 
@@ -16,6 +16,43 @@ use crate::marker::{LineMarkers, MarkerKind};
 
 /// (opening_start, opening_end, closing_start, closing_end) for collapsed markdown syntax.
 pub type HiddenRegion = (usize, usize, usize, usize);
+
+/// A display_text region that is currently shown in collapsed form.
+/// Used for click position mapping when the user clicks on shortened text.
+#[derive(Clone)]
+pub struct CollapsedDisplayText {
+    /// Visual range in the display string (byte offsets)
+    pub visual_range: Range<usize>,
+    /// Buffer range of the full content
+    pub buffer_range: Range<usize>,
+    /// The shortened display text being shown
+    pub display_text: String,
+    /// The full buffer text (e.g., the full URL)
+    pub buffer_text: String,
+}
+
+impl CollapsedDisplayText {
+    /// Map a pixel x-offset within this collapsed region to a buffer offset.
+    /// Uses text measurement to find the proportional position in the full text.
+    pub fn map_x_to_buffer_offset(&self, x_offset: gpui::Pixels, font: &Font) -> usize {
+        let full_text: SharedString = self.buffer_text.clone().into();
+        let styled = StyledText::new(full_text).with_runs(vec![TextRun {
+            len: self.buffer_text.len(),
+            font: font.clone(),
+            color: black(),
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        }]);
+        let layout = styled.layout();
+        let target_pos = point(x_offset.max(px(0.0)), px(0.0));
+        let index = match layout.index_for_position(target_pos) {
+            Ok(idx) => idx,
+            Err(idx) => idx,
+        };
+        self.buffer_range.start + index
+    }
+}
 
 /// Convert a visual position (index into display text, after prefix) to a buffer offset.
 pub fn visual_to_buffer_pos(
@@ -292,7 +329,7 @@ impl Line {
         result
     }
 
-    fn build_styled_content(&self) -> (String, Vec<TextRun>) {
+    fn build_styled_content(&self) -> (String, Vec<TextRun>, Vec<CollapsedDisplayText>) {
         let content_range = if self.line.heading_level().is_some() {
             self.line.range.clone()
         } else {
@@ -301,6 +338,7 @@ impl Line {
 
         let mut display_text = String::new();
         let mut runs: Vec<TextRun> = Vec::new();
+        let mut collapsed_regions: Vec<CollapsedDisplayText> = Vec::new();
 
         if let Some(prefix) = self.get_substitution()
             && !prefix.is_empty()
@@ -388,7 +426,7 @@ impl Line {
                 ));
             }
 
-            return (display_text, runs);
+            return (display_text, runs, collapsed_regions);
         }
 
         if self.line.is_thematic_break() {
@@ -410,11 +448,11 @@ impl Line {
             display_text.push_str(&break_text);
             runs.push(self.text_run(break_text.len(), self.theme.text_font.clone(), color));
 
-            return (display_text, runs);
+            return (display_text, runs, collapsed_regions);
         }
 
         if content_range.start >= content_range.end {
-            return (display_text, runs);
+            return (display_text, runs, collapsed_regions);
         }
 
         let mut boundaries: Vec<usize> = vec![content_range.start, content_range.end];
@@ -528,16 +566,31 @@ impl Line {
 
             // Check if this span exactly matches a display_text region
             // (naked URLs create a single boundary window matching their full_range)
+            // Only show display_text when cursor is NOT inside the region;
+            // when cursor is inside, expand to show the full buffer content.
             let display_text_region = self.inline_styles.iter().find(|region| {
                 region.display_text.is_some()
                     && region.full_range.start == start
                     && region.full_range.end == end
+                    && !(self.cursor_offset >= region.full_range.start
+                        && self.cursor_offset <= region.full_range.end)
             });
 
             if let Some(region) = display_text_region {
                 // Emit the display_text instead of the buffer content
                 let substitution = region.display_text.as_ref().unwrap();
+                let visual_start = display_text.len();
                 display_text.push_str(substitution);
+                let visual_end = display_text.len();
+
+                // Track this collapsed region for click position mapping
+                let buffer_text = self.slice(region.full_range.start..region.full_range.end);
+                collapsed_regions.push(CollapsedDisplayText {
+                    visual_range: visual_start..visual_end,
+                    buffer_range: region.full_range.clone(),
+                    display_text: substitution.clone(),
+                    buffer_text: buffer_text.to_string(),
+                });
 
                 // Style it as a link
                 runs.push(TextRun {
@@ -661,7 +714,7 @@ impl Line {
             });
         }
 
-        (display_text, runs)
+        (display_text, runs, collapsed_regions)
     }
 
     fn resolve_image_source(&self, url: &str) -> gpui::ImageSource {
@@ -964,7 +1017,7 @@ impl RenderOnce for Line {
             ));
         }
 
-        let (display_text, mut runs) = self.build_styled_content();
+        let (display_text, mut runs, collapsed_regions) = self.build_styled_content();
 
         let display_text = if display_text.is_empty() {
             runs.push(self.text_run(1, self.line_font(), self.theme.text_color));
@@ -1311,6 +1364,8 @@ impl RenderOnce for Line {
             let content_range = content_range_for_handlers.clone();
             let line_number = self.line.line_number;
             let hidden_regions = hidden_regions.clone();
+            let collapsed_regions_for_click = collapsed_regions.clone();
+            let text_font_for_click = self.theme.text_font.clone();
 
             // Find the checkbox click range in the content.
             // The checkbox "[ ]" or "[x]" is now rendered as part of content, not substitution.
@@ -1357,13 +1412,32 @@ impl RenderOnce for Line {
 
                     let content_visual_index = visual_index.saturating_sub(prefix_len);
 
-                    let buffer_offset = visual_to_buffer_pos(
-                        content_visual_index,
-                        &content_range,
-                        heading_marker_len,
-                        &hidden_regions,
-                        line_range.end,
-                    );
+                    // Check if click is within a collapsed display_text region
+                    // If so, use text measurement to map the click position proportionally
+                    let collapsed_region = collapsed_regions_for_click.iter().find(|r| {
+                        content_visual_index >= r.visual_range.start
+                            && content_visual_index < r.visual_range.end
+                    });
+
+                    let buffer_offset = if let Some(region) = collapsed_region {
+                        // Get pixel position relative to start of the collapsed text
+                        if let Some(visual_start_pos) = layout_for_click
+                            .position_for_index(prefix_len + region.visual_range.start)
+                        {
+                            let x_offset = event.position.x - visual_start_pos.x;
+                            region.map_x_to_buffer_offset(x_offset, &text_font_for_click)
+                        } else {
+                            region.buffer_range.start
+                        }
+                    } else {
+                        visual_to_buffer_pos(
+                            content_visual_index,
+                            &content_range,
+                            heading_marker_len,
+                            &hidden_regions,
+                            line_range.end,
+                        )
+                    };
 
                     if event.modifiers.control || event.modifiers.platform {
                         for (range, url) in &link_regions {
@@ -1396,6 +1470,8 @@ impl RenderOnce for Line {
             let layout_for_move = text_layout;
             let line_range_for_move = self.line.range.clone();
             let content_range = content_range_for_handlers;
+            let collapsed_regions_for_move = collapsed_regions;
+            let text_font_for_move = self.theme.text_font.clone();
 
             // Checkbox hover range - checkbox is now at start of content (after spacer)
             let checkbox_hover_range: Option<Range<usize>> = if self.line.checkbox().is_some() {
@@ -1422,13 +1498,32 @@ impl RenderOnce for Line {
                         };
 
                         let content_visual_index = visual_index.saturating_sub(prefix_len);
-                        let buffer_offset = visual_to_buffer_pos(
-                            content_visual_index,
-                            &content_range,
-                            heading_marker_len,
-                            &hidden_regions,
-                            line_range_for_move.end,
-                        );
+
+                        // Check if drag is within a collapsed display_text region
+                        let collapsed_region = collapsed_regions_for_move.iter().find(|r| {
+                            content_visual_index >= r.visual_range.start
+                                && content_visual_index < r.visual_range.end
+                        });
+
+                        let buffer_offset = if let Some(region) = collapsed_region {
+                            if let Some(visual_start_pos) = layout_for_move
+                                .position_for_index(prefix_len + region.visual_range.start)
+                            {
+                                let x_offset = event.position.x - visual_start_pos.x;
+                                region.map_x_to_buffer_offset(x_offset, &text_font_for_move)
+                            } else {
+                                region.buffer_range.start
+                            }
+                        } else {
+                            visual_to_buffer_pos(
+                                content_visual_index,
+                                &content_range,
+                                heading_marker_len,
+                                &hidden_regions,
+                                line_range_for_move.end,
+                            )
+                        };
+
                         window.dispatch_action(
                             Box::new(DispatchEditorAction(EditorAction::Drag {
                                 offset: buffer_offset,

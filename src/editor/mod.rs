@@ -2036,67 +2036,11 @@ impl Editor {
     }
 
     fn delete_backward(&mut self) {
-        // Check if we're at the end of an atomic region (backspace should delete whole region)
-        if let Some(range) = self.atomic_region_at(self.cursor().offset)
-            && range.end == self.cursor().offset
-        {
-            self.state
-                .buffer
-                .delete(range.clone(), self.cursor().offset);
-            self.state.selection = Selection::new(range.start, range.start);
-            return;
-        }
         self.state.delete_backward();
     }
 
     fn delete_forward(&mut self) {
-        // Check if we're at the start of an atomic region (delete should delete whole region)
-        if let Some(range) = self.atomic_region_at(self.cursor().offset)
-            && range.start == self.cursor().offset
-        {
-            self.state
-                .buffer
-                .delete(range.clone(), self.cursor().offset);
-            self.state.selection = Selection::new(range.start, range.start);
-            return;
-        }
         self.state.delete_forward();
-    }
-
-    /// Find an atomic region (validated GitHub URL) at or containing the given offset.
-    fn atomic_region_at(&self, offset: usize) -> Option<std::ops::Range<usize>> {
-        let line_idx = self.state.buffer.byte_to_line(offset);
-        let urls = self.naked_urls_by_line.get(&line_idx)?;
-
-        for url in urls {
-            let Some(ref github_ref) = url.github_ref else {
-                continue;
-            };
-            if !self.github_validation_cache.is_valid(github_ref) {
-                continue;
-            }
-            // Check if offset is at or inside this region
-            if offset >= url.byte_range.start && offset <= url.byte_range.end {
-                return Some(url.byte_range.clone());
-            }
-        }
-        None
-    }
-
-    /// Snap an offset to the nearest atomic region boundary if it's inside one.
-    fn snap_to_atomic_boundary(&self, offset: usize) -> usize {
-        if let Some(range) = self.atomic_region_at(offset) {
-            // If strictly inside, snap to nearest boundary
-            if offset > range.start && offset < range.end {
-                let midpoint = range.start + (range.end - range.start) / 2;
-                return if offset < midpoint {
-                    range.start
-                } else {
-                    range.end
-                };
-            }
-        }
-        offset
     }
 
     fn enter(&mut self) {
@@ -2122,32 +2066,8 @@ impl Editor {
             Direction::Down => self.cursor().move_down(&self.state.buffer),
         };
 
-        // For left/right movement, skip over atomic regions (validated GitHub URLs)
-        let adjusted_cursor = match direction {
-            Direction::Left | Direction::Right => {
-                self.adjust_cursor_for_atomic_regions(new_cursor, direction)
-            }
-            _ => new_cursor,
-        };
-
-        self.move_cursor(adjusted_cursor, extend);
+        self.move_cursor(new_cursor, extend);
         self.scroll_to_cursor_pending = true;
-    }
-
-    /// Adjust cursor position to skip over atomic regions (shortened GitHub URLs).
-    /// If cursor lands inside an atomic region, move it to the appropriate boundary.
-    fn adjust_cursor_for_atomic_regions(&self, cursor: Cursor, direction: Direction) -> Cursor {
-        if let Some(range) = self.atomic_region_at(cursor.offset) {
-            // If strictly inside, move to boundary based on direction
-            if cursor.offset > range.start && cursor.offset < range.end {
-                return match direction {
-                    Direction::Left => Cursor::new(range.start),
-                    Direction::Right => Cursor::new(range.end),
-                    _ => cursor,
-                };
-            }
-        }
-        cursor
     }
 
     fn on_key_down(&mut self, event: &KeyDownEvent, _window: &mut Window, cx: &mut Context<Self>) {
@@ -2480,14 +2400,11 @@ impl Editor {
                 shift,
                 click_count,
             } => {
-                let adjusted_offset = self.snap_to_atomic_boundary(*offset);
-                self.state
-                    .handle_click(adjusted_offset, *shift, *click_count);
+                self.state.handle_click(*offset, *shift, *click_count);
             }
             EditorAction::Drag { offset } => {
                 if !self.in_drag_scroll_zone {
-                    let adjusted_offset = self.snap_to_atomic_boundary(*offset);
-                    self.state.handle_drag(adjusted_offset);
+                    self.state.handle_drag(*offset);
                     self.is_selecting = true;
                 }
             }
