@@ -193,17 +193,23 @@ fn main() {
                     .or_else(|| detect_github_context(&file_path));
 
                 if let Some(ctx) = github_context {
+                    eprintln!("[writ] GitHub context: {}/{}", ctx.owner, ctx.repo);
                     editor.update(cx, |editor, _| {
                         editor.set_github_context(ctx);
                     });
+                } else {
+                    eprintln!("[writ] No GitHub context detected");
                 }
 
                 // Set up GitHub client if token is available
                 if let Some(token) = github_token {
+                    eprintln!("[writ] GitHub token provided ({} chars)", token.len());
                     let client = GitHubClient::new(token);
                     editor.update(cx, |editor, _| {
                         editor.set_github_client(client);
                     });
+                } else {
+                    eprintln!("[writ] No GitHub token - refs won't be validated");
                 }
 
                 // Set up file watching for external changes

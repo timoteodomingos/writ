@@ -60,6 +60,35 @@ fn parse_github_repo_from_url(url: &str) -> Option<String> {
     Some(format!("{}/{}", owner, repo))
 }
 
+/// Extract owner/repo from a GitHub page title.
+/// Handles titles like:
+/// - "Issue title · Issue #123 · owner/repo"
+/// - "PR title · Pull Request #456 · owner/repo"
+fn parse_github_repo_from_title(title: &str) -> Option<String> {
+    // GitHub titles end with " · owner/repo" or " · owner/repo · GitHub"
+    // Split by " · " and look for owner/repo pattern (search from end)
+    let parts: Vec<&str> = title.split(" · ").collect();
+    for part in parts.iter().rev() {
+        let part = part.trim();
+        // Skip "GitHub" suffix
+        if part == "GitHub" {
+            continue;
+        }
+        // Check if it looks like owner/repo
+        if let Some((owner, repo)) = part.split_once('/')
+            && !owner.is_empty()
+            && !repo.is_empty()
+            && owner.chars().all(|c| c.is_alphanumeric() || c == '-')
+            && repo
+                .chars()
+                .all(|c| c.is_alphanumeric() || c == '-' || c == '_' || c == '.')
+        {
+            return Some(format!("{}/{}", owner, repo));
+        }
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -92,6 +121,44 @@ mod tests {
 
         // Invalid URL
         assert_eq!(parse_github_repo_from_url("not a url"), None);
+    }
+
+    #[test]
+    fn test_parse_github_repo_from_title() {
+        // PR title format
+        assert_eq!(
+            parse_github_repo_from_title(
+                "`wit-parser`: Add validation hooks · Pull Request #2419 · bytecodealliance/wasm-tools"
+            ),
+            Some("bytecodealliance/wasm-tools".to_string())
+        );
+
+        // Issue title format
+        assert_eq!(
+            parse_github_repo_from_title("Bug report · Issue #123 · rust-lang/rust"),
+            Some("rust-lang/rust".to_string())
+        );
+
+        // With GitHub suffix
+        assert_eq!(
+            parse_github_repo_from_title("Some title · owner/repo · GitHub"),
+            Some("owner/repo".to_string())
+        );
+
+        // Repo with dots and underscores
+        assert_eq!(
+            parse_github_repo_from_title("Title · Issue #1 · owner/repo.name_here"),
+            Some("owner/repo.name_here".to_string())
+        );
+
+        // No repo info
+        assert_eq!(parse_github_repo_from_title("Just a title"), None);
+
+        // Not a valid owner/repo pattern
+        assert_eq!(
+            parse_github_repo_from_title("Title · not a repo · something"),
+            None
+        );
     }
 }
 
@@ -176,6 +243,12 @@ async fn handle_websocket(
     };
 
     let client_msg: ClientMessage = serde_json::from_str(&initial_msg)?;
+    println!(
+        "GhostText message: title={:?}, url={:?}, text_len={}",
+        client_msg.title,
+        client_msg.url,
+        client_msg.text.len()
+    );
     let title = client_msg
         .title
         .clone()
@@ -214,26 +287,63 @@ async fn handle_websocket(
     let mut cmd = Command::new("writ");
     cmd.arg("--file").arg(&temp_file).arg("--autosave");
 
-    // Pass GitHub repo context if URL is a GitHub page
-    if let Some(ref url) = client_msg.url
-        && let Some(repo) = parse_github_repo_from_url(url)
-    {
+    // Pass GitHub repo context if URL is a GitHub page or title contains repo info
+    let github_repo = client_msg
+        .url
+        .as_ref()
+        .and_then(|url| parse_github_repo_from_url(url))
+        .or_else(|| {
+            client_msg
+                .title
+                .as_ref()
+                .and_then(|title| parse_github_repo_from_title(title))
+        });
+
+    if let Some(repo) = github_repo {
         cmd.arg("--github-repo").arg(&repo);
         println!("Detected GitHub repo: {}", repo);
+    } else {
+        println!("Could not detect GitHub repo from URL or title");
     }
 
     // Pass GitHub token if available in environment
-    if let Ok(token) = std::env::var(GITHUB_TOKEN_ENV) {
-        cmd.arg("--github-token").arg(token);
-    }
+    let has_github_token = if let Ok(token) = std::env::var(GITHUB_TOKEN_ENV) {
+        cmd.arg("--github-token").arg(&token);
+        println!(
+            "Passing {} ({}... {} chars)",
+            GITHUB_TOKEN_ENV,
+            &token[..token.len().min(8)],
+            token.len()
+        );
+        true
+    } else {
+        println!("{} not set in environment", GITHUB_TOKEN_ENV);
+        false
+    };
+
+    // Log the full command being executed
+    println!(
+        "Starting writ: --file {:?} --autosave{}{}",
+        temp_file,
+        if client_msg.url.is_some() {
+            " --github-repo ..."
+        } else {
+            ""
+        },
+        if has_github_token {
+            " --github-token ..."
+        } else {
+            ""
+        }
+    );
 
     let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(Stdio::inherit())
         .spawn()?;
 
-    println!("Spawned writ process for {:?}", temp_file);
+    println!("Spawned writ process (pid: {:?})", child.id());
 
     let mut last_content = client_msg.text.clone();
 
