@@ -38,6 +38,21 @@ pub enum GitHubRef {
         repo: String,
         sha: String,
     },
+    /// Compare URL: owner/repo/compare/base...head
+    Compare {
+        owner: String,
+        repo: String,
+        base: String,
+        head: String,
+    },
+    /// File permalink: owner/repo/blob/sha/path#lines
+    File {
+        owner: String,
+        repo: String,
+        sha: String,
+        path: String,
+        lines: Option<String>,
+    },
 }
 
 impl GitHubRef {
@@ -59,6 +74,65 @@ impl GitHubRef {
             }
             GitHubRef::Commit { owner, repo, sha } => {
                 format!("https://github.com/{owner}/{repo}/commit/{sha}")
+            }
+            GitHubRef::Compare {
+                owner,
+                repo,
+                base,
+                head,
+            } => {
+                format!("https://github.com/{owner}/{repo}/compare/{base}...{head}")
+            }
+            GitHubRef::File {
+                owner,
+                repo,
+                sha,
+                path,
+                lines,
+            } => {
+                let base = format!("https://github.com/{owner}/{repo}/blob/{sha}/{path}");
+                match lines {
+                    Some(l) => format!("{base}#{l}"),
+                    None => base,
+                }
+            }
+        }
+    }
+
+    /// Generate the short display text for this reference (used for URL shortening).
+    pub fn short_display(&self) -> String {
+        match self {
+            GitHubRef::Issue {
+                owner,
+                repo,
+                number,
+            } => format!("{owner}/{repo}#{number}"),
+            GitHubRef::User { username } => format!("@{username}"),
+            GitHubRef::Team { org, team } => format!("@{org}/{team}"),
+            GitHubRef::Commit { owner, repo, sha } => {
+                // Truncate SHA to 7 chars for display
+                let short_sha = &sha[..sha.len().min(7)];
+                format!("{owner}/{repo}@{short_sha}")
+            }
+            GitHubRef::Compare {
+                owner,
+                repo,
+                base,
+                head,
+            } => format!("{owner}/{repo}@{base}...{head}"),
+            GitHubRef::File {
+                owner,
+                repo,
+                sha,
+                path,
+                lines,
+            } => {
+                let short_sha = &sha[..sha.len().min(7)];
+                let display = format!("{owner}/{repo}@{short_sha}:{path}");
+                match lines {
+                    Some(l) => format!("{display}#{l}"),
+                    None => display,
+                }
             }
         }
     }
@@ -119,6 +193,42 @@ impl GitHubRef {
             username: cap[2].to_string(),
         }
     }
+
+    /// Try to parse a GitHub URL into a GitHubRef.
+    /// Returns None if the URL is not a recognized GitHub URL pattern.
+    pub fn from_url(url: &str) -> Option<Self> {
+        // Issue/PR URL: https://github.com/owner/repo/issues/123
+        if let Some(cap) = GITHUB_ISSUE_URL_RE.captures(url) {
+            return Some(GitHubRef::Issue {
+                owner: cap[1].to_string(),
+                repo: cap[2].to_string(),
+                number: cap[3].parse().ok()?,
+            });
+        }
+
+        // Compare URL: https://github.com/owner/repo/compare/base...head
+        if let Some(cap) = GITHUB_COMPARE_URL_RE.captures(url) {
+            return Some(GitHubRef::Compare {
+                owner: cap[1].to_string(),
+                repo: cap[2].to_string(),
+                base: cap[3].to_string(),
+                head: cap[4].to_string(),
+            });
+        }
+
+        // File permalink: https://github.com/owner/repo/blob/sha/path#L10-L20
+        if let Some(cap) = GITHUB_FILE_URL_RE.captures(url) {
+            return Some(GitHubRef::File {
+                owner: cap[1].to_string(),
+                repo: cap[2].to_string(),
+                sha: cap[3].to_string(),
+                path: cap[4].to_string(),
+                lines: cap.get(5).map(|m| m.as_str().to_string()),
+            });
+        }
+
+        None
+    }
 }
 
 // Regex patterns for GitHub reference detection.
@@ -141,6 +251,29 @@ static CROSS_REPO_COMMIT_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(([a-zA-Z0-9-]+)/([a-zA-Z0-9._-]+)@([0-9a-f]{7,40}))(?:[^a-zA-Z0-9]|$)").unwrap()
 });
 
+// URL patterns for GitHub links
+static GITHUB_ISSUE_URL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"https://github\.com/([a-zA-Z0-9-]+)/([a-zA-Z0-9._-]+)/(?:issues|pull)/(\d+)")
+        .unwrap()
+});
+static GITHUB_COMPARE_URL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    // Match base...head where base can contain dots but not the ... separator
+    Regex::new(r"https://github\.com/([a-zA-Z0-9-]+)/([a-zA-Z0-9._-]+)/compare/(.+?)\.\.\.([^\s]+)")
+        .unwrap()
+});
+static GITHUB_FILE_URL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(
+        r"https://github\.com/([a-zA-Z0-9-]+)/([a-zA-Z0-9._-]+)/blob/([0-9a-f]+)/([^#\s]+)(?:#(L\d+(?:-L\d+)?))?",
+    )
+    .unwrap()
+});
+
+// General URL pattern for naked URL detection
+static NAKED_URL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    // Match http:// or https:// URLs, stopping at whitespace or certain punctuation
+    Regex::new(r"https?://[^\s<>\[\]()]+").unwrap()
+});
+
 /// A raw match from regex detection (before validation).
 #[derive(Debug, Clone)]
 pub struct RawGitHubMatch {
@@ -148,6 +281,58 @@ pub struct RawGitHubMatch {
     pub reference: GitHubRef,
     /// Byte range in the rope where this match was found.
     pub byte_range: Range<usize>,
+}
+
+/// A naked URL detected in text (not inside []() markdown link syntax).
+#[derive(Debug, Clone)]
+pub struct NakedUrl {
+    /// The full URL text.
+    pub url: String,
+    /// Byte range in the rope where this URL was found.
+    pub byte_range: Range<usize>,
+    /// If this is a GitHub URL, the parsed reference.
+    pub github_ref: Option<GitHubRef>,
+}
+
+/// Detect naked URLs in a single line of text.
+///
+/// Returns URLs that are not inside markdown link syntax or code spans.
+/// For GitHub URLs, also parses the reference for potential shortening.
+///
+/// - `line`: the line text to scan
+/// - `line_byte_offset`: byte offset of this line in the buffer (for absolute ranges)
+/// - `code_ranges`: absolute byte ranges of code spans to skip
+/// - `link_ranges`: absolute byte ranges of markdown links to skip
+pub fn detect_naked_urls(
+    line: &str,
+    line_byte_offset: usize,
+    code_ranges: &[Range<usize>],
+    link_ranges: &[Range<usize>],
+) -> Vec<NakedUrl> {
+    let mut urls = Vec::new();
+
+    let is_in_code = |abs_pos: usize| -> bool { code_ranges.iter().any(|r| r.contains(&abs_pos)) };
+    let is_in_link = |abs_pos: usize| -> bool { link_ranges.iter().any(|r| r.contains(&abs_pos)) };
+
+    for m in NAKED_URL_RE.find_iter(line) {
+        let abs_range = (line_byte_offset + m.start())..(line_byte_offset + m.end());
+
+        // Skip if inside code span or markdown link
+        if is_in_code(abs_range.start) || is_in_link(abs_range.start) {
+            continue;
+        }
+
+        let url = m.as_str().to_string();
+        let github_ref = GitHubRef::from_url(&url);
+
+        urls.push(NakedUrl {
+            url,
+            byte_range: abs_range,
+            github_ref,
+        });
+    }
+
+    urls
 }
 
 /// Detect GitHub references in a single line of text.
@@ -1055,5 +1240,257 @@ mod tests {
         let regions = github_refs_to_styled_regions(&matches, &cache);
 
         assert!(regions.is_empty(), "Unvalidated refs should not be styled");
+    }
+
+    // Naked URL detection tests
+
+    #[test]
+    fn test_naked_url_detection() {
+        let line = "See https://example.com/page for details";
+        let urls = detect_naked_urls(line, 0, &[], &[]);
+
+        assert_eq!(urls.len(), 1);
+        assert_eq!(urls[0].url, "https://example.com/page");
+        assert_eq!(urls[0].byte_range, 4..28);
+        assert!(urls[0].github_ref.is_none());
+    }
+
+    #[test]
+    fn test_naked_url_skips_code_span() {
+        let line = "Use `https://example.com` in code";
+        // Simulate code span at bytes 4..25
+        let code_range = 4..25;
+        let urls = detect_naked_urls(line, 0, &[code_range], &[]);
+
+        assert!(urls.is_empty(), "Should not match inside code span");
+    }
+
+    #[test]
+    fn test_naked_url_skips_markdown_link() {
+        let line = "See [link](https://example.com) here";
+        // Simulate link at bytes 4..31
+        let link_range = 4..31;
+        let urls = detect_naked_urls(line, 0, &[], &[link_range]);
+
+        assert!(urls.is_empty(), "Should not match inside markdown link");
+    }
+
+    #[test]
+    fn test_naked_github_issue_url() {
+        let line = "See https://github.com/rust-lang/rust/issues/123 for details";
+        let urls = detect_naked_urls(line, 0, &[], &[]);
+
+        assert_eq!(urls.len(), 1);
+        assert!(matches!(
+            &urls[0].github_ref,
+            Some(GitHubRef::Issue { owner, repo, number })
+            if owner == "rust-lang" && repo == "rust" && *number == 123
+        ));
+        assert_eq!(urls[0].byte_range, 4..48);
+    }
+
+    #[test]
+    fn test_naked_github_pr_url() {
+        let line = "Fixed in https://github.com/tokio-rs/tokio/pull/456";
+        let urls = detect_naked_urls(line, 0, &[], &[]);
+
+        assert_eq!(urls.len(), 1);
+        assert!(matches!(
+            &urls[0].github_ref,
+            Some(GitHubRef::Issue { owner, repo, number })
+            if owner == "tokio-rs" && repo == "tokio" && *number == 456
+        ));
+    }
+
+    #[test]
+    fn test_naked_github_compare_url() {
+        let line = "Changes: https://github.com/rust-lang/rust/compare/v1.0...v2.0";
+        let urls = detect_naked_urls(line, 0, &[], &[]);
+
+        assert_eq!(urls.len(), 1);
+        assert!(matches!(
+            &urls[0].github_ref,
+            Some(GitHubRef::Compare { owner, repo, base, head })
+            if owner == "rust-lang" && repo == "rust" && base == "v1.0" && head == "v2.0"
+        ));
+    }
+
+    #[test]
+    fn test_naked_github_file_url() {
+        let line = "See https://github.com/rust-lang/rust/blob/abc1234def/src/main.rs#L10-L20";
+        let urls = detect_naked_urls(line, 0, &[], &[]);
+
+        assert_eq!(urls.len(), 1);
+        assert!(matches!(
+            &urls[0].github_ref,
+            Some(GitHubRef::File { owner, repo, sha, path, lines })
+            if owner == "rust-lang" && repo == "rust" && sha == "abc1234def"
+               && path == "src/main.rs" && lines.as_deref() == Some("L10-L20")
+        ));
+    }
+
+    #[test]
+    fn test_naked_github_file_url_no_lines() {
+        let line = "File: https://github.com/owner/repo/blob/abc1234/path/to/file.rs";
+        let urls = detect_naked_urls(line, 0, &[], &[]);
+
+        assert_eq!(urls.len(), 1);
+        assert!(matches!(
+            &urls[0].github_ref,
+            Some(GitHubRef::File { path, lines, .. })
+            if path == "path/to/file.rs" && lines.is_none()
+        ));
+    }
+
+    #[test]
+    fn test_non_github_url_has_no_ref() {
+        let line = "See https://example.com/page";
+        let urls = detect_naked_urls(line, 0, &[], &[]);
+
+        assert_eq!(urls.len(), 1);
+        assert!(urls[0].github_ref.is_none());
+    }
+
+    #[test]
+    fn test_github_ref_from_url() {
+        // Issue URL
+        let issue = GitHubRef::from_url("https://github.com/rust-lang/rust/issues/123");
+        assert!(matches!(
+            issue,
+            Some(GitHubRef::Issue { owner, repo, number })
+            if owner == "rust-lang" && repo == "rust" && number == 123
+        ));
+
+        // PR URL
+        let pr = GitHubRef::from_url("https://github.com/tokio-rs/tokio/pull/456");
+        assert!(matches!(
+            pr,
+            Some(GitHubRef::Issue { number, .. })
+            if number == 456
+        ));
+
+        // Compare URL
+        let compare = GitHubRef::from_url("https://github.com/owner/repo/compare/v1.0...v2.0");
+        assert!(matches!(
+            compare,
+            Some(GitHubRef::Compare { base, head, .. })
+            if base == "v1.0" && head == "v2.0"
+        ));
+
+        // File URL
+        let file = GitHubRef::from_url("https://github.com/owner/repo/blob/abc123/src/lib.rs#L5");
+        assert!(matches!(
+            file,
+            Some(GitHubRef::File { sha, path, lines, .. })
+            if sha == "abc123" && path == "src/lib.rs" && lines.as_deref() == Some("L5")
+        ));
+
+        // Non-GitHub URL
+        let other = GitHubRef::from_url("https://example.com/page");
+        assert!(other.is_none());
+    }
+
+    // short_display tests
+
+    #[test]
+    fn test_short_display_issue() {
+        let issue = GitHubRef::Issue {
+            owner: "rust-lang".to_string(),
+            repo: "rust".to_string(),
+            number: 123,
+        };
+        assert_eq!(issue.short_display(), "rust-lang/rust#123");
+    }
+
+    #[test]
+    fn test_short_display_user() {
+        let user = GitHubRef::User {
+            username: "torvalds".to_string(),
+        };
+        assert_eq!(user.short_display(), "@torvalds");
+    }
+
+    #[test]
+    fn test_short_display_team() {
+        let team = GitHubRef::Team {
+            org: "rust-lang".to_string(),
+            team: "compiler".to_string(),
+        };
+        assert_eq!(team.short_display(), "@rust-lang/compiler");
+    }
+
+    #[test]
+    fn test_short_display_commit() {
+        let commit = GitHubRef::Commit {
+            owner: "rust-lang".to_string(),
+            repo: "rust".to_string(),
+            sha: "abc1234567890".to_string(),
+        };
+        // SHA should be truncated to 7 chars
+        assert_eq!(commit.short_display(), "rust-lang/rust@abc1234");
+    }
+
+    #[test]
+    fn test_short_display_compare() {
+        let compare = GitHubRef::Compare {
+            owner: "rust-lang".to_string(),
+            repo: "rust".to_string(),
+            base: "v1.0".to_string(),
+            head: "v2.0".to_string(),
+        };
+        assert_eq!(compare.short_display(), "rust-lang/rust@v1.0...v2.0");
+    }
+
+    #[test]
+    fn test_short_display_file() {
+        let file = GitHubRef::File {
+            owner: "rust-lang".to_string(),
+            repo: "rust".to_string(),
+            sha: "abc1234567890".to_string(),
+            path: "src/main.rs".to_string(),
+            lines: Some("L10-L20".to_string()),
+        };
+        assert_eq!(
+            file.short_display(),
+            "rust-lang/rust@abc1234:src/main.rs#L10-L20"
+        );
+    }
+
+    #[test]
+    fn test_short_display_file_no_lines() {
+        let file = GitHubRef::File {
+            owner: "rust-lang".to_string(),
+            repo: "rust".to_string(),
+            sha: "abc1234".to_string(),
+            path: "README.md".to_string(),
+            lines: None,
+        };
+        assert_eq!(file.short_display(), "rust-lang/rust@abc1234:README.md");
+    }
+
+    #[test]
+    fn test_url_and_short_display_for_new_variants() {
+        let compare = GitHubRef::Compare {
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+            base: "main".to_string(),
+            head: "feature".to_string(),
+        };
+        assert_eq!(
+            compare.url(),
+            "https://github.com/owner/repo/compare/main...feature"
+        );
+
+        let file = GitHubRef::File {
+            owner: "owner".to_string(),
+            repo: "repo".to_string(),
+            sha: "abc1234".to_string(),
+            path: "src/lib.rs".to_string(),
+            lines: Some("L5".to_string()),
+        };
+        assert_eq!(
+            file.url(),
+            "https://github.com/owner/repo/blob/abc1234/src/lib.rs#L5"
+        );
     }
 }

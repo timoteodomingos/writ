@@ -221,6 +221,8 @@ impl GitHubClient {
             GitHubRef::Commit { owner, repo, sha } => {
                 self.get_commit(owner, repo, sha).await.is_some()
             }
+            // Compare and File refs come from pasted URLs - assume valid
+            GitHubRef::Compare { .. } | GitHubRef::File { .. } => true,
         }
     }
 }
