@@ -34,22 +34,26 @@ pub struct CollapsedDisplayText {
 impl CollapsedDisplayText {
     /// Map a pixel x-offset within this collapsed region to a buffer offset.
     /// Uses text measurement to find the proportional position in the full text.
-    pub fn map_x_to_buffer_offset(&self, x_offset: gpui::Pixels, font: &Font) -> usize {
+    pub fn map_x_to_buffer_offset(
+        &self,
+        x_offset: gpui::Pixels,
+        font: &Font,
+        font_size: gpui::Pixels,
+        window: &Window,
+    ) -> usize {
         let full_text: SharedString = self.buffer_text.clone().into();
-        let styled = StyledText::new(full_text).with_runs(vec![TextRun {
+        let run = TextRun {
             len: self.buffer_text.len(),
             font: font.clone(),
             color: black(),
             background_color: None,
             underline: None,
             strikethrough: None,
-        }]);
-        let layout = styled.layout();
-        let target_pos = point(x_offset.max(px(0.0)), px(0.0));
-        let index = match layout.index_for_position(target_pos) {
-            Ok(idx) => idx,
-            Err(idx) => idx,
         };
+        let shaped = window
+            .text_system()
+            .shape_line(full_text, font_size, &[run], None);
+        let index = shaped.index_for_x(x_offset.max(px(0.0))).unwrap_or(0);
         self.buffer_range.start + index
     }
 }
@@ -1425,7 +1429,13 @@ impl RenderOnce for Line {
                             .position_for_index(prefix_len + region.visual_range.start)
                         {
                             let x_offset = event.position.x - visual_start_pos.x;
-                            region.map_x_to_buffer_offset(x_offset, &text_font_for_click)
+                            let font_size = window.rem_size(); // Use rem as base font size
+                            region.map_x_to_buffer_offset(
+                                x_offset,
+                                &text_font_for_click,
+                                font_size,
+                                window,
+                            )
                         } else {
                             region.buffer_range.start
                         }
@@ -1510,7 +1520,13 @@ impl RenderOnce for Line {
                                 .position_for_index(prefix_len + region.visual_range.start)
                             {
                                 let x_offset = event.position.x - visual_start_pos.x;
-                                region.map_x_to_buffer_offset(x_offset, &text_font_for_move)
+                                let font_size = window.rem_size();
+                                region.map_x_to_buffer_offset(
+                                    x_offset,
+                                    &text_font_for_move,
+                                    font_size,
+                                    window,
+                                )
                             } else {
                                 region.buffer_range.start
                             }
@@ -1589,5 +1605,82 @@ impl RenderOnce for Line {
         }
 
         line_div
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_collapsed_display_text_ranges() {
+        // Simulate a GitHub URL at buffer positions 10..54 (44 chars)
+        // displayed as "rust-lang/rust#123" (18 chars) at visual positions 5..23
+        let collapsed = CollapsedDisplayText {
+            visual_range: 5..23,
+            buffer_range: 10..54,
+            display_text: "rust-lang/rust#123".to_string(),
+            buffer_text: "https://github.com/rust-lang/rust/issues/123".to_string(),
+        };
+
+        // Verify the display text is shorter than buffer text
+        assert!(collapsed.display_text.len() < collapsed.buffer_text.len());
+
+        // Verify ranges are consistent
+        assert_eq!(
+            collapsed.visual_range.len(),
+            collapsed.display_text.len(),
+            "visual_range length should match display_text length"
+        );
+        assert_eq!(
+            collapsed.buffer_range.len(),
+            collapsed.buffer_text.len(),
+            "buffer_range length should match buffer_text length"
+        );
+    }
+
+    #[test]
+    fn test_collapsed_region_detection_logic() {
+        // Test the logic used to find collapsed regions during click handling
+        let collapsed_regions = [
+            CollapsedDisplayText {
+                visual_range: 0..18,
+                buffer_range: 0..44,
+                display_text: "rust-lang/rust#123".to_string(),
+                buffer_text: "https://github.com/rust-lang/rust/issues/123".to_string(),
+            },
+            CollapsedDisplayText {
+                visual_range: 25..43,
+                buffer_range: 51..95,
+                display_text: "rust-lang/rust#456".to_string(),
+                buffer_text: "https://github.com/rust-lang/rust/issues/456".to_string(),
+            },
+        ];
+
+        // Click at visual index 10 should find first region
+        let content_visual_index = 10;
+        let found = collapsed_regions.iter().find(|r| {
+            content_visual_index >= r.visual_range.start
+                && content_visual_index < r.visual_range.end
+        });
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().buffer_range, 0..44);
+
+        // Click at visual index 30 should find second region
+        let content_visual_index = 30;
+        let found = collapsed_regions.iter().find(|r| {
+            content_visual_index >= r.visual_range.start
+                && content_visual_index < r.visual_range.end
+        });
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().buffer_range, 51..95);
+
+        // Click at visual index 20 (between regions) should find nothing
+        let content_visual_index = 20;
+        let found = collapsed_regions.iter().find(|r| {
+            content_visual_index >= r.visual_range.start
+                && content_visual_index < r.visual_range.end
+        });
+        assert!(found.is_none());
     }
 }
