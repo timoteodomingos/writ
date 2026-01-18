@@ -5,11 +5,11 @@
 
 use regex::Regex;
 use ropey::Rope;
-use std::collections::HashSet;
 use std::ops::Range;
 use std::sync::LazyLock;
 use tree_sitter::Node;
 
+use crate::github::GitHubValidationCache;
 use crate::parser::MarkdownTree;
 
 /// GitHub repository context for resolving relative references like #123.
@@ -331,11 +331,11 @@ pub fn detect_github_references_in_line(
 /// Only references that exist in `validated_refs` will be styled as links.
 pub fn github_refs_to_styled_regions(
     matches: &[RawGitHubMatch],
-    validated_refs: &HashSet<GitHubRef>,
+    cache: &GitHubValidationCache,
 ) -> Vec<StyledRegion> {
     matches
         .iter()
-        .filter(|m| validated_refs.contains(&m.reference))
+        .filter(|m| cache.is_valid(&m.reference))
         .map(|m| StyledRegion {
             full_range: m.byte_range.clone(),
             content_range: m.byte_range.clone(),
@@ -1026,14 +1026,17 @@ mod tests {
         let matches = detect_github_references_in_line(line, 0, Some(&ctx), &[]);
 
         // Simulate validation - mark the issue as valid
-        let mut validated = HashSet::new();
-        validated.insert(GitHubRef::Issue {
-            owner: "rust-lang".to_string(),
-            repo: "rust".to_string(),
-            number: 123,
-        });
+        let cache = GitHubValidationCache::new();
+        cache.set_result(
+            GitHubRef::Issue {
+                owner: "rust-lang".to_string(),
+                repo: "rust".to_string(),
+                number: 123,
+            },
+            true,
+        );
 
-        let regions = github_refs_to_styled_regions(&matches, &validated);
+        let regions = github_refs_to_styled_regions(&matches, &cache);
         assert_eq!(regions.len(), 1);
         assert_eq!(
             regions[0].link_url,
@@ -1047,9 +1050,9 @@ mod tests {
         let ctx = github_ctx();
         let matches = detect_github_references_in_line(line, 0, Some(&ctx), &[]);
 
-        // Empty validation set - nothing validated
-        let validated = HashSet::new();
-        let regions = github_refs_to_styled_regions(&matches, &validated);
+        // Empty cache - nothing validated
+        let cache = GitHubValidationCache::new();
+        let regions = github_refs_to_styled_regions(&matches, &cache);
 
         assert!(regions.is_empty(), "Unvalidated refs should not be styled");
     }

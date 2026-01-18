@@ -9,7 +9,9 @@ use octocrab::models::Author;
 use octocrab::models::commits::Commit;
 use octocrab::models::issues::Issue;
 use octocrab::models::teams::RequestedTeam;
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 
 use crate::inline::GitHubRef;
 
@@ -28,30 +30,42 @@ pub enum ValidationState {
 ///
 /// This is a simple cache with no automatic invalidation.
 /// Use `clear()` to manually refresh (e.g., via Ctrl+R keybind).
-#[derive(Debug, Default)]
+///
+/// Cheaply cloneable (Rc clone) for sharing across closures.
+#[derive(Debug, Clone)]
 pub struct GitHubValidationCache {
-    cache: HashMap<GitHubRef, ValidationState>,
+    cache: Rc<RefCell<HashMap<GitHubRef, ValidationState>>>,
+}
+
+impl Default for GitHubValidationCache {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl GitHubValidationCache {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            cache: Rc::new(RefCell::new(HashMap::new())),
+        }
     }
 
     /// Get the validation state for a reference.
     /// Returns `None` if not in cache.
     pub fn get(&self, ref_: &GitHubRef) -> Option<ValidationState> {
-        self.cache.get(ref_).copied()
+        self.cache.borrow().get(ref_).copied()
     }
 
     /// Mark a reference as pending (fetch has been spawned).
-    pub fn mark_pending(&mut self, ref_: GitHubRef) {
-        self.cache.insert(ref_, ValidationState::Pending);
+    pub fn mark_pending(&self, ref_: GitHubRef) {
+        self.cache
+            .borrow_mut()
+            .insert(ref_, ValidationState::Pending);
     }
 
     /// Set the validation result for a reference.
-    pub fn set_result(&mut self, ref_: GitHubRef, valid: bool) {
-        self.cache.insert(
+    pub fn set_result(&self, ref_: GitHubRef, valid: bool) {
+        self.cache.borrow_mut().insert(
             ref_,
             if valid {
                 ValidationState::Valid
@@ -63,16 +77,17 @@ impl GitHubValidationCache {
 
     /// Check if a reference is validated as valid.
     pub fn is_valid(&self, ref_: &GitHubRef) -> bool {
-        self.cache.get(ref_) == Some(&ValidationState::Valid)
+        self.cache.borrow().get(ref_) == Some(&ValidationState::Valid)
     }
 
     /// Clear all cached results (for manual refresh).
-    pub fn clear(&mut self) {
-        self.cache.clear();
+    pub fn clear(&self) {
+        self.cache.borrow_mut().clear();
     }
 }
 
 /// GitHub API client for validating references and autocomplete.
+#[derive(Clone)]
 pub struct GitHubClient {
     octocrab: Octocrab,
 }

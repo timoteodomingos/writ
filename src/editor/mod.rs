@@ -6,6 +6,7 @@ pub use action::{Direction, DispatchEditorAction, EditorAction};
 pub use config::EditorConfig;
 pub use theme::EditorTheme;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::mpsc;
 
@@ -34,6 +35,10 @@ use crate::title_bar::FileInfo;
 
 use crate::buffer::Buffer;
 use crate::cursor::{Cursor, Selection};
+use crate::github::{GitHubClient, GitHubValidationCache};
+use crate::inline::{
+    GitHubContext, RawGitHubMatch, detect_github_references_in_line, github_refs_to_styled_regions,
+};
 use crate::line::{Line, LineTheme};
 use crate::paste::{PasteContext, transform_paste};
 
@@ -1599,6 +1604,12 @@ pub struct Editor {
     file_watcher: Option<notify::RecommendedWatcher>,
     /// The mtime of the file after our last save (used to detect external vs our own changes).
     last_save_mtime: Option<std::time::SystemTime>,
+    /// GitHub repo context (owner/repo) for autolink detection.
+    github_context: Option<GitHubContext>,
+    /// Cache for GitHub reference validation results.
+    github_validation_cache: GitHubValidationCache,
+    /// GitHub API client for validating references.
+    github_client: Option<GitHubClient>,
 }
 
 impl Editor {
@@ -1634,6 +1645,116 @@ impl Editor {
             file_watcher_rx: None,
             file_watcher: None,
             last_save_mtime: None,
+            github_context: None,
+            github_validation_cache: GitHubValidationCache::new(),
+            github_client: None,
+        }
+    }
+
+    /// Set the GitHub context for autolink detection.
+    /// Should be called when opening a file from a GitHub URL (e.g., via writd).
+    pub fn set_github_context(&mut self, context: GitHubContext) {
+        self.github_context = Some(context);
+    }
+
+    /// Set the GitHub client for validating references.
+    /// Should be called with an authenticated client when a GitHub token is available.
+    pub fn set_github_client(&mut self, client: GitHubClient) {
+        self.github_client = Some(client);
+    }
+
+    /// Clear the GitHub validation cache and re-validate all refs.
+    /// Called by Ctrl+R keybind.
+    pub fn refresh_github_refs(&mut self, cx: &mut Context<Self>) {
+        self.github_validation_cache.clear();
+        let line_count = self.state.buffer.line_count();
+        let matches = self.detect_github_refs(0, line_count);
+        self.spawn_github_validation(&matches, cx);
+    }
+
+    /// Detect GitHub refs in a range of lines.
+    /// Returns matches indexed by line number for use in rendering.
+    fn detect_github_refs(
+        &mut self,
+        start_line: usize,
+        end_line: usize,
+    ) -> HashMap<usize, Vec<RawGitHubMatch>> {
+        let github_context = match &self.github_context {
+            Some(ctx) => ctx,
+            None => return HashMap::new(),
+        };
+
+        let snapshot = self.state.buffer.render_snapshot();
+        let mut matches_by_line = HashMap::new();
+
+        for line_idx in start_line..end_line.min(snapshot.line_count()) {
+            let line = snapshot.line_markers(line_idx);
+            let line_range = line.range.clone();
+            let line_text = snapshot
+                .rope
+                .slice(
+                    snapshot.rope.byte_to_char(line_range.start)
+                        ..snapshot.rope.byte_to_char(line_range.end),
+                )
+                .to_string();
+
+            let inline_styles = snapshot.inline_styles_for_line(line_idx);
+            let code_ranges: Vec<_> = inline_styles
+                .iter()
+                .filter(|s| s.style.code)
+                .map(|s| s.full_range.clone())
+                .collect();
+
+            let matches = detect_github_references_in_line(
+                &line_text,
+                line_range.start,
+                Some(github_context),
+                &code_ranges,
+            );
+
+            if !matches.is_empty() {
+                matches_by_line.insert(line_idx, matches);
+            }
+        }
+
+        matches_by_line
+    }
+
+    /// Spawn validation tasks for GitHub refs not already in cache.
+    fn spawn_github_validation(
+        &mut self,
+        matches: &HashMap<usize, Vec<RawGitHubMatch>>,
+        cx: &mut Context<Self>,
+    ) {
+        let client = match &self.github_client {
+            Some(c) => c.clone(),
+            None => return,
+        };
+
+        for m in matches.values().flatten() {
+            if self.github_validation_cache.get(&m.reference).is_some() {
+                continue;
+            }
+
+            self.github_validation_cache
+                .mark_pending(m.reference.clone());
+
+            let client = client.clone();
+            let ref_for_task = m.reference.clone();
+            cx.spawn(async move |weak, cx| {
+                let valid = client.validate_ref(&ref_for_task).await;
+                let _ = cx.update(|cx| {
+                    if let Some(editor) = weak.upgrade() {
+                        editor.update(cx, |editor, cx| {
+                            editor
+                                .github_validation_cache
+                                .set_result(ref_for_task, valid);
+                            cx.notify();
+                        });
+                    }
+                });
+            })
+            .detach();
         }
     }
 
@@ -2009,6 +2130,9 @@ impl Editor {
             "s" if keystroke.modifiers.control || keystroke.modifiers.platform => {
                 self.save(cx);
             }
+            "r" if keystroke.modifiers.control || keystroke.modifiers.platform => {
+                self.refresh_github_refs(cx);
+            }
 
             _ => {
                 if let Some(key_char) = &keystroke.key_char {
@@ -2309,6 +2433,16 @@ impl Render for Editor {
                 break;
             }
         }
+
+        // Detect GitHub refs in visible lines and spawn validation
+        let github_matches_by_line = if self.github_context.is_some() {
+            let matches = self.detect_github_refs(first_visible_line, last_visible_line + 1);
+            self.spawn_github_validation(&matches, cx);
+            matches
+        } else {
+            HashMap::new()
+        };
+
         cx.set_global(StatusBarInfo {
             context_markers,
             heading_level,
@@ -2404,10 +2538,20 @@ impl Render for Editor {
         let line_height = self.config.line_height;
         let snapshot = self.state.buffer.render_snapshot();
 
+        let github_cache = self.github_validation_cache.clone();
+
         let line_list = div().id("line-list").size_full().child(
             list(self.list_state.clone(), move |ix, _window, _cx| {
                 let line = snapshot.line_markers(ix);
-                let inline_styles = snapshot.inline_styles_for_line(ix);
+                let mut inline_styles = snapshot.inline_styles_for_line(ix);
+
+                // Add GitHub reference links from pre-detected matches
+                if let Some(github_matches) = github_matches_by_line.get(&ix) {
+                    let github_styles =
+                        github_refs_to_styled_regions(github_matches, &github_cache);
+                    inline_styles.extend(github_styles);
+                    inline_styles.sort_by_key(|s| s.full_range.start);
+                }
                 let code_highlights: Vec<_> = snapshot
                     .code_highlights_for_line(ix)
                     .iter()
