@@ -16,6 +16,8 @@ use tokio::process::Command;
 use tokio::sync::mpsc;
 use tokio_tungstenite::tungstenite::Message;
 
+use writ::config::GITHUB_TOKEN_ENV;
+
 const DEFAULT_PORT: u16 = 4001;
 
 /// GhostText protocol handshake response
@@ -31,11 +33,66 @@ struct HandshakeResponse {
 #[derive(Deserialize, Debug)]
 struct ClientMessage {
     title: Option<String>,
-    #[allow(dead_code)]
     url: Option<String>,
     text: String,
     #[allow(dead_code)]
     selections: Option<Vec<Selection>>,
+}
+
+/// Extract owner/repo from a GitHub URL.
+/// Handles URLs like:
+/// - https://github.com/owner/repo/issues/123
+/// - https://github.com/owner/repo/pull/456
+/// - https://github.com/owner/repo
+fn parse_github_repo_from_url(url: &str) -> Option<String> {
+    let url = url
+        .strip_prefix("https://github.com/")
+        .or_else(|| url.strip_prefix("http://github.com/"))?;
+
+    let mut parts = url.split('/');
+    let owner = parts.next()?;
+    let repo = parts.next()?;
+
+    if owner.is_empty() || repo.is_empty() {
+        return None;
+    }
+
+    Some(format!("{}/{}", owner, repo))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_github_repo_from_url() {
+        // Issue URL
+        assert_eq!(
+            parse_github_repo_from_url("https://github.com/owner/repo/issues/123"),
+            Some("owner/repo".to_string())
+        );
+
+        // PR URL
+        assert_eq!(
+            parse_github_repo_from_url("https://github.com/owner/repo/pull/456"),
+            Some("owner/repo".to_string())
+        );
+
+        // Repo root
+        assert_eq!(
+            parse_github_repo_from_url("https://github.com/owner/repo"),
+            Some("owner/repo".to_string())
+        );
+
+        // Non-GitHub URL
+        assert_eq!(
+            parse_github_repo_from_url("https://gitlab.com/owner/repo"),
+            None
+        );
+
+        // Invalid URL
+        assert_eq!(parse_github_repo_from_url("not a url"), None);
+    }
 }
 
 /// Message from editor to browser
@@ -153,10 +210,24 @@ async fn handle_websocket(
 
     watcher.watch(&temp_file, RecursiveMode::NonRecursive)?;
 
-    let mut child = Command::new("writ")
-        .arg("--file")
-        .arg(&temp_file)
-        .arg("--autosave")
+    // Build writ command with optional GitHub context
+    let mut cmd = Command::new("writ");
+    cmd.arg("--file").arg(&temp_file).arg("--autosave");
+
+    // Pass GitHub repo context if URL is a GitHub page
+    if let Some(ref url) = client_msg.url
+        && let Some(repo) = parse_github_repo_from_url(url)
+    {
+        cmd.arg("--github-repo").arg(&repo);
+        println!("Detected GitHub repo: {}", repo);
+    }
+
+    // Pass GitHub token if available in environment
+    if let Ok(token) = std::env::var(GITHUB_TOKEN_ENV) {
+        cmd.arg("--github-token").arg(token);
+    }
+
+    let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
