@@ -11,6 +11,8 @@ use writ::{
     config::Config,
     demo::{DemoStep, DemoTiming, demo_script},
     editor::{Editor, EditorAction, EditorConfig, EditorTheme},
+    git::{detect_github_context, parse_github_repo_string},
+    github::GitHubClient,
     http,
     status_bar::StatusBarInfo,
     title_bar::FileInfo,
@@ -176,8 +178,34 @@ fn main() {
                     line_height: Rems(1.6),
                 };
 
+                // Extract GitHub config before borrowing cx mutably
+                let github_repo = cli_config.github_repo.clone();
+                let github_token = cli_config.github_token.clone();
+
                 // Create editor with file content and config
                 let editor = cx.new(|cx| Editor::with_config(&content, editor_config, cx));
+
+                // Set up GitHub context for autolink detection
+                // Priority: CLI arg/env var > auto-detect from .git/config
+                let github_context = github_repo
+                    .as_ref()
+                    .and_then(|s| parse_github_repo_string(s))
+                    .or_else(|| detect_github_context(&file_path));
+
+                if let Some(ctx) = github_context {
+                    editor.update(cx, |editor, _| {
+                        editor.set_github_context(ctx);
+                    });
+                }
+
+                // Set up GitHub client if token is available
+                if let Some(token) = github_token
+                    && let Ok(client) = GitHubClient::new(token)
+                {
+                    editor.update(cx, |editor, _| {
+                        editor.set_github_client(client);
+                    });
+                }
 
                 // Set up file watching for external changes
                 let watch_path = file_path.clone();

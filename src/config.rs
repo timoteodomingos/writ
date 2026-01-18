@@ -44,6 +44,11 @@ pub struct Config {
     /// GitHub personal access token for API access (issue/PR references)
     #[arg(long, env = GITHUB_TOKEN_ENV)]
     pub github_token: Option<String>,
+
+    /// GitHub repository (owner/repo) for autolink detection.
+    /// If not specified, will try to detect from .git/config.
+    #[arg(long, env = "WRIT_GITHUB_REPO")]
+    pub github_repo: Option<String>,
 }
 
 impl Global for Config {}

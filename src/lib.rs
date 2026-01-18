@@ -43,6 +43,7 @@ pub mod config;
 pub mod cursor;
 pub mod demo;
 pub mod editor;
+pub mod git;
 pub mod github;
 pub mod highlight;
 pub mod http;
