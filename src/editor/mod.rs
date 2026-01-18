@@ -37,7 +37,8 @@ use crate::buffer::Buffer;
 use crate::cursor::{Cursor, Selection};
 use crate::github::{GitHubClient, GitHubValidationCache};
 use crate::inline::{
-    GitHubContext, RawGitHubMatch, detect_github_references_in_line, github_refs_to_styled_regions,
+    GitHubContext, NakedUrl, RawGitHubMatch, detect_github_references_in_line, detect_naked_urls,
+    github_refs_to_styled_regions, naked_urls_to_styled_regions,
 };
 use crate::line::{Line, LineTheme};
 use crate::paste::{PasteContext, transform_paste};
@@ -1668,24 +1669,23 @@ impl Editor {
     pub fn refresh_github_refs(&mut self, cx: &mut Context<Self>) {
         self.github_validation_cache.clear();
         let line_count = self.state.buffer.line_count();
-        let matches = self.detect_github_refs(0, line_count);
-        self.spawn_github_validation(&matches, cx);
+        let (github_matches, _) = self.detect_links(0, line_count);
+        self.spawn_github_validation(&github_matches, cx);
     }
 
-    /// Detect GitHub refs in a range of lines.
-    /// Returns matches indexed by line number for use in rendering.
-    fn detect_github_refs(
+    /// Detect GitHub refs and naked URLs in a range of lines.
+    /// Returns both indexed by line number for use in rendering.
+    fn detect_links(
         &mut self,
         start_line: usize,
         end_line: usize,
-    ) -> HashMap<usize, Vec<RawGitHubMatch>> {
-        let github_context = match &self.github_context {
-            Some(ctx) => ctx,
-            None => return HashMap::new(),
-        };
-
+    ) -> (
+        HashMap<usize, Vec<RawGitHubMatch>>,
+        HashMap<usize, Vec<NakedUrl>>,
+    ) {
         let snapshot = self.state.buffer.render_snapshot();
-        let mut matches_by_line = HashMap::new();
+        let mut github_matches_by_line = HashMap::new();
+        let mut urls_by_line = HashMap::new();
 
         for line_idx in start_line..end_line.min(snapshot.line_count()) {
             let line = snapshot.line_markers(line_idx);
@@ -1699,25 +1699,41 @@ impl Editor {
                 .to_string();
 
             let inline_styles = snapshot.inline_styles_for_line(line_idx);
+
+            // Build code_ranges once for both detections
             let code_ranges: Vec<_> = inline_styles
                 .iter()
                 .filter(|s| s.style.code)
                 .map(|s| s.full_range.clone())
                 .collect();
 
-            let matches = detect_github_references_in_line(
-                &line_text,
-                line_range.start,
-                Some(github_context),
-                &code_ranges,
-            );
+            // Detect GitHub shorthand refs (only if we have context)
+            if let Some(github_context) = &self.github_context {
+                let matches = detect_github_references_in_line(
+                    &line_text,
+                    line_range.start,
+                    Some(github_context),
+                    &code_ranges,
+                );
+                if !matches.is_empty() {
+                    github_matches_by_line.insert(line_idx, matches);
+                }
+            }
 
-            if !matches.is_empty() {
-                matches_by_line.insert(line_idx, matches);
+            // Detect naked URLs (skip markdown links)
+            let link_ranges: Vec<_> = inline_styles
+                .iter()
+                .filter(|s| s.link_url.is_some())
+                .map(|s| s.full_range.clone())
+                .collect();
+
+            let urls = detect_naked_urls(&line_text, line_range.start, &code_ranges, &link_ranges);
+            if !urls.is_empty() {
+                urls_by_line.insert(line_idx, urls);
             }
         }
 
-        matches_by_line
+        (github_matches_by_line, urls_by_line)
     }
 
     /// Spawn validation tasks for GitHub refs not already in cache.
@@ -2434,14 +2450,10 @@ impl Render for Editor {
             }
         }
 
-        // Detect GitHub refs in visible lines and spawn validation
-        let github_matches_by_line = if self.github_context.is_some() {
-            let matches = self.detect_github_refs(first_visible_line, last_visible_line + 1);
-            self.spawn_github_validation(&matches, cx);
-            matches
-        } else {
-            HashMap::new()
-        };
+        // Detect GitHub refs and naked URLs in visible lines
+        let (github_matches_by_line, naked_urls_by_line) =
+            self.detect_links(first_visible_line, last_visible_line + 1);
+        self.spawn_github_validation(&github_matches_by_line, cx);
 
         cx.set_global(StatusBarInfo {
             context_markers,
@@ -2550,8 +2562,15 @@ impl Render for Editor {
                     let github_styles =
                         github_refs_to_styled_regions(github_matches, &github_cache);
                     inline_styles.extend(github_styles);
-                    inline_styles.sort_by_key(|s| s.full_range.start);
                 }
+
+                // Add naked URL links
+                if let Some(naked_urls) = naked_urls_by_line.get(&ix) {
+                    let url_styles = naked_urls_to_styled_regions(naked_urls);
+                    inline_styles.extend(url_styles);
+                }
+
+                inline_styles.sort_by_key(|s| s.full_range.start);
                 let code_highlights: Vec<_> = snapshot
                     .code_highlights_for_line(ix)
                     .iter()

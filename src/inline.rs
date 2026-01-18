@@ -253,17 +253,19 @@ static CROSS_REPO_COMMIT_RE: LazyLock<Regex> = LazyLock::new(|| {
 
 // URL patterns for GitHub links
 static GITHUB_ISSUE_URL_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"https://github\.com/([a-zA-Z0-9-]+)/([a-zA-Z0-9._-]+)/(?:issues|pull)/(\d+)")
+    Regex::new(r"https?://github\.com/([a-zA-Z0-9-]+)/([a-zA-Z0-9._-]+)/(?:issues|pull)/(\d+)")
         .unwrap()
 });
 static GITHUB_COMPARE_URL_RE: LazyLock<Regex> = LazyLock::new(|| {
     // Match base...head where base can contain dots but not the ... separator
-    Regex::new(r"https://github\.com/([a-zA-Z0-9-]+)/([a-zA-Z0-9._-]+)/compare/(.+?)\.\.\.([^\s]+)")
-        .unwrap()
+    Regex::new(
+        r"https?://github\.com/([a-zA-Z0-9-]+)/([a-zA-Z0-9._-]+)/compare/(.+?)\.\.\.([^\s]+)",
+    )
+    .unwrap()
 });
 static GITHUB_FILE_URL_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(
-        r"https://github\.com/([a-zA-Z0-9-]+)/([a-zA-Z0-9._-]+)/blob/([0-9a-f]+)/([^#\s]+)(?:#(L\d+(?:-L\d+)?))?",
+        r"https?://github\.com/([a-zA-Z0-9-]+)/([a-zA-Z0-9._-]+)/blob/([0-9a-f]+)/([^#\s]+)(?:#(L\d+(?:-L\d+)?))?",
     )
     .unwrap()
 });
@@ -526,6 +528,20 @@ pub fn github_refs_to_styled_regions(
             content_range: m.byte_range.clone(),
             style: TextStyle::default(),
             link_url: Some(m.reference.url()),
+            is_image: false,
+            checkbox: None,
+        })
+        .collect()
+}
+
+/// Convert naked URLs into styled regions (clickable links).
+pub fn naked_urls_to_styled_regions(urls: &[NakedUrl]) -> Vec<StyledRegion> {
+    urls.iter()
+        .map(|u| StyledRegion {
+            full_range: u.byte_range.clone(),
+            content_range: u.byte_range.clone(),
+            style: TextStyle::default(),
+            link_url: Some(u.url.clone()),
             is_image: false,
             checkbox: None,
         })
@@ -1491,6 +1507,44 @@ mod tests {
         assert_eq!(
             file.url(),
             "https://github.com/owner/repo/blob/abc1234/src/lib.rs#L5"
+        );
+    }
+
+    #[test]
+    fn test_naked_urls_to_styled_regions() {
+        let urls = vec![
+            NakedUrl {
+                url: "https://example.com/page".to_string(),
+                byte_range: 4..27,
+                github_ref: None,
+            },
+            NakedUrl {
+                url: "https://github.com/rust-lang/rust/issues/123".to_string(),
+                byte_range: 30..74,
+                github_ref: Some(GitHubRef::Issue {
+                    owner: "rust-lang".to_string(),
+                    repo: "rust".to_string(),
+                    number: 123,
+                }),
+            },
+        ];
+
+        let regions = naked_urls_to_styled_regions(&urls);
+
+        assert_eq!(regions.len(), 2);
+
+        // First URL - plain link
+        assert_eq!(regions[0].full_range, 4..27);
+        assert_eq!(
+            regions[0].link_url,
+            Some("https://example.com/page".to_string())
+        );
+
+        // Second URL - GitHub URL (still just a link for now)
+        assert_eq!(regions[1].full_range, 30..74);
+        assert_eq!(
+            regions[1].link_url,
+            Some("https://github.com/rust-lang/rust/issues/123".to_string())
         );
     }
 }
