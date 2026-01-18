@@ -1,13 +1,351 @@
 //! Inline style extraction for markdown text.
 //!
 //! This module extracts styled regions (bold, italic, code, links, etc.)
-//! from the inline parse trees.
+//! from the inline parse trees, plus GitHub autolink references.
 
+use regex::Regex;
 use ropey::Rope;
+use std::collections::HashSet;
 use std::ops::Range;
+use std::sync::LazyLock;
 use tree_sitter::Node;
 
 use crate::parser::MarkdownTree;
+
+/// GitHub repository context for resolving relative references like #123.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitHubContext {
+    pub owner: String,
+    pub repo: String,
+}
+
+/// A detected GitHub reference.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum GitHubRef {
+    /// Issue or PR: #123 or GH-123
+    Issue {
+        owner: String,
+        repo: String,
+        number: u64,
+    },
+    /// User mention: @username
+    User { username: String },
+    /// Team mention: @org/team
+    Team { org: String, team: String },
+    /// Commit SHA (7-40 hex chars)
+    Commit {
+        owner: String,
+        repo: String,
+        sha: String,
+    },
+}
+
+impl GitHubRef {
+    /// Generate the GitHub URL for this reference.
+    pub fn url(&self) -> String {
+        match self {
+            GitHubRef::Issue {
+                owner,
+                repo,
+                number,
+            } => {
+                format!("https://github.com/{owner}/{repo}/issues/{number}")
+            }
+            GitHubRef::User { username } => {
+                format!("https://github.com/{username}")
+            }
+            GitHubRef::Team { org, team } => {
+                format!("https://github.com/orgs/{org}/teams/{team}")
+            }
+            GitHubRef::Commit { owner, repo, sha } => {
+                format!("https://github.com/{owner}/{repo}/commit/{sha}")
+            }
+        }
+    }
+
+    /// Create an Issue ref from a cross-repo capture (owner/repo#number).
+    /// Capture groups: 1=full, 2=owner, 3=repo, 4=number
+    fn from_cross_repo_issue_capture(cap: &regex::Captures) -> Self {
+        GitHubRef::Issue {
+            owner: cap[2].to_string(),
+            repo: cap[3].to_string(),
+            number: cap[4].parse().expect("regex guarantees valid number"),
+        }
+    }
+
+    /// Create an Issue ref from a simple #number capture with context.
+    /// Capture groups: 1=number
+    fn from_issue_capture(cap: &regex::Captures, ctx: &GitHubContext) -> Self {
+        GitHubRef::Issue {
+            owner: ctx.owner.clone(),
+            repo: ctx.repo.clone(),
+            number: cap[1].parse().expect("regex guarantees valid number"),
+        }
+    }
+
+    /// Create a Commit ref from a cross-repo capture (owner/repo@sha).
+    /// Capture groups: 1=full, 2=owner, 3=repo, 4=sha
+    fn from_cross_repo_commit_capture(cap: &regex::Captures) -> Self {
+        GitHubRef::Commit {
+            owner: cap[2].to_string(),
+            repo: cap[3].to_string(),
+            sha: cap[4].to_string(),
+        }
+    }
+
+    /// Create a Commit ref from a simple SHA capture with context.
+    /// Capture groups: 1=sha
+    fn from_sha_capture(cap: &regex::Captures, ctx: &GitHubContext) -> Self {
+        GitHubRef::Commit {
+            owner: ctx.owner.clone(),
+            repo: ctx.repo.clone(),
+            sha: cap[1].to_string(),
+        }
+    }
+
+    /// Create a Team ref from a capture (@org/team).
+    /// Capture groups: 1=full, 2=org, 3=team
+    fn from_team_capture(cap: &regex::Captures) -> Self {
+        GitHubRef::Team {
+            org: cap[2].to_string(),
+            team: cap[3].to_string(),
+        }
+    }
+
+    /// Create a User ref from a capture (@username).
+    /// Capture groups: 1=full, 2=username
+    fn from_user_capture(cap: &regex::Captures) -> Self {
+        GitHubRef::User {
+            username: cap[2].to_string(),
+        }
+    }
+}
+
+// Regex patterns for GitHub reference detection.
+// These are compiled once and reused.
+// Note: Boundary checking is done manually in code since regex crate doesn't support lookbehind.
+static ISSUE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"#(\d{1,10})").unwrap());
+static GH_ISSUE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)GH-(\d{1,10})").unwrap());
+// Patterns with trailing boundary use an outer capture group for the full match without the boundary.
+// E.g., (full_match)(?:boundary) so cap[1] is the text we want.
+static USER_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(@([a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?))(?:[^a-zA-Z0-9/]|$)").unwrap()
+});
+static TEAM_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(@([a-zA-Z0-9-]+)/([a-zA-Z0-9_-]+))(?:[^a-zA-Z0-9]|$)").unwrap());
+static CROSS_REPO_ISSUE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(([a-zA-Z0-9-]+)/([a-zA-Z0-9._-]+)#(\d{1,10}))(?:[^a-zA-Z0-9]|$)").unwrap()
+});
+static SHA_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b([0-9a-f]{7,40})\b").unwrap());
+static CROSS_REPO_COMMIT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"(([a-zA-Z0-9-]+)/([a-zA-Z0-9._-]+)@([0-9a-f]{7,40}))(?:[^a-zA-Z0-9]|$)").unwrap()
+});
+
+/// A raw match from regex detection (before validation).
+#[derive(Debug, Clone)]
+pub struct RawGitHubMatch {
+    /// The reference type and details.
+    pub reference: GitHubRef,
+    /// Byte range in the rope where this match was found.
+    pub byte_range: Range<usize>,
+}
+
+/// Detect GitHub references in a single line of text.
+///
+/// Returns raw matches that should be validated against the GitHub API
+/// before being styled as links.
+///
+/// - `line`: the line text to scan
+/// - `line_byte_offset`: byte offset of this line in the buffer (for absolute ranges)
+/// - `github_context`: owner/repo for resolving relative refs like #123
+/// - `code_ranges`: absolute byte ranges of code spans to skip
+pub fn detect_github_references_in_line(
+    line: &str,
+    line_byte_offset: usize,
+    github_context: Option<&GitHubContext>,
+    code_ranges: &[Range<usize>],
+) -> Vec<RawGitHubMatch> {
+    let mut matches = Vec::new();
+    let mut matched_ranges: Vec<Range<usize>> = Vec::new();
+
+    // Helper to check if an absolute byte position is inside a code span
+    let is_in_code = |abs_pos: usize| -> bool { code_ranges.iter().any(|r| r.contains(&abs_pos)) };
+
+    // Helper to check if a range overlaps with already matched ranges
+    let overlaps_matched = |range: &Range<usize>, matched: &[Range<usize>]| -> bool {
+        matched
+            .iter()
+            .any(|r| range.start < r.end && range.end > r.start)
+    };
+
+    // Helper to check if char at position is a word boundary (not alphanumeric)
+    let is_word_boundary = |pos: usize| -> bool {
+        if pos >= line.len() {
+            return true;
+        }
+        !line.as_bytes()[pos].is_ascii_alphanumeric()
+    };
+
+    // Cross-repo issues: owner/repo#123 (check before simple #123)
+    for cap in CROSS_REPO_ISSUE_RE.captures_iter(line) {
+        // cap[1] is the full match without trailing boundary
+        let full = cap.get(1).unwrap();
+        let abs_range = (line_byte_offset + full.start())..(line_byte_offset + full.end());
+        if is_in_code(abs_range.start) {
+            continue;
+        }
+        matched_ranges.push(abs_range.clone());
+        matches.push(RawGitHubMatch {
+            reference: GitHubRef::from_cross_repo_issue_capture(&cap),
+            byte_range: abs_range,
+        });
+    }
+
+    // Cross-repo commits: owner/repo@sha (check before @user which could match the @sha part)
+    for cap in CROSS_REPO_COMMIT_RE.captures_iter(line) {
+        let full = cap.get(1).unwrap();
+        let abs_range = (line_byte_offset + full.start())..(line_byte_offset + full.end());
+        if is_in_code(abs_range.start) {
+            continue;
+        }
+        matched_ranges.push(abs_range.clone());
+        matches.push(RawGitHubMatch {
+            reference: GitHubRef::from_cross_repo_commit_capture(&cap),
+            byte_range: abs_range,
+        });
+    }
+
+    // Team mentions: @org/team (check before simple @user)
+    for cap in TEAM_RE.captures_iter(line) {
+        let full = cap.get(1).unwrap();
+        let abs_range = (line_byte_offset + full.start())..(line_byte_offset + full.end());
+        if is_in_code(abs_range.start) {
+            continue;
+        }
+        if overlaps_matched(&abs_range, &matched_ranges) {
+            continue;
+        }
+        matched_ranges.push(abs_range.clone());
+        matches.push(RawGitHubMatch {
+            reference: GitHubRef::from_team_capture(&cap),
+            byte_range: abs_range,
+        });
+    }
+
+    // User mentions: @username
+    for cap in USER_RE.captures_iter(line) {
+        let full = cap.get(1).unwrap();
+        let abs_range = (line_byte_offset + full.start())..(line_byte_offset + full.end());
+        if is_in_code(abs_range.start) {
+            continue;
+        }
+        if overlaps_matched(&abs_range, &matched_ranges) {
+            continue;
+        }
+        matched_ranges.push(abs_range.clone());
+        matches.push(RawGitHubMatch {
+            reference: GitHubRef::from_user_capture(&cap),
+            byte_range: abs_range,
+        });
+    }
+
+    // Simple issues: #123 (only if we have GitHub context)
+    if let Some(ctx) = github_context {
+        for cap in ISSUE_RE.captures_iter(line) {
+            let full_match = cap.get(0).unwrap();
+            let match_start = full_match.start();
+            let match_end = full_match.end();
+            let abs_start = line_byte_offset + match_start;
+            if is_in_code(abs_start) {
+                continue;
+            }
+            // Check word boundaries
+            if match_start > 0 && !is_word_boundary(match_start - 1) {
+                continue;
+            }
+            if match_end < line.len() && !is_word_boundary(match_end) {
+                continue;
+            }
+            let abs_range = abs_start..(line_byte_offset + match_end);
+            if overlaps_matched(&abs_range, &matched_ranges) {
+                continue;
+            }
+            matched_ranges.push(abs_range.clone());
+            matches.push(RawGitHubMatch {
+                reference: GitHubRef::from_issue_capture(&cap, ctx),
+                byte_range: abs_range,
+            });
+        }
+
+        // GH-123 format
+        for cap in GH_ISSUE_RE.captures_iter(line) {
+            let full_match = cap.get(0).unwrap();
+            let match_start = full_match.start();
+            let match_end = full_match.end();
+            let abs_start = line_byte_offset + match_start;
+            if is_in_code(abs_start) {
+                continue;
+            }
+            // Check word boundaries
+            if match_start > 0 && !is_word_boundary(match_start - 1) {
+                continue;
+            }
+            if match_end < line.len() && !is_word_boundary(match_end) {
+                continue;
+            }
+            let abs_range = abs_start..(line_byte_offset + match_end);
+            if overlaps_matched(&abs_range, &matched_ranges) {
+                continue;
+            }
+            matched_ranges.push(abs_range.clone());
+            matches.push(RawGitHubMatch {
+                reference: GitHubRef::from_issue_capture(&cap, ctx),
+                byte_range: abs_range,
+            });
+        }
+
+        // Simple SHA
+        for cap in SHA_RE.captures_iter(line) {
+            let m = cap.get(1).unwrap();
+            let start = m.start();
+            let abs_start = line_byte_offset + start;
+            if is_in_code(abs_start) {
+                continue;
+            }
+            let abs_range = abs_start..(line_byte_offset + m.end());
+            if overlaps_matched(&abs_range, &matched_ranges) {
+                continue;
+            }
+            matches.push(RawGitHubMatch {
+                reference: GitHubRef::from_sha_capture(&cap, ctx),
+                byte_range: abs_range,
+            });
+        }
+    }
+
+    matches
+}
+
+/// Convert validated GitHub references into styled regions.
+///
+/// Only references that exist in `validated_refs` will be styled as links.
+pub fn github_refs_to_styled_regions(
+    matches: &[RawGitHubMatch],
+    validated_refs: &HashSet<GitHubRef>,
+) -> Vec<StyledRegion> {
+    matches
+        .iter()
+        .filter(|m| validated_refs.contains(&m.reference))
+        .map(|m| StyledRegion {
+            full_range: m.byte_range.clone(),
+            content_range: m.byte_range.clone(),
+            style: TextStyle::default(),
+            link_url: Some(m.reference.url()),
+            is_image: false,
+            checkbox: None,
+        })
+        .collect()
+}
 
 /// Style attributes for inline text.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -482,5 +820,237 @@ mod tests {
         // content_range excludes all delimiters (2..5 for just "hey")
         assert_eq!(styles[0].full_range, 0..7);
         assert_eq!(styles[0].content_range, 2..5);
+    }
+
+    // GitHub reference detection tests
+
+    fn github_ctx() -> GitHubContext {
+        GitHubContext {
+            owner: "rust-lang".to_string(),
+            repo: "rust".to_string(),
+        }
+    }
+
+    #[test]
+    fn test_github_issue_ref() {
+        let line = "See #123 for details";
+        let ctx = github_ctx();
+        let matches = detect_github_references_in_line(line, 0, Some(&ctx), &[]);
+
+        assert_eq!(matches.len(), 1);
+        assert!(matches!(
+            &matches[0].reference,
+            GitHubRef::Issue { owner, repo, number }
+            if owner == "rust-lang" && repo == "rust" && *number == 123
+        ));
+        assert_eq!(matches[0].byte_range, 4..8); // "#123"
+    }
+
+    #[test]
+    fn test_github_issue_at_start() {
+        let line = "#456 is fixed";
+        let ctx = github_ctx();
+        let matches = detect_github_references_in_line(line, 0, Some(&ctx), &[]);
+
+        assert_eq!(matches.len(), 1);
+        assert!(matches!(
+            &matches[0].reference,
+            GitHubRef::Issue { number, .. } if *number == 456
+        ));
+        assert_eq!(matches[0].byte_range, 0..4);
+    }
+
+    #[test]
+    fn test_github_gh_format() {
+        let line = "Fixed in GH-789";
+        let ctx = github_ctx();
+        let matches = detect_github_references_in_line(line, 0, Some(&ctx), &[]);
+
+        assert_eq!(matches.len(), 1);
+        assert!(matches!(
+            &matches[0].reference,
+            GitHubRef::Issue { number, .. } if *number == 789
+        ));
+    }
+
+    #[test]
+    fn test_github_user_mention() {
+        let line = "Thanks @torvalds for the review";
+        let matches = detect_github_references_in_line(line, 0, None, &[]);
+
+        assert_eq!(matches.len(), 1);
+        assert!(matches!(
+            &matches[0].reference,
+            GitHubRef::User { username } if username == "torvalds"
+        ));
+        assert_eq!(matches[0].byte_range, 7..16); // "@torvalds"
+    }
+
+    #[test]
+    fn test_github_team_mention() {
+        let line = "cc @rust-lang/compiler";
+        let matches = detect_github_references_in_line(line, 0, None, &[]);
+
+        assert_eq!(matches.len(), 1);
+        assert!(matches!(
+            &matches[0].reference,
+            GitHubRef::Team { org, team }
+            if org == "rust-lang" && team == "compiler"
+        ));
+    }
+
+    #[test]
+    fn test_github_cross_repo_issue() {
+        let line = "See tokio-rs/tokio#1234";
+        let matches = detect_github_references_in_line(line, 0, None, &[]);
+
+        assert_eq!(matches.len(), 1);
+        assert!(matches!(
+            &matches[0].reference,
+            GitHubRef::Issue { owner, repo, number }
+            if owner == "tokio-rs" && repo == "tokio" && *number == 1234
+        ));
+    }
+
+    #[test]
+    fn test_github_sha_ref() {
+        let line = "Fixed in a1b2c3d";
+        let ctx = github_ctx();
+        let matches = detect_github_references_in_line(line, 0, Some(&ctx), &[]);
+
+        assert_eq!(matches.len(), 1);
+        assert!(matches!(
+            &matches[0].reference,
+            GitHubRef::Commit { sha, .. } if sha == "a1b2c3d"
+        ));
+    }
+
+    #[test]
+    fn test_github_cross_repo_commit() {
+        let line = "See tokio-rs/tokio@abc1234";
+        let matches = detect_github_references_in_line(line, 0, None, &[]);
+
+        assert_eq!(matches.len(), 1);
+        assert!(matches!(
+            &matches[0].reference,
+            GitHubRef::Commit { owner, repo, sha }
+            if owner == "tokio-rs" && repo == "tokio" && sha == "abc1234"
+        ));
+    }
+
+    #[test]
+    fn test_github_skip_code_span() {
+        let line = "Use `#123` in code";
+        let ctx = github_ctx();
+        // Simulate code span at bytes 4..10 ("`#123`")
+        let code_range = 4..10;
+        let matches = detect_github_references_in_line(
+            line,
+            0,
+            Some(&ctx),
+            std::slice::from_ref(&code_range),
+        );
+
+        assert!(matches.is_empty(), "Should not match inside code span");
+    }
+
+    #[test]
+    fn test_github_no_context_no_simple_refs() {
+        let line = "Issue #123 and commit a1b2c3d";
+        // Without context, simple #123 and bare SHA should not be detected
+        let matches = detect_github_references_in_line(line, 0, None, &[]);
+
+        assert!(matches.is_empty(), "Simple refs need GitHub context");
+    }
+
+    #[test]
+    fn test_github_multiple_refs() {
+        let line = "#1 #2 @user rust-lang/rust#3";
+        let ctx = github_ctx();
+        let matches = detect_github_references_in_line(line, 0, Some(&ctx), &[]);
+
+        // Should find: #1, #2, @user, rust-lang/rust#3
+        assert_eq!(matches.len(), 4);
+    }
+
+    #[test]
+    fn test_github_line_byte_offset() {
+        // Simulate a line that starts at byte 100 in the buffer
+        let line = "See #123";
+        let ctx = github_ctx();
+        let matches = detect_github_references_in_line(line, 100, Some(&ctx), &[]);
+
+        assert_eq!(matches.len(), 1);
+        // Byte range should be absolute (100 + 4 = 104, 100 + 8 = 108)
+        assert_eq!(matches[0].byte_range, 104..108);
+    }
+
+    #[test]
+    fn test_github_ref_url() {
+        let issue = GitHubRef::Issue {
+            owner: "rust-lang".to_string(),
+            repo: "rust".to_string(),
+            number: 123,
+        };
+        assert_eq!(issue.url(), "https://github.com/rust-lang/rust/issues/123");
+
+        let user = GitHubRef::User {
+            username: "torvalds".to_string(),
+        };
+        assert_eq!(user.url(), "https://github.com/torvalds");
+
+        let team = GitHubRef::Team {
+            org: "rust-lang".to_string(),
+            team: "compiler".to_string(),
+        };
+        assert_eq!(
+            team.url(),
+            "https://github.com/orgs/rust-lang/teams/compiler"
+        );
+
+        let commit = GitHubRef::Commit {
+            owner: "rust-lang".to_string(),
+            repo: "rust".to_string(),
+            sha: "abc1234".to_string(),
+        };
+        assert_eq!(
+            commit.url(),
+            "https://github.com/rust-lang/rust/commit/abc1234"
+        );
+    }
+
+    #[test]
+    fn test_github_refs_to_styled_regions() {
+        let line = "See #123";
+        let ctx = github_ctx();
+        let matches = detect_github_references_in_line(line, 0, Some(&ctx), &[]);
+
+        // Simulate validation - mark the issue as valid
+        let mut validated = HashSet::new();
+        validated.insert(GitHubRef::Issue {
+            owner: "rust-lang".to_string(),
+            repo: "rust".to_string(),
+            number: 123,
+        });
+
+        let regions = github_refs_to_styled_regions(&matches, &validated);
+        assert_eq!(regions.len(), 1);
+        assert_eq!(
+            regions[0].link_url,
+            Some("https://github.com/rust-lang/rust/issues/123".to_string())
+        );
+    }
+
+    #[test]
+    fn test_github_unvalidated_ref_not_styled() {
+        let line = "See #999999";
+        let ctx = github_ctx();
+        let matches = detect_github_references_in_line(line, 0, Some(&ctx), &[]);
+
+        // Empty validation set - nothing validated
+        let validated = HashSet::new();
+        let regions = github_refs_to_styled_regions(&matches, &validated);
+
+        assert!(regions.is_empty(), "Unvalidated refs should not be styled");
     }
 }
