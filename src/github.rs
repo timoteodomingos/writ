@@ -9,6 +9,68 @@ use octocrab::models::Author;
 use octocrab::models::commits::Commit;
 use octocrab::models::issues::Issue;
 use octocrab::models::teams::RequestedTeam;
+use std::collections::HashMap;
+
+use crate::inline::GitHubRef;
+
+/// Validation state for a GitHub reference.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValidationState {
+    /// Fetch has been spawned but not yet completed.
+    Pending,
+    /// Reference exists on GitHub.
+    Valid,
+    /// Reference does not exist on GitHub.
+    Invalid,
+}
+
+/// Cache for GitHub reference validation results.
+///
+/// This is a simple cache with no automatic invalidation.
+/// Use `clear()` to manually refresh (e.g., via Ctrl+R keybind).
+#[derive(Debug, Default)]
+pub struct GitHubValidationCache {
+    cache: HashMap<GitHubRef, ValidationState>,
+}
+
+impl GitHubValidationCache {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Get the validation state for a reference.
+    /// Returns `None` if not in cache.
+    pub fn get(&self, ref_: &GitHubRef) -> Option<ValidationState> {
+        self.cache.get(ref_).copied()
+    }
+
+    /// Mark a reference as pending (fetch has been spawned).
+    pub fn mark_pending(&mut self, ref_: GitHubRef) {
+        self.cache.insert(ref_, ValidationState::Pending);
+    }
+
+    /// Set the validation result for a reference.
+    pub fn set_result(&mut self, ref_: GitHubRef, valid: bool) {
+        self.cache.insert(
+            ref_,
+            if valid {
+                ValidationState::Valid
+            } else {
+                ValidationState::Invalid
+            },
+        );
+    }
+
+    /// Check if a reference is validated as valid.
+    pub fn is_valid(&self, ref_: &GitHubRef) -> bool {
+        self.cache.get(ref_) == Some(&ValidationState::Valid)
+    }
+
+    /// Clear all cached results (for manual refresh).
+    pub fn clear(&mut self) {
+        self.cache.clear();
+    }
+}
 
 /// GitHub API client for validating references and autocomplete.
 pub struct GitHubClient {
@@ -128,6 +190,23 @@ impl GitHubClient {
     pub async fn get_commit(&self, owner: &str, repo: &str, sha: &str) -> Option<Commit> {
         let route = format!("/repos/{}/{}/commits/{}", owner, repo, sha);
         self.octocrab.get(route, None::<&()>).compat().await.ok()
+    }
+
+    /// Validate a GitHub reference by checking if it exists.
+    /// Returns `true` if the reference exists, `false` otherwise.
+    pub async fn validate_ref(&self, ref_: &GitHubRef) -> bool {
+        match ref_ {
+            GitHubRef::Issue {
+                owner,
+                repo,
+                number,
+            } => self.get_issue(owner, repo, *number).await.is_some(),
+            GitHubRef::User { username } => self.get_user(username).await.is_some(),
+            GitHubRef::Team { org, team } => self.get_team(org, team).await.is_some(),
+            GitHubRef::Commit { owner, repo, sha } => {
+                self.get_commit(owner, repo, sha).await.is_some()
+            }
+        }
     }
 }
 
