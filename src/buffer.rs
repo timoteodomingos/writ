@@ -102,6 +102,7 @@ impl RenderSnapshot {
                     link_url: None,
                     is_image: false,
                     checkbox: Some(checked),
+                    display_text: None,
                 });
             }
         }

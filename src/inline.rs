@@ -530,6 +530,7 @@ pub fn github_refs_to_styled_regions(
             link_url: Some(m.reference.url()),
             is_image: false,
             checkbox: None,
+            display_text: None,
         })
         .collect()
 }
@@ -544,6 +545,7 @@ pub fn naked_urls_to_styled_regions(urls: &[NakedUrl]) -> Vec<StyledRegion> {
             link_url: Some(u.url.clone()),
             is_image: false,
             checkbox: None,
+            display_text: None,
         })
         .collect()
 }
@@ -618,6 +620,10 @@ pub struct StyledRegion {
     pub is_image: bool,
     /// If Some, this is a checkbox. The bool indicates checked state.
     pub checkbox: Option<bool>,
+    /// If Some, display this text instead of the buffer content.
+    /// Used for GitHub URL shortening (e.g., show "owner/repo#123" instead of full URL).
+    /// When set, the region is "atomic" - cursor/selection treat it as a single unit.
+    pub display_text: Option<String>,
 }
 
 /// Extract all inline styles from a markdown tree.
@@ -761,6 +767,7 @@ fn extract_emphasis_region(node: &Node, style: TextStyle) -> Option<StyledRegion
         link_url: None,
         is_image: false,
         checkbox: None,
+        display_text: None,
     })
 }
 
@@ -789,6 +796,7 @@ fn extract_code_span_region(node: &Node) -> Option<StyledRegion> {
         link_url: None,
         is_image: false,
         checkbox: None,
+        display_text: None,
     })
 }
 
@@ -847,6 +855,7 @@ fn extract_link_region(node: &Node, rope: &Rope) -> Option<StyledRegion> {
         link_url: url,
         is_image: false,
         checkbox: None,
+        display_text: None,
     })
 }
 
@@ -883,6 +892,7 @@ fn extract_image_region(node: &Node, rope: &Rope) -> Option<StyledRegion> {
         link_url: Some(url),
         is_image: true,
         checkbox: None,
+        display_text: None,
     })
 }
 
