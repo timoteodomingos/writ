@@ -333,4 +333,91 @@ mod tests {
         let commit = client.get_commit("rust-lang", "rust", "0000000").await;
         assert!(commit.is_none(), "Invalid commit should not be found");
     }
+
+    #[test]
+    fn test_cache_new_is_empty() {
+        let cache = GitHubValidationCache::new();
+        let ref_ = GitHubRef::Issue {
+            owner: "rust-lang".to_string(),
+            repo: "rust".to_string(),
+            number: 123,
+        };
+        assert!(cache.get(&ref_).is_none());
+        assert!(!cache.is_valid(&ref_));
+    }
+
+    #[test]
+    fn test_cache_mark_pending() {
+        let cache = GitHubValidationCache::new();
+        let ref_ = GitHubRef::Issue {
+            owner: "rust-lang".to_string(),
+            repo: "rust".to_string(),
+            number: 123,
+        };
+
+        cache.mark_pending(ref_.clone());
+        assert_eq!(cache.get(&ref_), Some(ValidationState::Pending));
+        assert!(!cache.is_valid(&ref_));
+    }
+
+    #[test]
+    fn test_cache_set_result_valid() {
+        let cache = GitHubValidationCache::new();
+        let ref_ = GitHubRef::Issue {
+            owner: "rust-lang".to_string(),
+            repo: "rust".to_string(),
+            number: 123,
+        };
+
+        cache.set_result(ref_.clone(), true);
+        assert_eq!(cache.get(&ref_), Some(ValidationState::Valid));
+        assert!(cache.is_valid(&ref_));
+    }
+
+    #[test]
+    fn test_cache_set_result_invalid() {
+        let cache = GitHubValidationCache::new();
+        let ref_ = GitHubRef::Issue {
+            owner: "rust-lang".to_string(),
+            repo: "rust".to_string(),
+            number: 123,
+        };
+
+        cache.set_result(ref_.clone(), false);
+        assert_eq!(cache.get(&ref_), Some(ValidationState::Invalid));
+        assert!(!cache.is_valid(&ref_));
+    }
+
+    #[test]
+    fn test_cache_clear() {
+        let cache = GitHubValidationCache::new();
+        let ref_ = GitHubRef::Issue {
+            owner: "rust-lang".to_string(),
+            repo: "rust".to_string(),
+            number: 123,
+        };
+
+        cache.set_result(ref_.clone(), true);
+        assert!(cache.is_valid(&ref_));
+
+        cache.clear();
+        assert!(cache.get(&ref_).is_none());
+        assert!(!cache.is_valid(&ref_));
+    }
+
+    #[test]
+    fn test_cache_clone_shares_state() {
+        let cache1 = GitHubValidationCache::new();
+        let cache2 = cache1.clone();
+
+        let ref_ = GitHubRef::User {
+            username: "torvalds".to_string(),
+        };
+
+        cache1.set_result(ref_.clone(), true);
+
+        // Both should see the same state
+        assert!(cache1.is_valid(&ref_));
+        assert!(cache2.is_valid(&ref_));
+    }
 }
