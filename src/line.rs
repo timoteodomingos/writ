@@ -526,6 +526,35 @@ impl Line {
                 continue;
             }
 
+            // Check if this span exactly matches a display_text region
+            // (naked URLs create a single boundary window matching their full_range)
+            let display_text_region = self.inline_styles.iter().find(|region| {
+                region.display_text.is_some()
+                    && region.full_range.start == start
+                    && region.full_range.end == end
+            });
+
+            if let Some(region) = display_text_region {
+                // Emit the display_text instead of the buffer content
+                let substitution = region.display_text.as_ref().unwrap();
+                display_text.push_str(substitution);
+
+                // Style it as a link
+                runs.push(TextRun {
+                    len: substitution.len(),
+                    font: self.theme.text_font.clone(),
+                    color: self.theme.link_color.into(),
+                    background_color: None,
+                    underline: Some(gpui::UnderlineStyle {
+                        thickness: px(1.0),
+                        color: Some(self.theme.link_color.into()),
+                        wavy: false,
+                    }),
+                    strikethrough: None,
+                });
+                continue;
+            }
+
             let span_text = self.slice(start..end);
             let span_len = span_text.len();
             display_text.push_str(&span_text);

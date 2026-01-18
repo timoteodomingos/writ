@@ -536,16 +536,31 @@ pub fn github_refs_to_styled_regions(
 }
 
 /// Convert naked URLs into styled regions (clickable links).
-pub fn naked_urls_to_styled_regions(urls: &[NakedUrl]) -> Vec<StyledRegion> {
+/// For GitHub URLs with validated refs, sets display_text for shortening.
+pub fn naked_urls_to_styled_regions(
+    urls: &[NakedUrl],
+    cache: &GitHubValidationCache,
+) -> Vec<StyledRegion> {
     urls.iter()
-        .map(|u| StyledRegion {
-            full_range: u.byte_range.clone(),
-            content_range: u.byte_range.clone(),
-            style: TextStyle::default(),
-            link_url: Some(u.url.clone()),
-            is_image: false,
-            checkbox: None,
-            display_text: None,
+        .map(|u| {
+            // Check if this is a validated GitHub URL that should be shortened
+            let display_text = u.github_ref.as_ref().and_then(|ref_| {
+                if cache.is_valid(ref_) {
+                    Some(ref_.short_display())
+                } else {
+                    None
+                }
+            });
+
+            StyledRegion {
+                full_range: u.byte_range.clone(),
+                content_range: u.byte_range.clone(),
+                style: TextStyle::default(),
+                link_url: Some(u.url.clone()),
+                is_image: false,
+                checkbox: None,
+                display_text,
+            }
         })
         .collect()
 }
@@ -1539,22 +1554,53 @@ mod tests {
             },
         ];
 
-        let regions = naked_urls_to_styled_regions(&urls);
+        // Empty cache - no validation yet
+        let cache = GitHubValidationCache::new();
+        let regions = naked_urls_to_styled_regions(&urls, &cache);
 
         assert_eq!(regions.len(), 2);
 
-        // First URL - plain link
+        // First URL - plain link, no display_text
         assert_eq!(regions[0].full_range, 4..27);
         assert_eq!(
             regions[0].link_url,
             Some("https://example.com/page".to_string())
         );
+        assert!(regions[0].display_text.is_none());
 
-        // Second URL - GitHub URL (still just a link for now)
+        // Second URL - GitHub URL, not yet validated so no display_text
         assert_eq!(regions[1].full_range, 30..74);
         assert_eq!(
             regions[1].link_url,
             Some("https://github.com/rust-lang/rust/issues/123".to_string())
+        );
+        assert!(regions[1].display_text.is_none());
+    }
+
+    #[test]
+    fn test_naked_urls_with_validated_github_ref() {
+        let github_ref = GitHubRef::Issue {
+            owner: "rust-lang".to_string(),
+            repo: "rust".to_string(),
+            number: 123,
+        };
+
+        let urls = vec![NakedUrl {
+            url: "https://github.com/rust-lang/rust/issues/123".to_string(),
+            byte_range: 0..44,
+            github_ref: Some(github_ref.clone()),
+        }];
+
+        // Mark the ref as validated
+        let cache = GitHubValidationCache::new();
+        cache.set_result(github_ref, true);
+
+        let regions = naked_urls_to_styled_regions(&urls, &cache);
+
+        assert_eq!(regions.len(), 1);
+        assert_eq!(
+            regions[0].display_text,
+            Some("rust-lang/rust#123".to_string())
         );
     }
 }
