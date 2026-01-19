@@ -100,26 +100,47 @@ impl GitHubRef {
     }
 
     /// Generate the short display text for this reference (used for URL shortening).
-    pub fn short_display(&self) -> String {
+    /// If `context` is provided and the ref is from the same repo, omits the `owner/repo` prefix.
+    pub fn short_display(&self, context: Option<&GitHubContext>) -> String {
+        // Check if this ref is from the same repo as the context
+        let is_same_repo = |owner: &str, repo: &str| {
+            context.is_some_and(|ctx| ctx.owner == owner && ctx.repo == repo)
+        };
+
         match self {
             GitHubRef::Issue {
                 owner,
                 repo,
                 number,
-            } => format!("{owner}/{repo}#{number}"),
+            } => {
+                if is_same_repo(owner, repo) {
+                    format!("#{number}")
+                } else {
+                    format!("{owner}/{repo}#{number}")
+                }
+            }
             GitHubRef::User { username } => format!("@{username}"),
             GitHubRef::Team { org, team } => format!("@{org}/{team}"),
             GitHubRef::Commit { owner, repo, sha } => {
-                // Truncate SHA to 7 chars for display
                 let short_sha = &sha[..sha.len().min(7)];
-                format!("{owner}/{repo}@{short_sha}")
+                if is_same_repo(owner, repo) {
+                    format!("@{short_sha}")
+                } else {
+                    format!("{owner}/{repo}@{short_sha}")
+                }
             }
             GitHubRef::Compare {
                 owner,
                 repo,
                 base,
                 head,
-            } => format!("{owner}/{repo}@{base}...{head}"),
+            } => {
+                if is_same_repo(owner, repo) {
+                    format!("@{base}...{head}")
+                } else {
+                    format!("{owner}/{repo}@{base}...{head}")
+                }
+            }
             GitHubRef::File {
                 owner,
                 repo,
@@ -128,7 +149,11 @@ impl GitHubRef {
                 lines,
             } => {
                 let short_sha = &sha[..sha.len().min(7)];
-                let display = format!("{owner}/{repo}@{short_sha}:{path}");
+                let display = if is_same_repo(owner, repo) {
+                    format!("@{short_sha}:{path}")
+                } else {
+                    format!("{owner}/{repo}@{short_sha}:{path}")
+                };
                 match lines {
                     Some(l) => format!("{display}#{l}"),
                     None => display,
@@ -539,16 +564,18 @@ pub fn github_refs_to_styled_regions(
 
 /// Convert naked URLs into styled regions (clickable links).
 /// For GitHub URLs with validated refs, sets display_text for shortening.
+/// If `context` is provided, refs from the same repo omit the `owner/repo` prefix.
 pub fn naked_urls_to_styled_regions(
     urls: &[NakedUrl],
     cache: &GitHubValidationCache,
+    context: Option<&GitHubContext>,
 ) -> Vec<StyledRegion> {
     urls.iter()
         .map(|u| {
             // Check if this is a validated GitHub URL that should be shortened
             let display_text = u.github_ref.as_ref().and_then(|ref_| {
                 if cache.is_valid(ref_) {
-                    Some(ref_.short_display())
+                    Some(ref_.short_display(context))
                 } else {
                     None
                 }
@@ -1490,7 +1517,22 @@ mod tests {
             repo: "rust".to_string(),
             number: 123,
         };
-        assert_eq!(issue.short_display(), "rust-lang/rust#123");
+        // Without context, shows full owner/repo
+        assert_eq!(issue.short_display(None), "rust-lang/rust#123");
+
+        // With matching context, omits owner/repo
+        let ctx = GitHubContext {
+            owner: "rust-lang".to_string(),
+            repo: "rust".to_string(),
+        };
+        assert_eq!(issue.short_display(Some(&ctx)), "#123");
+
+        // With different context, shows full owner/repo
+        let other_ctx = GitHubContext {
+            owner: "other".to_string(),
+            repo: "repo".to_string(),
+        };
+        assert_eq!(issue.short_display(Some(&other_ctx)), "rust-lang/rust#123");
     }
 
     #[test]
@@ -1498,7 +1540,7 @@ mod tests {
         let user = GitHubRef::User {
             username: "torvalds".to_string(),
         };
-        assert_eq!(user.short_display(), "@torvalds");
+        assert_eq!(user.short_display(None), "@torvalds");
     }
 
     #[test]
@@ -1507,7 +1549,7 @@ mod tests {
             org: "rust-lang".to_string(),
             team: "compiler".to_string(),
         };
-        assert_eq!(team.short_display(), "@rust-lang/compiler");
+        assert_eq!(team.short_display(None), "@rust-lang/compiler");
     }
 
     #[test]
@@ -1518,7 +1560,14 @@ mod tests {
             sha: "abc1234567890".to_string(),
         };
         // SHA should be truncated to 7 chars
-        assert_eq!(commit.short_display(), "rust-lang/rust@abc1234");
+        assert_eq!(commit.short_display(None), "rust-lang/rust@abc1234");
+
+        // With matching context
+        let ctx = GitHubContext {
+            owner: "rust-lang".to_string(),
+            repo: "rust".to_string(),
+        };
+        assert_eq!(commit.short_display(Some(&ctx)), "@abc1234");
     }
 
     #[test]
@@ -1529,7 +1578,14 @@ mod tests {
             base: "v1.0".to_string(),
             head: "v2.0".to_string(),
         };
-        assert_eq!(compare.short_display(), "rust-lang/rust@v1.0...v2.0");
+        assert_eq!(compare.short_display(None), "rust-lang/rust@v1.0...v2.0");
+
+        // With matching context
+        let ctx = GitHubContext {
+            owner: "rust-lang".to_string(),
+            repo: "rust".to_string(),
+        };
+        assert_eq!(compare.short_display(Some(&ctx)), "@v1.0...v2.0");
     }
 
     #[test]
@@ -1542,8 +1598,18 @@ mod tests {
             lines: Some("L10-L20".to_string()),
         };
         assert_eq!(
-            file.short_display(),
+            file.short_display(None),
             "rust-lang/rust@abc1234:src/main.rs#L10-L20"
+        );
+
+        // With matching context
+        let ctx = GitHubContext {
+            owner: "rust-lang".to_string(),
+            repo: "rust".to_string(),
+        };
+        assert_eq!(
+            file.short_display(Some(&ctx)),
+            "@abc1234:src/main.rs#L10-L20"
         );
     }
 
@@ -1556,7 +1622,7 @@ mod tests {
             path: "README.md".to_string(),
             lines: None,
         };
-        assert_eq!(file.short_display(), "rust-lang/rust@abc1234:README.md");
+        assert_eq!(file.short_display(None), "rust-lang/rust@abc1234:README.md");
     }
 
     #[test]
@@ -1606,7 +1672,7 @@ mod tests {
 
         // Empty cache - no validation yet
         let cache = GitHubValidationCache::new();
-        let regions = naked_urls_to_styled_regions(&urls, &cache);
+        let regions = naked_urls_to_styled_regions(&urls, &cache, None);
 
         assert_eq!(regions.len(), 2);
 
@@ -1645,12 +1711,21 @@ mod tests {
         let cache = GitHubValidationCache::new();
         cache.set_result(github_ref, true);
 
-        let regions = naked_urls_to_styled_regions(&urls, &cache);
-
+        // Without context - shows full owner/repo
+        let regions = naked_urls_to_styled_regions(&urls, &cache, None);
         assert_eq!(regions.len(), 1);
         assert_eq!(
             regions[0].display_text,
             Some("rust-lang/rust#123".to_string())
         );
+
+        // With matching context - omits owner/repo
+        let ctx = GitHubContext {
+            owner: "rust-lang".to_string(),
+            repo: "rust".to_string(),
+        };
+        let regions = naked_urls_to_styled_regions(&urls, &cache, Some(&ctx));
+        assert_eq!(regions.len(), 1);
+        assert_eq!(regions[0].display_text, Some("#123".to_string()));
     }
 }

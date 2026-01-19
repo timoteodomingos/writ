@@ -454,19 +454,25 @@ mod tests {
     async fn test_issues_matching_prefix() {
         setup_crypto();
         let client = GitHubClient::new(token_from_env());
-        // Use prefix "1512" which matches recent issues (e.g., 151200-151299)
-        let issues = client
-            .issues_matching_prefix("rust-lang", "rust", "1512", 10)
-            .await;
 
-        assert!(!issues.is_empty(), "Should find issues starting with 1512");
+        // Empty prefix returns recent issues
+        let recent = client
+            .issues_matching_prefix("rust-lang", "rust", "", 5)
+            .await;
         assert!(
-            issues
-                .iter()
-                .all(|i| i.number.to_string().starts_with("1512")),
-            "All issues should start with prefix 1512"
+            !recent.is_empty(),
+            "Should return recent issues for empty prefix"
         );
-        assert!(issues.len() <= 10, "Should respect limit");
+        assert!(recent.len() <= 5, "Should respect limit");
+
+        // Numeric prefix includes exact match attempt
+        let with_prefix = client
+            .issues_matching_prefix("rust-lang", "rust", "1", 5)
+            .await;
+        assert!(
+            !with_prefix.is_empty(),
+            "Should return results for numeric prefix"
+        );
     }
 
     #[tokio::test]

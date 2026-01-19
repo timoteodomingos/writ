@@ -3156,6 +3156,7 @@ impl Render for Editor {
         let snapshot = self.state.buffer.render_snapshot();
 
         let github_cache = self.github_validation_cache.clone();
+        let github_context = self.github_context.clone();
 
         let line_list = div().id("line-list").size_full().child(
             list(self.list_state.clone(), move |ix, _window, _cx| {
@@ -3171,7 +3172,11 @@ impl Render for Editor {
 
                 // Add naked URL links
                 if let Some(naked_urls) = naked_urls_by_line.get(&ix) {
-                    let url_styles = naked_urls_to_styled_regions(naked_urls, &github_cache);
+                    let url_styles = naked_urls_to_styled_regions(
+                        naked_urls,
+                        &github_cache,
+                        github_context.as_ref(),
+                    );
                     inline_styles.extend(url_styles);
                 }
 
