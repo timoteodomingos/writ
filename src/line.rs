@@ -137,6 +137,8 @@ pub struct Line {
     code_highlights: Vec<(HighlightSpan, Rgba)>,
     base_path: Option<PathBuf>,
     substitution: Option<String>,
+    /// When set, truncate text with ellipsis at this pixel width.
+    truncate_width: Option<Pixels>,
 }
 
 impl Line {
@@ -164,7 +166,14 @@ impl Line {
             code_highlights,
             base_path,
             substitution,
+            truncate_width: None,
         }
+    }
+
+    /// Enable truncation with ellipsis at the given pixel width.
+    pub fn truncate(mut self, width: Pixels) -> Self {
+        self.truncate_width = Some(width);
+        self
     }
 
     /// Get a slice from the rope as a Cow<str>.
@@ -1013,7 +1022,7 @@ fn line_base(line_number: usize) -> gpui::Stateful<gpui::Div> {
 }
 
 impl RenderOnce for Line {
-    fn render(self, _window: &mut Window, _cx: &mut App) -> impl IntoElement {
+    fn render(self, window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let line_number = self.line.line_number;
         let line_range = self.line.range.clone();
 
@@ -1076,13 +1085,23 @@ impl RenderOnce for Line {
 
         let visual_selection = self.compute_visual_selection_range(&display_text);
 
-        let runs = if let Some(ref sel_range) = visual_selection {
+        let mut runs = if let Some(ref sel_range) = visual_selection {
             self.apply_selection_to_runs(runs, sel_range.clone())
         } else {
             runs
         };
 
-        let shared_text: SharedString = display_text.into();
+        // Truncate text with ellipsis if width is specified
+        let shared_text: SharedString = if let Some(truncate_width) = self.truncate_width {
+            let text_style = window.text_style();
+            let font_size = text_style.font_size.to_pixels(window.rem_size());
+            let mut line_wrapper = window
+                .text_system()
+                .line_wrapper(self.theme.text_font.clone(), font_size);
+            line_wrapper.truncate_line(display_text.into(), truncate_width, "…", &mut runs)
+        } else {
+            display_text.into()
+        };
         let styled_text = StyledText::new(shared_text).with_runs(runs);
         let text_layout = styled_text.layout().clone();
 

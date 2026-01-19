@@ -79,21 +79,27 @@ pub enum AutocompleteSuggestion {
         number: u64,
         title: String,
         is_pr: bool,
-        /// Cached render snapshot for the title (parsed as markdown).
-        title_snapshot: RenderSnapshot,
+        /// Cached render snapshot for display text (e.g. "#123 PR: title").
+        display_snapshot: RenderSnapshot,
     },
 }
 
 impl AutocompleteSuggestion {
-    /// Create a new issue/PR suggestion, parsing the title as markdown.
+    /// Create a new issue/PR suggestion, parsing the display text as markdown.
     fn new_issue_or_pr(number: u64, title: String, is_pr: bool) -> Self {
-        let mut buffer: Buffer = title.parse().unwrap_or_default();
-        let title_snapshot = buffer.render_snapshot();
+        // Build display text with prefix: "#123 title" or "#123 PR: title"
+        let display_text = if is_pr {
+            format!("#{} PR: {}", number, title)
+        } else {
+            format!("#{} {}", number, title)
+        };
+        let mut buffer: Buffer = display_text.parse().unwrap_or_default();
+        let display_snapshot = buffer.render_snapshot();
         Self::IssueOrPr {
             number,
             title,
             is_pr,
-            title_snapshot,
+            display_snapshot,
         }
     }
 }
@@ -2414,29 +2420,28 @@ impl Editor {
                 let is_selected = i == ac.selected_index;
                 let is_first = i == 0;
                 let is_last = i == suggestion_count - 1;
-                let (number, title_snapshot, is_pr) = match suggestion {
+                let display_snapshot = match suggestion {
                     AutocompleteSuggestion::IssueOrPr {
-                        number,
-                        title_snapshot,
-                        is_pr,
-                        ..
-                    } => (*number, title_snapshot, *is_pr),
+                        display_snapshot, ..
+                    } => display_snapshot,
                 };
 
-                // Use cached snapshot for inline styles
-                let title_line = title_snapshot.line_markers(0);
-                let title_inline_styles = title_snapshot.inline_styles_for_line(0);
+                // Use cached snapshot for display (includes #number and optional PR: prefix)
+                let display_line = display_snapshot.line_markers(0);
+                let display_inline_styles = display_snapshot.inline_styles_for_line(0);
 
-                let title_element = Line::new(
-                    title_line,
-                    title_snapshot.rope.clone(),
+                // 500px popup - 16px padding (px_2 * 2) = 484px available
+                let display_element = Line::new(
+                    display_line,
+                    display_snapshot.rope.clone(),
                     usize::MAX, // no cursor
-                    title_inline_styles,
+                    display_inline_styles,
                     line_theme.clone(),
                     None,       // no selection
                     Vec::new(), // no code highlights
                     None,       // no base path
-                );
+                )
+                .truncate(px(484.0));
 
                 div()
                     .id(("autocomplete-item", i))
@@ -2470,18 +2475,7 @@ impl Editor {
                             cx.notify();
                         }
                     }))
-                    .child(
-                        div()
-                            .flex()
-                            .flex_row()
-                            .gap_2()
-                            .overflow_x_hidden()
-                            .whitespace_nowrap()
-                            .text_ellipsis()
-                            .child(format!("#{}", number))
-                            .when(is_pr, |d| d.child("PR:"))
-                            .child(title_element),
-                    )
+                    .child(display_element)
                     .into_any_element()
             })
             .collect();
