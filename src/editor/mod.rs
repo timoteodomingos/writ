@@ -1878,23 +1878,15 @@ impl Editor {
 
     /// Fetch autocomplete suggestions for the current prefix.
     fn fetch_autocomplete_suggestions(&mut self, cx: &mut Context<Self>) {
-        eprintln!("[fetch] called");
         let (client, context) = match (&self.github_client, &self.github_context) {
             (Some(c), Some(ctx)) => (c.clone(), ctx.clone()),
-            _ => {
-                eprintln!("[fetch] no client or context");
-                return;
-            }
+            _ => return,
         };
 
         let prefix = match &self.autocomplete {
             Some(ac) => ac.prefix.clone(),
-            _ => {
-                eprintln!("[fetch] no autocomplete state");
-                return;
-            }
+            _ => return,
         };
-        eprintln!("[fetch] prefix={:?}", prefix);
 
         // Mark as loading and record that we're fetching for this prefix
         if let Some(ref mut ac) = self.autocomplete {
@@ -1906,12 +1898,9 @@ impl Editor {
         let repo = context.repo.clone();
 
         cx.spawn(async move |weak, cx| {
-            eprintln!("[fetch] starting API call for {:?}", prefix);
             let issues = client
-                .issues_matching_prefix(&owner, &repo, &prefix, 6)
+                .issues_matching_prefix(&owner, &repo, &prefix, 5)
                 .await;
-
-            eprintln!("[fetch] got {} issues", issues.len());
 
             let suggestions: Vec<AutocompleteSuggestion> = issues
                 .into_iter()
@@ -1925,17 +1914,48 @@ impl Editor {
             let _ = cx.update(|cx| {
                 if let Some(editor) = weak.upgrade() {
                     editor.update(cx, |editor, cx| {
+                        // Add fetched suggestions to validation cache
+                        for suggestion in &suggestions {
+                            let AutocompleteSuggestion::IssueOrPr { number, .. } = suggestion;
+                            let github_ref = GitHubRef::Issue {
+                                owner: owner.clone(),
+                                repo: repo.clone(),
+                                number: *number,
+                            };
+                            editor.github_validation_cache.set_result(github_ref, true);
+                        }
+
                         // Only update if autocomplete is still active with the same prefix
                         if let Some(ref mut ac) = editor.autocomplete
                             && ac.prefix == prefix
                         {
-                            eprintln!("[fetch] updating suggestions: {}", suggestions.len());
-                            ac.suggestions = suggestions;
+                            // Check if user's current input is a known valid issue
+                            let mut final_suggestions = Vec::new();
+                            if let Ok(num) = prefix.parse::<u64>() {
+                                let user_ref = GitHubRef::Issue {
+                                    owner: owner.clone(),
+                                    repo: repo.clone(),
+                                    number: num,
+                                };
+                                if editor.github_validation_cache.get(&user_ref)
+                                    == Some(crate::github::ValidationState::Valid)
+                                {
+                                    // Don't add if it's already in the suggestions
+                                    if !suggestions.iter().any(|s| matches!(s, AutocompleteSuggestion::IssueOrPr { number, .. } if *number == num)) {
+                                        final_suggestions.push(AutocompleteSuggestion::IssueOrPr {
+                                            number: num,
+                                            title: String::new(),
+                                            is_pr: false,
+                                        });
+                                    }
+                                }
+                            }
+                            final_suggestions.extend(suggestions.clone());
+
+                            ac.suggestions = final_suggestions;
                             ac.loading = false;
                             ac.selected_index = 0;
                             cx.notify();
-                        } else {
-                            eprintln!("[fetch] autocomplete state mismatch, not updating");
                         }
                     });
                 }
@@ -2197,6 +2217,17 @@ impl Editor {
                         let prefix = number.to_string();
                         let trigger_offset = github_match.byte_range.start;
 
+                        // Check if prefix changed
+                        let prefix_changed = self
+                            .autocomplete
+                            .as_ref()
+                            .map(|ac| ac.prefix != prefix)
+                            .unwrap_or(true);
+
+                        if !prefix_changed {
+                            return false; // No change, no fetch needed
+                        }
+
                         // Only fetch if we haven't already fetched for this prefix
                         let already_fetched = self
                             .autocomplete
@@ -2213,7 +2244,10 @@ impl Editor {
                                 .as_ref()
                                 .map(|ac| ac.suggestions.clone())
                                 .unwrap_or_default(),
-                            selected_index: 0,
+                            selected_index: old_state
+                                .as_ref()
+                                .map(|ac| ac.selected_index)
+                                .unwrap_or(0),
                             loading: false,
                             fetched_prefix: old_state.and_then(|ac| ac.fetched_prefix),
                         });
@@ -2246,36 +2280,41 @@ impl Editor {
                     // Extract prefix (everything after `#` up to cursor)
                     let prefix = line_text[hash_pos + 1..].to_string();
 
-                    eprintln!("[autocomplete] hash_pos={}, prefix={:?}", hash_pos, prefix);
+                    // Check if prefix changed
+                    let prefix_changed = self
+                        .autocomplete
+                        .as_ref()
+                        .map(|ac| ac.prefix != prefix)
+                        .unwrap_or(true);
 
-                    {
-                        let trigger_offset = hash_offset;
-
-                        // Only fetch if we haven't already fetched for this prefix
-                        let already_fetched = self
-                            .autocomplete
-                            .as_ref()
-                            .and_then(|ac| ac.fetched_prefix.as_ref())
-                            == Some(&prefix);
-                        let should_fetch = !already_fetched;
-
-                        eprintln!("[autocomplete] should_fetch={}", should_fetch);
-
-                        let old_state = self.autocomplete.take();
-                        self.autocomplete = Some(AutocompleteState {
-                            trigger_offset,
-                            prefix,
-                            suggestions: old_state
-                                .as_ref()
-                                .map(|ac| ac.suggestions.clone())
-                                .unwrap_or_default(),
-                            selected_index: 0,
-                            loading: false,
-                            fetched_prefix: old_state.and_then(|ac| ac.fetched_prefix),
-                        });
-
-                        return should_fetch;
+                    if !prefix_changed {
+                        return false; // No change, no fetch needed
                     }
+
+                    let trigger_offset = hash_offset;
+
+                    // Only fetch if we haven't already fetched for this prefix
+                    let already_fetched = self
+                        .autocomplete
+                        .as_ref()
+                        .and_then(|ac| ac.fetched_prefix.as_ref())
+                        == Some(&prefix);
+                    let should_fetch = !already_fetched;
+
+                    let old_state = self.autocomplete.take();
+                    self.autocomplete = Some(AutocompleteState {
+                        trigger_offset,
+                        prefix,
+                        suggestions: old_state
+                            .as_ref()
+                            .map(|ac| ac.suggestions.clone())
+                            .unwrap_or_default(),
+                        selected_index: old_state.as_ref().map(|ac| ac.selected_index).unwrap_or(0),
+                        loading: false,
+                        fetched_prefix: old_state.and_then(|ac| ac.fetched_prefix),
+                    });
+
+                    return should_fetch;
                 }
             }
         }
@@ -2557,7 +2596,11 @@ impl Editor {
                     }
                 }
                 "enter" | "tab" => {
-                    if self.accept_autocomplete_suggestion() {
+                    // Only accept if popup is visible (more than 1 suggestion)
+                    if let Some(ref ac) = self.autocomplete
+                        && ac.suggestions.len() > 1
+                        && self.accept_autocomplete_suggestion()
+                    {
                         cx.notify();
                         return;
                     }
@@ -2932,6 +2975,11 @@ impl Focusable for Editor {
 
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        eprintln!(
+            "[render] called, autocomplete={:?}",
+            self.autocomplete.as_ref().map(|ac| ac.suggestions.len())
+        );
+
         let buffer_version = self.state.buffer.version();
         if buffer_version != self.last_synced_version {
             self.last_synced_version = buffer_version;
@@ -2991,7 +3039,7 @@ impl Render for Editor {
             }
         }
 
-        cx.set_global(StatusBarInfo {
+        let new_status_bar_info = StatusBarInfo {
             context_markers,
             heading_level,
             cursor_line: cursor_line + 1, // 1-indexed
@@ -2999,7 +3047,10 @@ impl Render for Editor {
             total_lines,
             first_visible_line,
             last_visible_line,
-        });
+        };
+        if new_status_bar_info != *StatusBarInfo::global(cx) {
+            cx.set_global(new_status_bar_info);
+        }
 
         let theme = self.config.theme.clone();
         let code_font = font(&self.config.code_font);

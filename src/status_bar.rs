@@ -5,7 +5,7 @@ use crate::editor::EditorTheme;
 use crate::marker::MarkerKind;
 
 /// Status bar information updated by the editor on each render.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq)]
 pub struct StatusBarInfo {
     /// Context markers for the current line
     pub context_markers: Vec<MarkerKind>,
