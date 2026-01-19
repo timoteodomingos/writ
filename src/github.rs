@@ -86,6 +86,36 @@ impl GitHubValidationCache {
     }
 }
 
+/// Cache for autocomplete results.
+/// Keys are "owner/repo" for recent issues, or "owner/repo:prefix" for search results.
+#[derive(Clone, Default)]
+pub struct AutocompleteCache {
+    cache: Rc<RefCell<HashMap<String, Vec<Issue>>>>,
+}
+
+impl AutocompleteCache {
+    pub fn new() -> Self {
+        Self {
+            cache: Rc::new(RefCell::new(HashMap::new())),
+        }
+    }
+
+    /// Get cached results for a key.
+    pub fn get(&self, key: &str) -> Option<Vec<Issue>> {
+        self.cache.borrow().get(key).cloned()
+    }
+
+    /// Store results for a key.
+    pub fn set(&self, key: String, issues: Vec<Issue>) {
+        self.cache.borrow_mut().insert(key, issues);
+    }
+
+    /// Clear all cached results (for manual refresh).
+    pub fn clear(&self) {
+        self.cache.borrow_mut().clear();
+    }
+}
+
 /// GitHub API client for validating references and autocomplete.
 #[derive(Clone)]
 pub struct GitHubClient {
@@ -95,6 +125,8 @@ pub struct GitHubClient {
     token: String,
     /// Lazily initialized octocrab instance.
     octocrab: std::cell::OnceCell<Octocrab>,
+    /// Cache for autocomplete results (recent issues and search results).
+    autocomplete_cache: AutocompleteCache,
 }
 
 impl GitHubClient {
@@ -106,7 +138,13 @@ impl GitHubClient {
         Self {
             token,
             octocrab: std::cell::OnceCell::new(),
+            autocomplete_cache: AutocompleteCache::new(),
         }
+    }
+
+    /// Clear the autocomplete cache (called on Ctrl+R refresh).
+    pub fn clear_autocomplete_cache(&self) {
+        self.autocomplete_cache.clear();
     }
 
     /// Get or initialize the octocrab client.
@@ -133,8 +171,12 @@ impl GitHubClient {
         self.octocrab.get().unwrap()
     }
 
-    /// Fetch issues matching a number prefix.
-    /// Returns up to `limit` issues whose number starts with `prefix`.
+    /// Fetch issues for autocomplete.
+    ///
+    /// Algorithm:
+    /// - If prefix is empty: return `limit` most recently updated issues/PRs
+    /// - If prefix has digits: return exact match (if exists) + text search results
+    ///   sorted by most recently updated
     pub async fn issues_matching_prefix(
         &self,
         owner: &str,
@@ -142,32 +184,146 @@ impl GitHubClient {
         prefix: &str,
         limit: usize,
     ) -> Vec<Issue> {
-        // Validate prefix is numeric
-        if prefix.parse::<u64>().is_err() {
-            return vec![];
+        // Case 1: Empty prefix - show most recently updated issues
+        if prefix.is_empty() {
+            return self.recent_issues(owner, repo, limit).await;
         }
 
-        // Fetch recent issues (sorted by created desc = highest numbers first)
+        // Case 2: Numeric prefix - exact match + text search
+        let prefix_num: u64 = match prefix.parse() {
+            Ok(n) => n,
+            Err(_) => {
+                // Non-numeric prefix: just do text search
+                return self.search_issues(owner, repo, prefix, limit).await;
+            }
+        };
+
+        let mut results: Vec<Issue> = Vec::new();
+
+        // Try to fetch the exact prefix number first (e.g., #25 for prefix "25")
+        if let Some(issue) = self.get_issue(owner, repo, prefix_num).await {
+            results.push(issue);
+        }
+
+        // Search for issues with the prefix in title/body/comments
+        let search_results = self.search_issues(owner, repo, prefix, limit).await;
+
+        for issue in search_results {
+            if results.len() >= limit {
+                break;
+            }
+            // Skip if already in results (e.g., exact match)
+            if !results.iter().any(|i| i.number == issue.number) {
+                results.push(issue);
+            }
+        }
+
+        results.truncate(limit);
+        results
+    }
+
+    /// Fetch the most recently updated issues/PRs (cached).
+    async fn recent_issues(&self, owner: &str, repo: &str, limit: usize) -> Vec<Issue> {
+        let cache_key = format!("{}/{}", owner, repo);
+
+        // Check cache first
+        if let Some(cached) = self.autocomplete_cache.get(&cache_key) {
+            eprintln!("[recent] cache hit, {} results", cached.len());
+            return cached.into_iter().take(limit).collect();
+        }
+        eprintln!("[recent] cache miss");
+
         let result = self
             .client()
             .await
             .issues(owner, repo)
             .list()
             .state(octocrab::params::State::All)
-            .per_page(100)
+            .sort(octocrab::params::issues::Sort::Updated)
+            .direction(octocrab::params::Direction::Descending)
+            .per_page(limit as u8)
             .send()
             .compat()
             .await;
 
-        match result {
-            Ok(page) => page
-                .items
-                .into_iter()
-                .filter(|issue| issue.number.to_string().starts_with(prefix))
-                .take(limit)
-                .collect(),
+        let issues = match result {
+            Ok(page) => page.items,
             Err(_) => vec![],
+        };
+
+        // Cache the results
+        self.autocomplete_cache.set(cache_key, issues.clone());
+        issues
+    }
+
+    /// Search issues by text query, sorted by most recently updated (cached).
+    async fn search_issues(
+        &self,
+        owner: &str,
+        repo: &str,
+        query: &str,
+        limit: usize,
+    ) -> Vec<Issue> {
+        let cache_key = format!("{}/{}:{}", owner, repo, query);
+
+        // Check cache first
+        if let Some(cached) = self.autocomplete_cache.get(&cache_key) {
+            eprintln!(
+                "[search] cache hit for {:?}, {} results",
+                query,
+                cached.len()
+            );
+            return cached.into_iter().take(limit).collect();
         }
+        eprintln!("[search] cache miss for {:?}", query);
+
+        // GitHub requires is:issue or is:pull-request, so we search both and merge.
+        // Request half the limit from each to stay within the total limit.
+        let half_limit = (limit / 2).max(1) as u8;
+
+        let issue_query = format!("repo:{}/{} is:issue {}", owner, repo, query);
+        let pr_query = format!("repo:{}/{} is:pull-request {}", owner, repo, query);
+
+        let client = self.client().await;
+
+        let issue_result = client
+            .search()
+            .issues_and_pull_requests(&issue_query)
+            .sort("updated")
+            .order("desc")
+            .per_page(half_limit)
+            .send()
+            .compat()
+            .await;
+
+        let pr_result = client
+            .search()
+            .issues_and_pull_requests(&pr_query)
+            .sort("updated")
+            .order("desc")
+            .per_page(half_limit)
+            .send()
+            .compat()
+            .await;
+
+        let mut issues: Vec<Issue> = Vec::new();
+
+        if let Ok(page) = issue_result {
+            issues.extend(page.items);
+        }
+        if let Ok(page) = pr_result {
+            issues.extend(page.items);
+        }
+
+        // Sort by updated_at descending and take limit
+        issues.sort_by(|a, b| b.updated_at.cmp(&a.updated_at));
+        issues.truncate(limit);
+
+        eprintln!("[search] got {} results (issues + PRs)", issues.len());
+
+        // Cache the results
+        self.autocomplete_cache.set(cache_key, issues.clone());
+        issues
     }
 
     /// Get a single issue by number.

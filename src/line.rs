@@ -3,9 +3,9 @@ use std::ops::Range;
 use std::path::PathBuf;
 
 use gpui::{
-    App, Font, FontStyle, FontWeight, Hsla, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, RenderOnce, Rgba, SharedString, StyledText, TextRun, Window, black, canvas,
-    div, img, point, prelude::*, px, rems,
+    App, Font, FontStyle, FontWeight, Global, Hsla, IntoElement, MouseButton, MouseDownEvent,
+    MouseMoveEvent, Pixels, Point, RenderOnce, Rgba, SharedString, StyledText, TextRun, Window,
+    black, canvas, div, img, point, prelude::*, px, rems,
 };
 use ropey::Rope;
 
@@ -13,6 +13,17 @@ use crate::editor::{DispatchEditorAction, EditorAction};
 use crate::highlight::HighlightSpan;
 use crate::inline::StyledRegion;
 use crate::marker::{LineMarkers, MarkerKind};
+
+/// Global state for cursor screen position and content bounds, updated during Line paint.
+#[derive(Clone, Default)]
+pub struct CursorScreenPosition {
+    /// Screen position of the cursor (absolute window coordinates).
+    pub position: Option<Point<Pixels>>,
+    /// Right edge of the line content area (for popup clamping).
+    pub content_right_edge: Option<Pixels>,
+}
+
+impl Global for CursorScreenPosition {}
 
 /// (opening_start, opening_end, closing_start, closing_end) for collapsed markdown syntax.
 pub type HiddenRegion = (usize, usize, usize, usize);
@@ -880,6 +891,13 @@ impl Line {
             move |bounds, cursor_pos_result, window: &mut Window, cx| {
                 let pos =
                     cursor_pos_result.unwrap_or_else(|| point(bounds.origin.x, bounds.origin.y));
+
+                // Store cursor position and content bounds for autocomplete popup positioning
+                // pos from position_for_index appears to already be in absolute coords
+                cx.set_global(CursorScreenPosition {
+                    position: Some(pos),
+                    content_right_edge: Some(bounds.origin.x + bounds.size.width),
+                });
 
                 let text_style = window.text_style();
                 let font_size = text_style.font_size.to_pixels(window.rem_size());

@@ -11,9 +11,9 @@ use std::path::PathBuf;
 use std::sync::mpsc;
 
 use gpui::{
-    App, Context, CursorStyle, DragMoveEvent, Empty, FocusHandle, Focusable, IntoElement,
-    KeyDownEvent, ListAlignment, ListState, ModifiersChangedEvent, MouseButton, ReadGlobal, Render,
-    Window, div, font, list, prelude::*, px, rems,
+    AnyElement, App, Context, Corner, CursorStyle, DragMoveEvent, Empty, FocusHandle, Focusable,
+    IntoElement, KeyDownEvent, ListAlignment, ListState, ModifiersChangedEvent, MouseButton,
+    ReadGlobal, Render, Window, anchored, div, font, list, point, prelude::*, px, rems,
 };
 
 /// Marker type for text selection drag operations.
@@ -29,6 +29,7 @@ impl Render for EmptyDragView {
     }
 }
 
+use crate::line::CursorScreenPosition;
 use crate::marker::{LineMarkers, MarkerKind, OrderedMarker, UnorderedMarker};
 use crate::status_bar::StatusBarInfo;
 use crate::title_bar::FileInfo;
@@ -37,8 +38,8 @@ use crate::buffer::Buffer;
 use crate::cursor::{Cursor, Selection};
 use crate::github::{GitHubClient, GitHubValidationCache};
 use crate::inline::{
-    GitHubContext, NakedUrl, RawGitHubMatch, detect_github_references_in_line, detect_naked_urls,
-    github_refs_to_styled_regions, naked_urls_to_styled_regions,
+    GitHubContext, GitHubRef, NakedUrl, RawGitHubMatch, detect_github_references_in_line,
+    detect_naked_urls, github_refs_to_styled_regions, naked_urls_to_styled_regions,
 };
 use crate::line::{Line, LineTheme};
 use crate::paste::{PasteContext, transform_paste};
@@ -66,6 +67,34 @@ struct TabCycleCache {
     line_idx: usize,
     /// The cached cycle states.
     states: Vec<String>,
+}
+
+/// A suggestion from GitHub autocomplete.
+#[derive(Clone, Debug)]
+pub enum AutocompleteSuggestion {
+    /// An issue or pull request.
+    IssueOrPr {
+        number: u64,
+        title: String,
+        is_pr: bool,
+    },
+}
+
+/// State for the autocomplete popup.
+#[derive(Clone, Debug)]
+pub struct AutocompleteState {
+    /// Byte offset where the trigger character (`#`) was typed.
+    pub trigger_offset: usize,
+    /// The prefix typed after the trigger (e.g., "123" for `#123`).
+    pub prefix: String,
+    /// Suggestions fetched from GitHub.
+    pub suggestions: Vec<AutocompleteSuggestion>,
+    /// Currently selected suggestion index.
+    pub selected_index: usize,
+    /// Whether we're currently fetching suggestions.
+    pub loading: bool,
+    /// The prefix we last fetched for (to avoid duplicate fetches).
+    pub fetched_prefix: Option<String>,
 }
 
 /// Core editing state that can be used without GPUI context.
@@ -1578,6 +1607,8 @@ pub struct Editor {
     scroll_to_cursor_pending: bool,
     /// Last known cursor line, used to detect cursor movement for auto-scroll.
     last_cursor_line: Option<usize>,
+    /// Last known cursor offset, used to detect cursor movement for autocomplete.
+    last_cursor_offset: Option<usize>,
     input_blocked: bool,
     streaming_mode: bool,
     config: EditorConfig,
@@ -1614,6 +1645,13 @@ pub struct Editor {
     /// Detected naked URLs by line (updated during render).
     /// Used for atomic cursor movement over shortened GitHub URLs.
     naked_urls_by_line: HashMap<usize, Vec<NakedUrl>>,
+    /// Detected GitHub refs by line (updated during render).
+    /// Used for autocomplete when cursor is inside a ref.
+    github_refs_by_line: HashMap<usize, Vec<RawGitHubMatch>>,
+    /// Autocomplete popup state.
+    autocomplete: Option<AutocompleteState>,
+    /// Pending autocomplete fetch (for debouncing).
+    autocomplete_debounce_task: Option<gpui::Task<()>>,
 }
 
 impl Editor {
@@ -1635,6 +1673,7 @@ impl Editor {
             list_state,
             scroll_to_cursor_pending: false,
             last_cursor_line: None,
+            last_cursor_offset: None,
             input_blocked: false,
             streaming_mode: false,
             config,
@@ -1653,6 +1692,9 @@ impl Editor {
             github_validation_cache: GitHubValidationCache::new(),
             github_client: None,
             naked_urls_by_line: HashMap::new(),
+            github_refs_by_line: HashMap::new(),
+            autocomplete: None,
+            autocomplete_debounce_task: None,
         }
     }
 
@@ -1672,6 +1714,9 @@ impl Editor {
     /// Called by Ctrl+R keybind.
     pub fn refresh_github_refs(&mut self, cx: &mut Context<Self>) {
         self.github_validation_cache.clear();
+        if let Some(client) = &self.github_client {
+            client.clear_autocomplete_cache();
+        }
         let line_count = self.state.buffer.line_count();
         let (github_matches, _) = self.detect_links(0, line_count);
         self.spawn_github_validation(&github_matches, cx);
@@ -1798,6 +1843,100 @@ impl Editor {
                             .github_validation_cache
                             .set_result(ref_for_task, valid);
                         cx.notify();
+                    });
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Fetch autocomplete suggestions after a debounce delay.
+    /// Cancels any pending fetch and starts a new timer.
+    fn fetch_autocomplete_suggestions_debounced(&mut self, cx: &mut Context<Self>) {
+        // Cancel any pending debounce task by dropping it
+        self.autocomplete_debounce_task = None;
+
+        // Spawn a new debounced fetch
+        let task = cx.spawn(async move |weak, cx| {
+            // Wait for debounce delay (150ms)
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(150))
+                .await;
+
+            // Now do the actual fetch
+            let _ = cx.update(|cx| {
+                if let Some(editor) = weak.upgrade() {
+                    editor.update(cx, |editor, cx| {
+                        editor.fetch_autocomplete_suggestions(cx);
+                    });
+                }
+            });
+        });
+
+        self.autocomplete_debounce_task = Some(task);
+    }
+
+    /// Fetch autocomplete suggestions for the current prefix.
+    fn fetch_autocomplete_suggestions(&mut self, cx: &mut Context<Self>) {
+        eprintln!("[fetch] called");
+        let (client, context) = match (&self.github_client, &self.github_context) {
+            (Some(c), Some(ctx)) => (c.clone(), ctx.clone()),
+            _ => {
+                eprintln!("[fetch] no client or context");
+                return;
+            }
+        };
+
+        let prefix = match &self.autocomplete {
+            Some(ac) => ac.prefix.clone(),
+            _ => {
+                eprintln!("[fetch] no autocomplete state");
+                return;
+            }
+        };
+        eprintln!("[fetch] prefix={:?}", prefix);
+
+        // Mark as loading and record that we're fetching for this prefix
+        if let Some(ref mut ac) = self.autocomplete {
+            ac.loading = true;
+            ac.fetched_prefix = Some(prefix.clone());
+        }
+
+        let owner = context.owner.clone();
+        let repo = context.repo.clone();
+
+        cx.spawn(async move |weak, cx| {
+            eprintln!("[fetch] starting API call for {:?}", prefix);
+            let issues = client
+                .issues_matching_prefix(&owner, &repo, &prefix, 6)
+                .await;
+
+            eprintln!("[fetch] got {} issues", issues.len());
+
+            let suggestions: Vec<AutocompleteSuggestion> = issues
+                .into_iter()
+                .map(|issue| AutocompleteSuggestion::IssueOrPr {
+                    number: issue.number,
+                    title: issue.title,
+                    is_pr: issue.pull_request.is_some(),
+                })
+                .collect();
+
+            let _ = cx.update(|cx| {
+                if let Some(editor) = weak.upgrade() {
+                    editor.update(cx, |editor, cx| {
+                        // Only update if autocomplete is still active with the same prefix
+                        if let Some(ref mut ac) = editor.autocomplete
+                            && ac.prefix == prefix
+                        {
+                            eprintln!("[fetch] updating suggestions: {}", suggestions.len());
+                            ac.suggestions = suggestions;
+                            ac.loading = false;
+                            ac.selected_index = 0;
+                            cx.notify();
+                        } else {
+                            eprintln!("[fetch] autocomplete state mismatch, not updating");
+                        }
                     });
                 }
             });
@@ -2035,6 +2174,284 @@ impl Editor {
         self.state.insert_text(text);
     }
 
+    /// Check if cursor is inside a GitHub ref and update autocomplete accordingly.
+    /// Returns true if we should fetch suggestions.
+    fn update_autocomplete_from_cursor(&mut self) -> bool {
+        // Only trigger autocomplete if we have GitHub context and client
+        if self.github_context.is_none() || self.github_client.is_none() {
+            self.autocomplete = None;
+            return false;
+        }
+
+        let cursor = self.state.cursor().offset;
+        let cursor_line = self.state.buffer.byte_to_line(cursor);
+
+        // Check if cursor is inside or at the end of a stored GitHub ref
+        if let Some(refs) = self.github_refs_by_line.get(&cursor_line) {
+            for github_match in refs {
+                // Cursor is inside or at the end of this ref
+                if cursor >= github_match.byte_range.start && cursor <= github_match.byte_range.end
+                {
+                    // Extract the prefix (digits after #)
+                    if let GitHubRef::Issue { number, .. } = &github_match.reference {
+                        let prefix = number.to_string();
+                        let trigger_offset = github_match.byte_range.start;
+
+                        // Only fetch if we haven't already fetched for this prefix
+                        let already_fetched = self
+                            .autocomplete
+                            .as_ref()
+                            .and_then(|ac| ac.fetched_prefix.as_ref())
+                            == Some(&prefix);
+                        let should_fetch = !already_fetched;
+
+                        let old_state = self.autocomplete.take();
+                        self.autocomplete = Some(AutocompleteState {
+                            trigger_offset,
+                            prefix,
+                            suggestions: old_state
+                                .as_ref()
+                                .map(|ac| ac.suggestions.clone())
+                                .unwrap_or_default(),
+                            selected_index: 0,
+                            loading: false,
+                            fetched_prefix: old_state.and_then(|ac| ac.fetched_prefix),
+                        });
+
+                        return should_fetch;
+                    }
+                }
+            }
+        }
+
+        // Check if cursor is after `#` followed by optional text (for text search)
+        // This enables autocomplete for `#`, `#123`, `#sometext`, etc.
+        if cursor > 0 {
+            // Scan backwards to find a `#` at word boundary
+            let line_start = self.state.buffer.line_to_byte(cursor_line);
+            let line_text = self.state.buffer.slice_cow(line_start..cursor).into_owned();
+
+            // Find the last `#` that's at a word boundary
+            if let Some(hash_pos) = line_text.rfind('#') {
+                let hash_offset = line_start + hash_pos;
+
+                // Check that `#` is at word boundary (start of line or after whitespace)
+                let is_at_word_boundary = hash_pos == 0
+                    || line_text
+                        .as_bytes()
+                        .get(hash_pos - 1)
+                        .map_or(true, |&b| b == b' ' || b == b'\t' || b == b'\n');
+
+                if is_at_word_boundary {
+                    // Extract prefix (everything after `#` up to cursor)
+                    let prefix = line_text[hash_pos + 1..].to_string();
+
+                    eprintln!("[autocomplete] hash_pos={}, prefix={:?}", hash_pos, prefix);
+
+                    {
+                        let trigger_offset = hash_offset;
+
+                        // Only fetch if we haven't already fetched for this prefix
+                        let already_fetched = self
+                            .autocomplete
+                            .as_ref()
+                            .and_then(|ac| ac.fetched_prefix.as_ref())
+                            == Some(&prefix);
+                        let should_fetch = !already_fetched;
+
+                        eprintln!("[autocomplete] should_fetch={}", should_fetch);
+
+                        let old_state = self.autocomplete.take();
+                        self.autocomplete = Some(AutocompleteState {
+                            trigger_offset,
+                            prefix,
+                            suggestions: old_state
+                                .as_ref()
+                                .map(|ac| ac.suggestions.clone())
+                                .unwrap_or_default(),
+                            selected_index: 0,
+                            loading: false,
+                            fetched_prefix: old_state.and_then(|ac| ac.fetched_prefix),
+                        });
+
+                        return should_fetch;
+                    }
+                }
+            }
+        }
+
+        // Cursor not inside any ref - close autocomplete
+        self.autocomplete = None;
+        false
+    }
+
+    /// Render the autocomplete popup if active.
+    fn render_autocomplete(
+        &self,
+        line_theme: &LineTheme,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        let ac = self.autocomplete.as_ref()?;
+
+        // Don't show popup if loading or 0-1 suggestions (no choice to make)
+        if ac.loading || ac.suggestions.len() <= 1 {
+            return None;
+        }
+
+        let theme = &self.config.theme;
+
+        // Get absolute cursor position (set during Line paint)
+        let cursor_screen_pos = CursorScreenPosition::global(cx);
+        let cursor_pos = cursor_screen_pos.position?;
+
+        // Get viewport bounds for fallback
+        let viewport = self.list_state.viewport_bounds();
+
+        let popup_width = px(500.0);
+        let gap = px(4.0);
+
+        // Clamp x to keep popup within content area
+        let content_right = cursor_screen_pos
+            .content_right_edge
+            .unwrap_or(viewport.origin.x + viewport.size.width);
+        let popup_x = cursor_pos.x.min(content_right - popup_width);
+
+        // Position Y below the cursor row (not the entire wrapped line block)
+        let line_height = self.config.line_height.to_pixels(window.rem_size());
+        let popup_y = cursor_pos.y + line_height + gap;
+
+        // Build suggestion items
+        let border_color = theme.comment;
+        let suggestion_count = ac.suggestions.len();
+        let selection_bg = theme.selection;
+
+        let items: Vec<AnyElement> = ac
+            .suggestions
+            .iter()
+            .enumerate()
+            .map(|(i, suggestion)| {
+                let is_selected = i == ac.selected_index;
+                let is_first = i == 0;
+                let is_last = i == suggestion_count - 1;
+                let (number, title, is_pr) = match suggestion {
+                    AutocompleteSuggestion::IssueOrPr {
+                        number,
+                        title,
+                        is_pr,
+                    } => (*number, title.as_str(), *is_pr),
+                };
+
+                let prefix = if is_pr { "PR: " } else { "" };
+                let label = format!("#{} {}{}", number, prefix, title);
+
+                div()
+                    .id(("autocomplete-item", i))
+                    .px_2()
+                    .py_1()
+                    .w(px(500.0))
+                    .cursor_pointer()
+                    .when(is_first, |d| d.rounded_t_md())
+                    .when(is_last, |d| d.rounded_b_md())
+                    .when(!is_last, |d| d.border_b_1().border_color(border_color))
+                    .when(is_selected, |d| d.bg(selection_bg))
+                    .hover(|d| d.bg(selection_bg))
+                    .on_mouse_down(
+                        MouseButton::Left,
+                        cx.listener(move |editor, _event, window, cx| {
+                            cx.stop_propagation();
+                            window.prevent_default();
+                            if let Some(ref mut ac) = editor.autocomplete {
+                                ac.selected_index = i;
+                            }
+                            if editor.accept_autocomplete_suggestion() {
+                                cx.notify();
+                            }
+                        }),
+                    )
+                    .on_mouse_move(cx.listener(move |editor, _event, _window, cx| {
+                        if let Some(ref mut ac) = editor.autocomplete
+                            && ac.selected_index != i
+                        {
+                            ac.selected_index = i;
+                            cx.notify();
+                        }
+                    }))
+                    .child(
+                        div()
+                            .overflow_x_hidden()
+                            .whitespace_nowrap()
+                            .text_ellipsis()
+                            .child(label),
+                    )
+                    .into_any_element()
+            })
+            .collect();
+
+        Some(
+            anchored()
+                .position(point(popup_x, popup_y))
+                .anchor(Corner::TopLeft)
+                .snap_to_window()
+                .child(
+                    div()
+                        .id("autocomplete-popup")
+                        .bg(theme.background)
+                        .border_1()
+                        .border_color(theme.comment)
+                        .rounded_md()
+                        .shadow_md()
+                        .overflow_hidden()
+                        .w(px(500.0))
+                        .max_h(px(300.0))
+                        .overflow_y_scroll()
+                        .text_size(px(14.0))
+                        .font(line_theme.text_font.clone())
+                        .on_scroll_wheel(cx.listener(|_editor, _event, _window, cx| {
+                            cx.stop_propagation();
+                        }))
+                        .on_mouse_down(
+                            MouseButton::Left,
+                            cx.listener(|_editor, _event, _window, cx| {
+                                cx.stop_propagation();
+                            }),
+                        )
+                        .children(items),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Accept the currently selected autocomplete suggestion.
+    /// Returns true if a suggestion was accepted.
+    fn accept_autocomplete_suggestion(&mut self) -> bool {
+        let ac = match self.autocomplete.take() {
+            Some(ac) => ac,
+            None => return false,
+        };
+
+        if ac.suggestions.is_empty() {
+            return false;
+        }
+
+        let suggestion = &ac.suggestions[ac.selected_index];
+        let replacement = match suggestion {
+            AutocompleteSuggestion::IssueOrPr { number, .. } => format!("#{}", number),
+        };
+
+        // Replace text from trigger_offset to current cursor with the replacement
+        let cursor = self.state.cursor().offset;
+        let range = ac.trigger_offset..cursor;
+        self.state.buffer.delete(range.clone(), cursor);
+        self.state
+            .buffer
+            .insert(ac.trigger_offset, &replacement, ac.trigger_offset);
+        let new_pos = ac.trigger_offset + replacement.len();
+        self.state.selection = Selection::new(new_pos, new_pos);
+
+        true
+    }
+
     fn delete_backward(&mut self) {
         self.state.delete_backward();
     }
@@ -2076,6 +2493,47 @@ impl Editor {
         }
 
         let keystroke = &event.keystroke;
+
+        // Handle autocomplete keyboard navigation
+        if self.autocomplete.is_some() {
+            match keystroke.key.as_str() {
+                "escape" => {
+                    self.autocomplete = None;
+                    cx.notify();
+                    return;
+                }
+                "up" => {
+                    if let Some(ref mut ac) = self.autocomplete
+                        && !ac.suggestions.is_empty()
+                    {
+                        if ac.selected_index == 0 {
+                            ac.selected_index = ac.suggestions.len() - 1;
+                        } else {
+                            ac.selected_index -= 1;
+                        }
+                        cx.notify();
+                        return;
+                    }
+                }
+                "down" => {
+                    if let Some(ref mut ac) = self.autocomplete
+                        && !ac.suggestions.is_empty()
+                    {
+                        ac.selected_index = (ac.selected_index + 1) % ac.suggestions.len();
+                        cx.notify();
+                        return;
+                    }
+                }
+                "enter" | "tab" => {
+                    if self.accept_autocomplete_suggestion() {
+                        cx.notify();
+                        return;
+                    }
+                }
+                _ => {}
+            }
+        }
+
         let extend = keystroke.modifiers.shift;
 
         match keystroke.key.as_str() {
@@ -2488,8 +2946,18 @@ impl Render for Editor {
         self.spawn_github_validation(&github_matches_by_line, cx);
         self.spawn_naked_url_validation(&naked_urls_by_line, cx);
 
-        // Store naked URLs for atomic cursor movement
+        // Store refs for autocomplete and atomic cursor movement
+        self.github_refs_by_line = github_matches_by_line.clone();
         self.naked_urls_by_line = naked_urls_by_line.clone();
+
+        // Update autocomplete only when cursor position changed (not on every render)
+        let cursor_offset_changed = self.last_cursor_offset != Some(cursor_offset);
+        self.last_cursor_offset = Some(cursor_offset);
+        if cursor_offset_changed {
+            if self.update_autocomplete_from_cursor() {
+                self.fetch_autocomplete_suggestions_debounced(cx);
+            }
+        }
 
         cx.set_global(StatusBarInfo {
             context_markers,
@@ -2787,6 +3255,7 @@ impl Render for Editor {
                 },
             )
             .child(line_list)
+            .children(self.render_autocomplete(&line_theme, window, cx))
     }
 }
 
