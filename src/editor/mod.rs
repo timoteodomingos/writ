@@ -2309,6 +2309,7 @@ impl Editor {
         let viewport = self.list_state.viewport_bounds();
 
         let popup_width = px(500.0);
+        let popup_max_height = px(300.0);
         let gap = px(4.0);
 
         // Clamp x to keep popup within content area
@@ -2317,9 +2318,22 @@ impl Editor {
             .unwrap_or(viewport.origin.x + viewport.size.width);
         let popup_x = cursor_pos.x.min(content_right - popup_width);
 
-        // Position Y below the cursor row (not the entire wrapped line block)
+        // Position Y below the cursor row, or flip above if not enough space below
         let line_height = self.config.line_height.to_pixels(window.rem_size());
-        let popup_y = cursor_pos.y + line_height + gap;
+        let viewport_bottom = viewport.origin.y + viewport.size.height;
+        let space_below = viewport_bottom - (cursor_pos.y + line_height);
+        let space_above = cursor_pos.y - viewport.origin.y;
+
+        let (popup_y, anchor_corner) = if space_below >= popup_max_height + gap {
+            // Enough space below - position popup below cursor
+            (cursor_pos.y + line_height + gap, Corner::TopLeft)
+        } else if space_above >= popup_max_height + gap {
+            // Not enough below but enough above - flip to above cursor
+            (cursor_pos.y - gap, Corner::BottomLeft)
+        } else {
+            // Not enough space either way - default to below
+            (cursor_pos.y + line_height + gap, Corner::TopLeft)
+        };
 
         // Build suggestion items
         let border_color = theme.comment;
@@ -2391,8 +2405,7 @@ impl Editor {
         Some(
             anchored()
                 .position(point(popup_x, popup_y))
-                .anchor(Corner::TopLeft)
-                .snap_to_window()
+                .anchor(anchor_corner)
                 .child(
                     div()
                         .id("autocomplete-popup")
