@@ -69,19 +69,37 @@ struct TabCycleCache {
     states: Vec<String>,
 }
 
+use crate::buffer::RenderSnapshot;
+
 /// A suggestion from GitHub autocomplete.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum AutocompleteSuggestion {
     /// An issue or pull request.
     IssueOrPr {
         number: u64,
         title: String,
         is_pr: bool,
+        /// Cached render snapshot for the title (parsed as markdown).
+        title_snapshot: RenderSnapshot,
     },
 }
 
+impl AutocompleteSuggestion {
+    /// Create a new issue/PR suggestion, parsing the title as markdown.
+    fn new_issue_or_pr(number: u64, title: String, is_pr: bool) -> Self {
+        let mut buffer: Buffer = title.parse().unwrap_or_default();
+        let title_snapshot = buffer.render_snapshot();
+        Self::IssueOrPr {
+            number,
+            title,
+            is_pr,
+            title_snapshot,
+        }
+    }
+}
+
 /// State for the autocomplete popup.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct AutocompleteState {
     /// Byte offset where the trigger character (`#`) was typed.
     pub trigger_offset: usize,
@@ -1904,10 +1922,12 @@ impl Editor {
 
             let suggestions: Vec<AutocompleteSuggestion> = issues
                 .into_iter()
-                .map(|issue| AutocompleteSuggestion::IssueOrPr {
-                    number: issue.number,
-                    title: issue.title,
-                    is_pr: issue.pull_request.is_some(),
+                .map(|issue| {
+                    AutocompleteSuggestion::new_issue_or_pr(
+                        issue.number,
+                        issue.title,
+                        issue.pull_request.is_some(),
+                    )
                 })
                 .collect();
 
@@ -1942,11 +1962,11 @@ impl Editor {
                                 {
                                     // Don't add if it's already in the suggestions
                                     if !suggestions.iter().any(|s| matches!(s, AutocompleteSuggestion::IssueOrPr { number, .. } if *number == num)) {
-                                        final_suggestions.push(AutocompleteSuggestion::IssueOrPr {
-                                            number: num,
-                                            title: String::new(),
-                                            is_pr: false,
-                                        });
+                                        final_suggestions.push(AutocompleteSuggestion::new_issue_or_pr(
+                                            num,
+                                            String::new(),
+                                            false,
+                                        ));
                                     }
                                 }
                             }
@@ -2387,17 +2407,16 @@ impl Editor {
                 let is_selected = i == ac.selected_index;
                 let is_first = i == 0;
                 let is_last = i == suggestion_count - 1;
-                let (number, title, is_pr) = match suggestion {
+                let (number, title_snapshot, is_pr) = match suggestion {
                     AutocompleteSuggestion::IssueOrPr {
                         number,
-                        title,
+                        title_snapshot,
                         is_pr,
-                    } => (*number, title.as_str(), *is_pr),
+                        ..
+                    } => (*number, title_snapshot, *is_pr),
                 };
 
-                // Parse the title as markdown to get inline styles
-                let mut title_buffer: Buffer = title.parse().unwrap_or_default();
-                let title_snapshot = title_buffer.render_snapshot();
+                // Use cached snapshot for inline styles
                 let title_line = title_snapshot.line_markers(0);
                 let title_inline_styles = title_snapshot.inline_styles_for_line(0);
 
