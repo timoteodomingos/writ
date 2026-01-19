@@ -2356,8 +2356,22 @@ impl Editor {
                     } => (*number, title.as_str(), *is_pr),
                 };
 
-                let prefix = if is_pr { "PR: " } else { "" };
-                let label = format!("#{} {}{}", number, prefix, title);
+                // Parse the title as markdown to get inline styles
+                let mut title_buffer: Buffer = title.parse().unwrap_or_default();
+                let title_snapshot = title_buffer.render_snapshot();
+                let title_line = title_snapshot.line_markers(0);
+                let title_inline_styles = title_snapshot.inline_styles_for_line(0);
+
+                let title_element = Line::new(
+                    title_line,
+                    title_snapshot.rope.clone(),
+                    usize::MAX, // no cursor
+                    title_inline_styles,
+                    line_theme.clone(),
+                    None,       // no selection
+                    Vec::new(), // no code highlights
+                    None,       // no base path
+                );
 
                 div()
                     .id(("autocomplete-item", i))
@@ -2393,10 +2407,15 @@ impl Editor {
                     }))
                     .child(
                         div()
+                            .flex()
+                            .flex_row()
+                            .gap_2()
                             .overflow_x_hidden()
                             .whitespace_nowrap()
                             .text_ellipsis()
-                            .child(label),
+                            .child(format!("#{}", number))
+                            .when(is_pr, |d| d.child("PR:"))
+                            .child(title_element),
                     )
                     .into_any_element()
             })
