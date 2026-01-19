@@ -2294,11 +2294,18 @@ impl Editor {
                     || line_text
                         .as_bytes()
                         .get(hash_pos - 1)
-                        .map_or(true, |&b| b == b' ' || b == b'\t' || b == b'\n');
+                        .is_none_or(|&b| b == b' ' || b == b'\t' || b == b'\n');
 
                 if is_at_word_boundary {
                     // Extract prefix (everything after `#` up to cursor)
                     let prefix = line_text[hash_pos + 1..].to_string();
+
+                    // Don't trigger autocomplete if prefix starts with whitespace
+                    // (that's a heading, not an issue reference)
+                    if prefix.starts_with(' ') || prefix.starts_with('\t') {
+                        self.autocomplete = None;
+                        return false;
+                    }
 
                     // Check if prefix changed
                     let prefix_changed = self
@@ -3052,10 +3059,8 @@ impl Render for Editor {
         // Update autocomplete only when cursor position changed (not on every render)
         let cursor_offset_changed = self.last_cursor_offset != Some(cursor_offset);
         self.last_cursor_offset = Some(cursor_offset);
-        if cursor_offset_changed {
-            if self.update_autocomplete_from_cursor() {
-                self.fetch_autocomplete_suggestions_debounced(cx);
-            }
+        if cursor_offset_changed && self.update_autocomplete_from_cursor() {
+            self.fetch_autocomplete_suggestions_debounced(cx);
         }
 
         let new_status_bar_info = StatusBarInfo {

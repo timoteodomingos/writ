@@ -261,8 +261,32 @@ impl Line {
         }
     }
 
+    /// Check if this line should be rendered as a heading.
+    /// Returns the heading level only if the marker includes a space after the `#`.
+    /// This prevents `#` alone from being rendered as a large heading while typing.
+    fn display_heading_level(&self) -> Option<u8> {
+        let level = self.line.heading_level()?;
+
+        // Find the heading marker
+        for m in &self.line.markers {
+            if let MarkerKind::Heading(lvl) = m.kind {
+                // The marker range includes "# " (hash + space) when valid.
+                // For just "#" alone, the marker length equals the heading level (number of #).
+                // For "# " or "## ", the marker length is level + 1 (includes the space).
+                let marker_len = m.range.len();
+                if marker_len > lvl as usize {
+                    // Marker includes space after the #s
+                    return Some(level);
+                }
+                // No space in marker - don't render as heading
+                return None;
+            }
+        }
+        None
+    }
+
     fn line_font(&self) -> Font {
-        if self.line.heading_level().is_some() {
+        if self.display_heading_level().is_some() {
             Font {
                 weight: FontWeight::BOLD,
                 ..self.theme.text_font.clone()
@@ -669,7 +693,7 @@ impl Line {
             };
 
             let font = Font {
-                weight: if is_bold || self.line.heading_level().is_some() {
+                weight: if is_bold || self.display_heading_level().is_some() {
                     FontWeight::BOLD
                 } else {
                     base_font.weight
@@ -1079,15 +1103,19 @@ impl RenderOnce for Line {
 
             match &marker.kind {
                 MarkerKind::Heading(level) => {
-                    line_div = line_div.font_weight(FontWeight::BOLD);
-                    line_div = match level {
-                        1 => line_div.text_size(rems(2.0)),
-                        2 => line_div.text_size(rems(1.75)),
-                        3 => line_div.text_size(rems(1.5)),
-                        4 => line_div.text_size(rems(1.25)),
-                        5 => line_div.text_size(rems(1.1)),
-                        _ => line_div,
-                    };
+                    // Only apply heading styling if there's whitespace after the marker.
+                    // This prevents `#` alone from rendering large while typing.
+                    if self.display_heading_level().is_some() {
+                        line_div = line_div.font_weight(FontWeight::BOLD);
+                        line_div = match level {
+                            1 => line_div.text_size(rems(2.0)),
+                            2 => line_div.text_size(rems(1.75)),
+                            3 => line_div.text_size(rems(1.5)),
+                            4 => line_div.text_size(rems(1.25)),
+                            5 => line_div.text_size(rems(1.1)),
+                            _ => line_div,
+                        };
+                    }
                 }
                 MarkerKind::BlockQuote => {
                     let marker_chars = marker.range.len();
