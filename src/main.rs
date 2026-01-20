@@ -14,7 +14,7 @@ use writ::{
     git::{detect_github_context, parse_github_repo_string},
     github::GitHubClient,
     http,
-    line::CursorScreenPosition,
+    line::{CursorScreenPosition, HoveredRefScreenPosition},
     status_bar::StatusBarInfo,
     title_bar::FileInfo,
     window::{CloseWindow, MinimizeWindow, Quit, ZoomWindow, window_shadow},
@@ -143,6 +143,7 @@ fn main() {
         cx.set_global(StatusBarInfo::default());
         cx.set_global(EditorTheme::default());
         cx.set_global(CursorScreenPosition::default());
+        cx.set_global(HoveredRefScreenPosition::default());
         cx.set_global(config);
         cx.bind_keys([
             KeyBinding::new("ctrl-w", CloseWindow, None),

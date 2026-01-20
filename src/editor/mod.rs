@@ -7,6 +7,7 @@ pub use config::EditorConfig;
 pub use theme::EditorTheme;
 
 use std::collections::HashMap;
+use std::ops::Range;
 use std::path::PathBuf;
 use std::sync::mpsc;
 
@@ -36,7 +37,7 @@ use crate::title_bar::FileInfo;
 
 use crate::buffer::Buffer;
 use crate::cursor::{Cursor, Selection};
-use crate::github::{GitHubClient, GitHubValidationCache};
+use crate::github::{GitHubClient, GitHubValidationCache, IssueOrPr, IssueStatus};
 use crate::inline::{
     GitHubContext, GitHubRef, NakedUrl, RawGitHubMatch, detect_github_references_in_line,
     detect_naked_urls, github_refs_to_styled_regions, naked_urls_to_styled_regions,
@@ -79,7 +80,6 @@ pub enum AutocompleteTrigger {
 }
 
 use crate::buffer::RenderSnapshot;
-use crate::github::IssueStatus;
 
 /// Create a RenderSnapshot from issue/PR title text for markdown rendering.
 fn render_snapshot_for_title(title: &str) -> RenderSnapshot {
@@ -1642,6 +1642,10 @@ pub struct Editor {
     hovering_checkbox: bool,
     /// Whether mouse is over a link (regardless of Ctrl state).
     hovering_link_region: bool,
+    /// Byte range of currently hovered GitHub ref (if any).
+    hovered_github_ref_range: Option<Range<usize>>,
+    /// Screen position when hovering a GitHub ref (for popup positioning).
+    hovered_ref_position: Option<gpui::Point<gpui::Pixels>>,
     /// Whether Ctrl/Cmd is currently held.
     ctrl_held: bool,
     /// Last buffer version we synced to. Used to detect buffer changes.
@@ -1705,6 +1709,8 @@ impl Editor {
             config,
             hovering_checkbox: false,
             hovering_link_region: false,
+            hovered_github_ref_range: None,
+            hovered_ref_position: None,
             ctrl_held: false,
             last_synced_version: 0,
             last_drag_scroll: None,
@@ -1862,13 +1868,23 @@ impl Editor {
         let client = client.clone();
         let ref_for_task = reference.clone();
         cx.spawn(async move |weak, cx| {
-            let valid = client.validate_ref(&ref_for_task).await;
+            let result = client.validate_ref(&ref_for_task).await;
             let _ = cx.update(|cx| {
                 if let Some(editor) = weak.upgrade() {
                     editor.update(cx, |editor, cx| {
-                        editor
-                            .github_validation_cache
-                            .set_result(ref_for_task, valid);
+                        match result {
+                            crate::github::ValidationResult::ValidWithData(data) => {
+                                editor
+                                    .github_validation_cache
+                                    .set_valid(ref_for_task, Some(data));
+                            }
+                            crate::github::ValidationResult::ValidNoData => {
+                                editor.github_validation_cache.set_valid(ref_for_task, None);
+                            }
+                            crate::github::ValidationResult::Invalid => {
+                                editor.github_validation_cache.set_invalid(ref_for_task);
+                            }
+                        }
                         cx.notify();
                     });
                 }
@@ -1948,30 +1964,40 @@ impl Editor {
                 .issues_matching_prefix(&owner, &repo, &prefix, 5)
                 .await;
 
-            let suggestions: Vec<AutocompleteSuggestion> = issues
+            // Build suggestions and keep full issue data for caching
+            let suggestions_with_data: Vec<(AutocompleteSuggestion, IssueOrPr)> = issues
                 .into_iter()
-                .map(|issue| AutocompleteSuggestion::IssueOrPr {
-                    number: issue.number,
-                    symbol: issue.symbol().to_string(),
-                    status: issue.status(),
-                    display_snapshot: render_snapshot_for_title(&issue.title),
+                .map(|issue| {
+                    let suggestion = AutocompleteSuggestion::IssueOrPr {
+                        number: issue.number,
+                        symbol: issue.symbol().to_string(),
+                        status: issue.status(),
+                        display_snapshot: render_snapshot_for_title(&issue.title),
+                    };
+                    (suggestion, issue)
                 })
                 .collect();
 
             let _ = cx.update(|cx| {
                 if let Some(editor) = weak.upgrade() {
                     editor.update(cx, |editor, cx| {
-                        // Add fetched suggestions to validation cache
-                        for suggestion in &suggestions {
-                            if let AutocompleteSuggestion::IssueOrPr { number, .. } = suggestion {
-                                let github_ref = GitHubRef::Issue {
-                                    owner: owner.clone(),
-                                    repo: repo.clone(),
-                                    number: *number,
-                                };
-                                editor.github_validation_cache.set_result(github_ref, true);
-                            }
+                        // Add fetched issues to validation cache with full data
+                        for (_, issue) in &suggestions_with_data {
+                            let github_ref = GitHubRef::Issue {
+                                owner: owner.clone(),
+                                repo: repo.clone(),
+                                number: issue.number,
+                            };
+                            editor.github_validation_cache.set_valid(
+                                github_ref,
+                                Some(crate::github::ValidatedRefData::Issue(issue.clone())),
+                            );
                         }
+
+                        let suggestions: Vec<_> = suggestions_with_data
+                            .into_iter()
+                            .map(|(s, _)| s)
+                            .collect();
 
                         // Only update if autocomplete is still active with the same prefix
                         if let Some(ref mut ac) = editor.autocomplete
@@ -1986,17 +2012,17 @@ impl Editor {
                                     repo: repo.clone(),
                                     number: num,
                                 };
-                                if editor.github_validation_cache.get(&user_ref)
-                                    == Some(crate::github::ValidationState::Valid)
+                                if let Some(crate::github::ValidationState::Valid(Some(
+                                    crate::github::ValidatedRefData::Issue(issue),
+                                ))) = editor.github_validation_cache.get(&user_ref)
                                 {
                                     // Don't add if it's already in the suggestions
-                                    if !suggestions.iter().any(|s| matches!(s, AutocompleteSuggestion::IssueOrPr { number, .. } if *number == num)) {
-                                        // Fallback: we know the number is valid but don't have details
+                                    if !suggestions.iter().any(|s| matches!(s, AutocompleteSuggestion::IssueOrPr { number: n, .. } if *n == num)) {
                                         final_suggestions.push(AutocompleteSuggestion::IssueOrPr {
                                             number: num,
-                                            symbol: "●".to_string(), // assume issue
-                                            status: IssueStatus::Open, // assume open
-                                            display_snapshot: render_snapshot_for_title(""),
+                                            symbol: issue.symbol().to_string(),
+                                            status: issue.status(),
+                                            display_snapshot: render_snapshot_for_title(&issue.title),
                                         });
                                     }
                                 }
@@ -2475,8 +2501,8 @@ impl Editor {
     ) -> Option<AnyElement> {
         let ac = self.autocomplete.as_ref()?;
 
-        // Don't show popup if loading or 0-1 suggestions (no choice to make)
-        if ac.loading || ac.suggestions.len() <= 1 {
+        // Don't show popup if loading or no suggestions
+        if ac.loading || ac.suggestions.is_empty() {
             return None;
         }
 
@@ -2587,6 +2613,8 @@ impl Editor {
                             None,       // no selection
                             Vec::new(), // no code highlights
                             None,       // no base path
+                            Vec::new(), // no github refs in popup
+                            None,       // no hovered ref in popup
                         )
                         .with_prefix(prefix_text, prefix_runs)
                         .truncate(px(484.0))
@@ -2668,6 +2696,188 @@ impl Editor {
                             }),
                         )
                         .children(items),
+                )
+                .into_any_element(),
+        )
+    }
+
+    /// Render hover popup for GitHub refs.
+    /// Uses the same styling as autocomplete items when detailed data is available.
+    fn render_github_ref_hover(
+        &self,
+        line_theme: &LineTheme,
+        window: &Window,
+        _cx: &mut Context<Self>,
+    ) -> Option<AnyElement> {
+        use crate::github::{ValidatedRefData, ValidationState};
+
+        // Don't show hover if autocomplete popup is visible
+        if self
+            .autocomplete
+            .as_ref()
+            .is_some_and(|ac| !ac.suggestions.is_empty())
+        {
+            return None;
+        }
+
+        // Need a hovered ref
+        let hovered_range = self.hovered_github_ref_range.as_ref()?;
+
+        // Find the actual GitHubRef from our stored refs
+        let github_ref = self.github_refs_by_line.values().flatten().find_map(|m| {
+            if &m.byte_range == hovered_range {
+                Some(&m.reference)
+            } else {
+                None
+            }
+        })?;
+
+        // Get position from stored mouse position
+        let pos = self.hovered_ref_position?;
+
+        let theme = &self.config.theme;
+
+        // Check validation status and extract data
+        let validation_state = self.github_validation_cache.get(github_ref);
+
+        // Get viewport bounds for positioning
+        let viewport = self.list_state.viewport_bounds();
+        let line_height = self.config.line_height.to_pixels(window.rem_size());
+        let popup_max_height = px(100.0);
+        let gap = px(4.0);
+
+        // Position below the ref, or above if not enough space
+        let space_below = viewport.origin.y + viewport.size.height - (pos.y + line_height);
+        let (popup_y, anchor_corner) = if space_below >= popup_max_height + gap {
+            (pos.y + line_height + gap, Corner::TopLeft)
+        } else {
+            (pos.y - gap, Corner::BottomLeft)
+        };
+
+        // Build popup content based on validation state
+        let popup_content: AnyElement = match &validation_state {
+            Some(ValidationState::Valid(Some(ValidatedRefData::Issue(issue)))) => {
+                // Render like autocomplete issue item
+                let status = issue.status();
+                let status_color = match status {
+                    IssueStatus::Open => theme.green,
+                    IssueStatus::Draft => theme.comment,
+                    IssueStatus::Merged | IssueStatus::Closed => theme.purple,
+                    IssueStatus::ClosedNotPlanned => theme.red,
+                };
+
+                // Build prefix: "● #123 " with colored runs
+                let prefix_text = format!("{} #{} ", issue.symbol(), issue.number);
+                let text_font = line_theme.text_font.clone();
+                let make_run = |len: usize, color: gpui::Rgba| TextRun {
+                    len,
+                    font: text_font.clone(),
+                    color: color.into(),
+                    background_color: None,
+                    underline: None,
+                    strikethrough: None,
+                };
+
+                let number_str = format!("#{} ", issue.number);
+                let prefix_runs = vec![
+                    make_run(issue.symbol().len(), status_color), // symbol
+                    make_run(1, theme.foreground),                // space
+                    make_run(number_str.len(), theme.cyan),       // #123 + space
+                ];
+
+                // Render title with markdown
+                let display_snapshot = render_snapshot_for_title(&issue.title);
+                let display_line = display_snapshot.line_markers(0);
+                let display_inline_styles = display_snapshot.inline_styles_for_line(0);
+
+                Line::new(
+                    display_line,
+                    display_snapshot.rope.clone(),
+                    usize::MAX, // no cursor
+                    display_inline_styles,
+                    line_theme.clone(),
+                    None,       // no selection
+                    Vec::new(), // no code highlights
+                    None,       // no base path
+                    Vec::new(), // no github refs in popup
+                    None,       // no hovered ref in popup
+                )
+                .with_prefix(prefix_text, prefix_runs)
+                .truncate(px(484.0))
+                .into_any_element()
+            }
+            Some(ValidationState::Valid(Some(ValidatedRefData::User(user)))) => {
+                // Render like autocomplete user item
+                let mut row = div().flex().flex_row().gap_1();
+                row = row.child(
+                    div()
+                        .text_color(theme.cyan)
+                        .child(format!("@{}", user.login)),
+                );
+                if let Some(name) = &user.name {
+                    row = row.child(div().text_color(theme.comment).child(name.clone()));
+                }
+                row.into_any_element()
+            }
+            Some(ValidationState::Valid(None)) => {
+                // Valid but no detailed data (commits, etc.) - show simple checkmark
+                let display_text = github_ref.short_display(self.github_context.as_ref());
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_1()
+                    .child(div().text_color(theme.green).child("✓ "))
+                    .child(div().text_color(theme.cyan).child(display_text))
+                    .into_any_element()
+            }
+            Some(ValidationState::Invalid) => {
+                // Invalid ref - show X mark
+                let display_text = github_ref.short_display(self.github_context.as_ref());
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_1()
+                    .child(div().text_color(theme.red).child("✗ "))
+                    .child(div().text_color(theme.cyan).child(display_text))
+                    .into_any_element()
+            }
+            Some(ValidationState::Pending) | None => {
+                // Pending or unknown - show loading indicator
+                let display_text = github_ref.short_display(self.github_context.as_ref());
+                div()
+                    .flex()
+                    .flex_row()
+                    .gap_1()
+                    .child(div().text_color(theme.comment).child("… "))
+                    .child(div().text_color(theme.cyan).child(display_text))
+                    .into_any_element()
+            }
+        };
+
+        // Determine popup width - fixed for issues (truncation), auto for others
+        let popup_width = match &validation_state {
+            Some(ValidationState::Valid(Some(ValidatedRefData::Issue(_)))) => Some(px(500.0)),
+            _ => None,
+        };
+
+        Some(
+            anchored()
+                .position(point(pos.x, popup_y))
+                .anchor(anchor_corner)
+                .child(
+                    div()
+                        .id("github-ref-hover")
+                        .bg(theme.background)
+                        .border_1()
+                        .border_color(theme.comment)
+                        .rounded_md()
+                        .shadow_md()
+                        .px_2()
+                        .py_1()
+                        .text_size(px(14.0))
+                        .font(line_theme.text_font.clone())
+                        .when_some(popup_width, |d, w| d.w(w))
+                        .child(popup_content),
                 )
                 .into_any_element(),
         )
@@ -2777,9 +2987,9 @@ impl Editor {
                     }
                 }
                 "enter" | "tab" => {
-                    // Only accept if popup is visible (more than 1 suggestion)
+                    // Only accept if popup is visible (has suggestions)
                     if let Some(ref ac) = self.autocomplete
-                        && ac.suggestions.len() > 1
+                        && !ac.suggestions.is_empty()
                         && self.accept_autocomplete_suggestion()
                     {
                         cx.notify();
@@ -3069,12 +3279,17 @@ impl Editor {
             if let EditorAction::UpdateHover {
                 over_checkbox,
                 over_link,
+                ref hovered_github_ref_range,
+                ref hovered_ref_position,
             } = *action
                 && (self.hovering_checkbox != over_checkbox
-                    || self.hovering_link_region != over_link)
+                    || self.hovering_link_region != over_link
+                    || self.hovered_github_ref_range != *hovered_github_ref_range)
             {
                 self.hovering_checkbox = over_checkbox;
                 self.hovering_link_region = over_link;
+                self.hovered_github_ref_range = hovered_github_ref_range.clone();
+                self.hovered_ref_position = *hovered_ref_position;
                 cx.notify();
             }
             return;
@@ -3129,12 +3344,17 @@ impl Editor {
             EditorAction::UpdateHover {
                 over_checkbox,
                 over_link,
+                hovered_github_ref_range,
+                hovered_ref_position,
             } => {
                 if self.hovering_checkbox != *over_checkbox
                     || self.hovering_link_region != *over_link
+                    || self.hovered_github_ref_range != *hovered_github_ref_range
                 {
                     self.hovering_checkbox = *over_checkbox;
                     self.hovering_link_region = *over_link;
+                    self.hovered_github_ref_range = hovered_github_ref_range.clone();
+                    self.hovered_ref_position = *hovered_ref_position;
                     cx.notify();
                 }
                 return; // Only notify if hover state actually changed
@@ -3318,6 +3538,7 @@ impl Render for Editor {
 
         let github_cache = self.github_validation_cache.clone();
         let github_context = self.github_context.clone();
+        let hovered_github_ref_range = self.hovered_github_ref_range.clone();
 
         let line_list = div().id("line-list").size_full().child(
             list(self.list_state.clone(), move |ix, _window, _cx| {
@@ -3325,11 +3546,18 @@ impl Render for Editor {
                 let mut inline_styles = snapshot.inline_styles_for_line(ix);
 
                 // Add GitHub reference links from pre-detected matches
-                if let Some(github_matches) = github_matches_by_line.get(&ix) {
-                    let github_styles =
-                        github_refs_to_styled_regions(github_matches, &github_cache);
-                    inline_styles.extend(github_styles);
-                }
+                let github_ref_ranges: Vec<Range<usize>> =
+                    if let Some(github_matches) = github_matches_by_line.get(&ix) {
+                        let github_styles =
+                            github_refs_to_styled_regions(github_matches, &github_cache);
+                        inline_styles.extend(github_styles);
+                        github_matches
+                            .iter()
+                            .map(|m| m.byte_range.clone())
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
 
                 // Add naked URL links
                 if let Some(naked_urls) = naked_urls_by_line.get(&ix) {
@@ -3353,6 +3581,16 @@ impl Render for Editor {
                     })
                     .collect();
 
+                // Check if the hovered ref is on this line
+                let hovered_ref_on_this_line: Option<Range<usize>> =
+                    hovered_github_ref_range.as_ref().and_then(|hr| {
+                        if github_ref_ranges.iter().any(|r| r == hr) {
+                            Some(hr.clone())
+                        } else {
+                            None
+                        }
+                    });
+
                 let line_element = Line::new(
                     line,
                     snapshot.rope.clone(),
@@ -3362,6 +3600,8 @@ impl Render for Editor {
                     selection_range.clone(),
                     code_highlights,
                     base_path.clone(),
+                    github_ref_ranges,
+                    hovered_ref_on_this_line,
                 );
 
                 // Add top padding to first line, bottom padding to last line
@@ -3523,6 +3763,7 @@ impl Render for Editor {
             )
             .child(line_list)
             .children(self.render_autocomplete(&line_theme, window, cx))
+            .children(self.render_github_ref_hover(&line_theme, window, cx))
     }
 }
 

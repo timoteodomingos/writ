@@ -30,8 +30,6 @@ pub enum GitHubRef {
     },
     /// User mention: @username
     User { username: String },
-    /// Team mention: @org/team
-    Team { org: String, team: String },
     /// Commit SHA (7-40 hex chars)
     Commit {
         owner: String,
@@ -68,9 +66,6 @@ impl GitHubRef {
             }
             GitHubRef::User { username } => {
                 format!("https://github.com/{username}")
-            }
-            GitHubRef::Team { org, team } => {
-                format!("https://github.com/orgs/{org}/teams/{team}")
             }
             GitHubRef::Commit { owner, repo, sha } => {
                 format!("https://github.com/{owner}/{repo}/commit/{sha}")
@@ -120,7 +115,6 @@ impl GitHubRef {
                 }
             }
             GitHubRef::User { username } => format!("@{username}"),
-            GitHubRef::Team { org, team } => format!("@{org}/{team}"),
             GitHubRef::Commit { owner, repo, sha } => {
                 let short_sha = &sha[..sha.len().min(7)];
                 if is_same_repo(owner, repo) {
@@ -202,15 +196,6 @@ impl GitHubRef {
         }
     }
 
-    /// Create a Team ref from a capture (@org/team).
-    /// Capture groups: 1=full, 2=org, 3=team
-    fn from_team_capture(cap: &regex::Captures) -> Self {
-        GitHubRef::Team {
-            org: cap[2].to_string(),
-            team: cap[3].to_string(),
-        }
-    }
-
     /// Create a User ref from a capture (@username).
     /// Capture groups: 1=full, 2=username
     fn from_user_capture(cap: &regex::Captures) -> Self {
@@ -266,8 +251,6 @@ static GH_ISSUE_RE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"(?i)GH-(\d{1
 static USER_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(@([a-zA-Z0-9](?:[a-zA-Z0-9-]*[a-zA-Z0-9])?))(?:[^a-zA-Z0-9/]|$)").unwrap()
 });
-static TEAM_RE: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"(@([a-zA-Z0-9-]+)/([a-zA-Z0-9_-]+))(?:[^a-zA-Z0-9]|$)").unwrap());
 static CROSS_REPO_ISSUE_RE: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"(([a-zA-Z0-9-]+)/([a-zA-Z0-9._-]+)#(\d{1,10}))(?:[^a-zA-Z0-9]|$)").unwrap()
 });
@@ -425,23 +408,6 @@ pub fn detect_github_references_in_line(
         matched_ranges.push(abs_range.clone());
         matches.push(RawGitHubMatch {
             reference: GitHubRef::from_cross_repo_commit_capture(&cap),
-            byte_range: abs_range,
-        });
-    }
-
-    // Team mentions: @org/team (check before simple @user)
-    for cap in TEAM_RE.captures_iter(line) {
-        let full = cap.get(1).unwrap();
-        let abs_range = (line_byte_offset + full.start())..(line_byte_offset + full.end());
-        if is_in_code(abs_range.start) {
-            continue;
-        }
-        if overlaps_matched(&abs_range, &matched_ranges) {
-            continue;
-        }
-        matched_ranges.push(abs_range.clone());
-        matches.push(RawGitHubMatch {
-            reference: GitHubRef::from_team_capture(&cap),
             byte_range: abs_range,
         });
     }
@@ -1142,19 +1108,6 @@ mod tests {
     }
 
     #[test]
-    fn test_github_team_mention() {
-        let line = "cc @rust-lang/compiler";
-        let matches = detect_github_references_in_line(line, 0, None, &[]);
-
-        assert_eq!(matches.len(), 1);
-        assert!(matches!(
-            &matches[0].reference,
-            GitHubRef::Team { org, team }
-            if org == "rust-lang" && team == "compiler"
-        ));
-    }
-
-    #[test]
     fn test_github_cross_repo_issue() {
         let line = "See tokio-rs/tokio#1234";
         let matches = detect_github_references_in_line(line, 0, None, &[]);
@@ -1254,15 +1207,6 @@ mod tests {
         };
         assert_eq!(user.url(), "https://github.com/torvalds");
 
-        let team = GitHubRef::Team {
-            org: "rust-lang".to_string(),
-            team: "compiler".to_string(),
-        };
-        assert_eq!(
-            team.url(),
-            "https://github.com/orgs/rust-lang/teams/compiler"
-        );
-
         let commit = GitHubRef::Commit {
             owner: "rust-lang".to_string(),
             repo: "rust".to_string(),
@@ -1280,15 +1224,15 @@ mod tests {
         let ctx = github_ctx();
         let matches = detect_github_references_in_line(line, 0, Some(&ctx), &[]);
 
-        // Simulate validation - mark the issue as valid
+        // Simulate validation - mark the issue as valid (no hover data needed for this test)
         let cache = GitHubValidationCache::new();
-        cache.set_result(
+        cache.set_valid(
             GitHubRef::Issue {
                 owner: "rust-lang".to_string(),
                 repo: "rust".to_string(),
                 number: 123,
             },
-            true,
+            None,
         );
 
         let regions = github_refs_to_styled_regions(&matches, &cache);
@@ -1544,15 +1488,6 @@ mod tests {
     }
 
     #[test]
-    fn test_short_display_team() {
-        let team = GitHubRef::Team {
-            org: "rust-lang".to_string(),
-            team: "compiler".to_string(),
-        };
-        assert_eq!(team.short_display(None), "@rust-lang/compiler");
-    }
-
-    #[test]
     fn test_short_display_commit() {
         let commit = GitHubRef::Commit {
             owner: "rust-lang".to_string(),
@@ -1707,9 +1642,9 @@ mod tests {
             github_ref: Some(github_ref.clone()),
         }];
 
-        // Mark the ref as validated
+        // Mark the ref as validated (no hover data needed for this test)
         let cache = GitHubValidationCache::new();
-        cache.set_result(github_ref, true);
+        cache.set_valid(github_ref, None);
 
         // Without context - shows full owner/repo
         let regions = naked_urls_to_styled_regions(&urls, &cache, None);

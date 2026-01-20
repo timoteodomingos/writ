@@ -55,7 +55,7 @@ struct RepoIssueData {
 }
 
 /// Issue/PR data from GraphQL.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct IssueOrPr {
     #[serde(rename = "__typename")]
     pub typename: String,
@@ -129,7 +129,7 @@ impl IssueOrPr {
 
 // Mentionable users response types
 #[derive(Debug, Deserialize)]
-struct MentionableUsersData {
+struct MentionableData {
     repository: Option<RepoMentionableUsers>,
 }
 
@@ -145,60 +145,46 @@ struct UserNodes {
 }
 
 /// User data from GraphQL mentionableUsers.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct MentionableUser {
     pub login: String,
     pub name: Option<String>,
 }
 
 // Validation lookup response types
+/// Response type for issue validation that returns full issue data.
 #[derive(Debug, Deserialize)]
-struct ValidationData {
-    repository: Option<ValidationRepoData>,
-    user: Option<ValidationUser>,
+struct IssueValidationData {
+    repository: Option<IssueValidationRepoData>,
 }
 
 #[derive(Debug, Deserialize)]
-struct ValidationRepoData {
+struct IssueValidationRepoData {
     #[serde(rename = "issueOrPullRequest")]
-    issue_or_pull_request: Option<ValidationIssue>,
-    #[serde(rename = "object")]
-    commit: Option<ValidationCommit>,
+    issue_or_pull_request: Option<IssueOrPr>,
+}
+
+/// Response type for user validation that returns full user data.
+#[derive(Debug, Deserialize)]
+struct UserValidationData {
+    user: Option<MentionableUser>,
+}
+
+/// Response type for commit validation.
+#[derive(Debug, Deserialize)]
+struct CommitValidationData {
+    repository: Option<CommitValidationRepoData>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CommitValidationRepoData {
+    object: Option<CommitValidationObject>,
 }
 
 #[derive(Debug, Deserialize)]
 #[allow(dead_code)]
-struct ValidationIssue {
-    number: u64,
-}
-
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct ValidationCommit {
+struct CommitValidationObject {
     oid: String,
-}
-
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct ValidationUser {
-    login: String,
-}
-
-// Team validation
-#[derive(Debug, Deserialize)]
-struct TeamValidationData {
-    organization: Option<TeamOrg>,
-}
-
-#[derive(Debug, Deserialize)]
-struct TeamOrg {
-    team: Option<ValidationTeam>,
-}
-
-#[derive(Debug, Deserialize)]
-#[allow(dead_code)]
-struct ValidationTeam {
-    slug: String,
 }
 
 // ============================================================================
@@ -206,13 +192,32 @@ struct ValidationTeam {
 // ============================================================================
 
 /// Validation state for a GitHub reference.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ValidationState {
     /// Fetch has been spawned but not yet completed.
     Pending,
-    /// Reference exists on GitHub.
-    Valid,
+    /// Reference exists on GitHub, optionally with detailed data for hover popup.
+    Valid(Option<ValidatedRefData>),
     /// Reference does not exist on GitHub.
+    Invalid,
+}
+
+/// Detailed data from a validated reference.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ValidatedRefData {
+    /// Issue or PR with full details.
+    Issue(IssueOrPr),
+    /// User with full details.
+    User(MentionableUser),
+}
+
+/// Result of validating a GitHub reference.
+pub enum ValidationResult {
+    /// Reference exists and has detailed data for hover.
+    ValidWithData(ValidatedRefData),
+    /// Reference exists but has no detailed hover data (commits, etc.).
+    ValidNoData,
+    /// Reference does not exist.
     Invalid,
 }
 
@@ -236,7 +241,7 @@ impl GitHubValidationCache {
     }
 
     pub fn get(&self, ref_: &GitHubRef) -> Option<ValidationState> {
-        self.cache.borrow().get(ref_).copied()
+        self.cache.borrow().get(ref_).cloned()
     }
 
     pub fn mark_pending(&self, ref_: GitHubRef) {
@@ -245,19 +250,25 @@ impl GitHubValidationCache {
             .insert(ref_, ValidationState::Pending);
     }
 
-    pub fn set_result(&self, ref_: GitHubRef, valid: bool) {
-        self.cache.borrow_mut().insert(
-            ref_,
-            if valid {
-                ValidationState::Valid
-            } else {
-                ValidationState::Invalid
-            },
-        );
+    /// Set validation result as valid with optional detailed data.
+    pub fn set_valid(&self, ref_: GitHubRef, data: Option<ValidatedRefData>) {
+        self.cache
+            .borrow_mut()
+            .insert(ref_, ValidationState::Valid(data));
+    }
+
+    /// Set validation result as invalid.
+    pub fn set_invalid(&self, ref_: GitHubRef) {
+        self.cache
+            .borrow_mut()
+            .insert(ref_, ValidationState::Invalid);
     }
 
     pub fn is_valid(&self, ref_: &GitHubRef) -> bool {
-        self.cache.borrow().get(ref_) == Some(&ValidationState::Valid)
+        matches!(
+            self.cache.borrow().get(ref_),
+            Some(ValidationState::Valid(_))
+        )
     }
 
     pub fn clear(&self) {
@@ -534,7 +545,7 @@ impl GitHubClient {
     // ========================================================================
 
     /// Fetch mentionable users for autocomplete.
-    /// Uses server-side search against both login and display name.
+    /// Uses server-side search against both login and name.
     pub async fn users_matching_prefix(
         &self,
         owner: &str,
@@ -568,44 +579,56 @@ impl GitHubClient {
             "limit": limit
         });
 
-        let data: Option<MentionableUsersData> = self.graphql(graphql_query, Some(variables)).await;
+        let data: Option<MentionableData> = self.graphql(graphql_query, Some(variables)).await;
 
-        let results = data
+        let users = data
             .and_then(|d| d.repository)
             .map(|r| r.mentionable_users.nodes)
             .unwrap_or_default();
 
-        self.user_cache.set(cache_key, results.clone());
-        results
+        self.user_cache.set(cache_key, users.clone());
+        users
     }
 
     // ========================================================================
     // Validation (for GitHubRef validation)
     // ========================================================================
 
-    /// Validate a GitHub reference by checking if it exists.
-    pub async fn validate_ref(&self, ref_: &GitHubRef) -> bool {
+    /// Validate a GitHub reference and return detailed data if available.
+    pub async fn validate_ref(&self, ref_: &GitHubRef) -> ValidationResult {
         match ref_ {
             GitHubRef::Issue {
                 owner,
                 repo,
                 number,
-            } => self.validate_issue(owner, repo, *number).await,
-            GitHubRef::User { username } => self.validate_user(username).await,
-            GitHubRef::Team { org, team } => self.validate_team(org, team).await,
-            GitHubRef::Commit { owner, repo, sha } => self.validate_commit(owner, repo, sha).await,
-            // Compare and File refs come from pasted URLs - assume valid
-            GitHubRef::Compare { .. } | GitHubRef::File { .. } => true,
+            } => match self.validate_issue(owner, repo, *number).await {
+                Some(issue) => ValidationResult::ValidWithData(ValidatedRefData::Issue(issue)),
+                None => ValidationResult::Invalid,
+            },
+            GitHubRef::User { username } => match self.validate_user(username).await {
+                Some(user) => ValidationResult::ValidWithData(ValidatedRefData::User(user)),
+                None => ValidationResult::Invalid,
+            },
+            GitHubRef::Commit { owner, repo, sha } => {
+                if self.validate_commit(owner, repo, sha).await {
+                    ValidationResult::ValidNoData
+                } else {
+                    ValidationResult::Invalid
+                }
+            }
+            // Compare and File refs come from pasted URLs - assume valid, no hover data
+            GitHubRef::Compare { .. } | GitHubRef::File { .. } => ValidationResult::ValidNoData,
         }
     }
 
-    async fn validate_issue(&self, owner: &str, repo: &str, number: u64) -> bool {
+    async fn validate_issue(&self, owner: &str, repo: &str, number: u64) -> Option<IssueOrPr> {
         let query = r#"
             query($owner: String!, $repo: String!, $number: Int!) {
                 repository(owner: $owner, name: $repo) {
                     issueOrPullRequest(number: $number) {
-                        ... on Issue { number }
-                        ... on PullRequest { number }
+                        __typename
+                        ... on Issue { number title state stateReason }
+                        ... on PullRequest { number title state merged isDraft }
                     }
                 }
             }
@@ -617,18 +640,18 @@ impl GitHubClient {
             "number": number
         });
 
-        let data: Option<ValidationData> = self.graphql(query, Some(variables)).await;
+        let data: Option<IssueValidationData> = self.graphql(query, Some(variables)).await;
 
         data.and_then(|d| d.repository)
             .and_then(|r| r.issue_or_pull_request)
-            .is_some()
     }
 
-    async fn validate_user(&self, username: &str) -> bool {
+    async fn validate_user(&self, username: &str) -> Option<MentionableUser> {
         let query = r#"
             query($login: String!) {
                 user(login: $login) {
                     login
+                    name
                 }
             }
         "#;
@@ -637,32 +660,9 @@ impl GitHubClient {
             "login": username
         });
 
-        let data: Option<ValidationData> = self.graphql(query, Some(variables)).await;
+        let data: Option<UserValidationData> = self.graphql(query, Some(variables)).await;
 
-        data.and_then(|d| d.user).is_some()
-    }
-
-    async fn validate_team(&self, org: &str, team_slug: &str) -> bool {
-        let query = r#"
-            query($org: String!, $slug: String!) {
-                organization(login: $org) {
-                    team(slug: $slug) {
-                        slug
-                    }
-                }
-            }
-        "#;
-
-        let variables = serde_json::json!({
-            "org": org,
-            "slug": team_slug
-        });
-
-        let data: Option<TeamValidationData> = self.graphql(query, Some(variables)).await;
-
-        data.and_then(|d| d.organization)
-            .and_then(|o| o.team)
-            .is_some()
+        data.and_then(|d| d.user)
     }
 
     async fn validate_commit(&self, owner: &str, repo: &str, sha: &str) -> bool {
@@ -682,10 +682,10 @@ impl GitHubClient {
             "oid": sha
         });
 
-        let data: Option<ValidationData> = self.graphql(query, Some(variables)).await;
+        let data: Option<CommitValidationData> = self.graphql(query, Some(variables)).await;
 
         data.and_then(|d| d.repository)
-            .and_then(|r| r.commit)
+            .and_then(|r| r.object)
             .is_some()
     }
 }
@@ -795,8 +795,9 @@ mod tests {
         setup_crypto();
         let client = GitHubClient::new(token_from_env());
 
-        let exists = client.validate_issue("rust-lang", "rust", 1).await;
-        assert!(exists, "Issue #1 should exist in rust-lang/rust");
+        let issue = client.validate_issue("rust-lang", "rust", 1).await;
+        assert!(issue.is_some(), "Issue #1 should exist in rust-lang/rust");
+        assert_eq!(issue.unwrap().number, 1);
     }
 
     #[tokio::test]
@@ -804,8 +805,8 @@ mod tests {
         setup_crypto();
         let client = GitHubClient::new(token_from_env());
 
-        let exists = client.validate_issue("rust-lang", "rust", 999999999).await;
-        assert!(!exists, "Non-existent issue should not be found");
+        let issue = client.validate_issue("rust-lang", "rust", 999999999).await;
+        assert!(issue.is_none(), "Non-existent issue should not be found");
     }
 
     #[tokio::test]
@@ -813,8 +814,9 @@ mod tests {
         setup_crypto();
         let client = GitHubClient::new(token_from_env());
 
-        let exists = client.validate_user("torvalds").await;
-        assert!(exists, "torvalds should exist");
+        let user = client.validate_user("torvalds").await;
+        assert!(user.is_some(), "torvalds should exist");
+        assert_eq!(user.unwrap().login, "torvalds");
     }
 
     #[tokio::test]
@@ -822,10 +824,10 @@ mod tests {
         setup_crypto();
         let client = GitHubClient::new(token_from_env());
 
-        let exists = client
+        let user = client
             .validate_user("this-user-definitely-does-not-exist-12345")
             .await;
-        assert!(!exists, "Non-existent user should not be found");
+        assert!(user.is_none(), "Non-existent user should not be found");
     }
 
     #[tokio::test]
@@ -894,13 +896,39 @@ mod tests {
             number: 123,
         };
 
-        cache.set_result(ref_.clone(), true);
-        assert_eq!(cache.get(&ref_), Some(ValidationState::Valid));
+        let issue_data = ValidatedRefData::Issue(IssueOrPr {
+            typename: "Issue".to_string(),
+            number: 123,
+            title: "Test issue".to_string(),
+            state: "OPEN".to_string(),
+            state_reason: None,
+            merged: false,
+            is_draft: false,
+        });
+        cache.set_valid(ref_.clone(), Some(issue_data.clone()));
+        assert_eq!(
+            cache.get(&ref_),
+            Some(ValidationState::Valid(Some(issue_data)))
+        );
         assert!(cache.is_valid(&ref_));
     }
 
     #[test]
-    fn test_cache_set_result_invalid() {
+    fn test_cache_set_valid_no_data() {
+        let cache = GitHubValidationCache::new();
+        let ref_ = GitHubRef::Commit {
+            owner: "rust-lang".to_string(),
+            repo: "rust".to_string(),
+            sha: "abc1234".to_string(),
+        };
+
+        cache.set_valid(ref_.clone(), None);
+        assert_eq!(cache.get(&ref_), Some(ValidationState::Valid(None)));
+        assert!(cache.is_valid(&ref_));
+    }
+
+    #[test]
+    fn test_cache_set_invalid() {
         let cache = GitHubValidationCache::new();
         let ref_ = GitHubRef::Issue {
             owner: "rust-lang".to_string(),
@@ -908,7 +936,7 @@ mod tests {
             number: 123,
         };
 
-        cache.set_result(ref_.clone(), false);
+        cache.set_invalid(ref_.clone());
         assert_eq!(cache.get(&ref_), Some(ValidationState::Invalid));
         assert!(!cache.is_valid(&ref_));
     }
@@ -922,7 +950,16 @@ mod tests {
             number: 123,
         };
 
-        cache.set_result(ref_.clone(), true);
+        let issue_data = ValidatedRefData::Issue(IssueOrPr {
+            typename: "Issue".to_string(),
+            number: 123,
+            title: "Test issue".to_string(),
+            state: "OPEN".to_string(),
+            state_reason: None,
+            merged: false,
+            is_draft: false,
+        });
+        cache.set_valid(ref_.clone(), Some(issue_data));
         assert!(cache.is_valid(&ref_));
 
         cache.clear();
@@ -939,7 +976,11 @@ mod tests {
             username: "torvalds".to_string(),
         };
 
-        cache1.set_result(ref_.clone(), true);
+        let user_data = ValidatedRefData::User(MentionableUser {
+            login: "torvalds".to_string(),
+            name: Some("Linus Torvalds".to_string()),
+        });
+        cache1.set_valid(ref_.clone(), Some(user_data));
 
         // Both should see the same state
         assert!(cache1.is_valid(&ref_));

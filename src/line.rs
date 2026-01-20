@@ -25,6 +25,17 @@ pub struct CursorScreenPosition {
 
 impl Global for CursorScreenPosition {}
 
+/// Global state for hovered GitHub ref screen position, updated during Line paint.
+#[derive(Clone, Default, PartialEq)]
+pub struct HoveredRefScreenPosition {
+    /// Screen position of the hovered ref (absolute window coordinates).
+    pub position: Option<Point<Pixels>>,
+    /// Byte range of the hovered ref (used to match against Editor's tracked range).
+    pub byte_range: Option<Range<usize>>,
+}
+
+impl Global for HoveredRefScreenPosition {}
+
 /// (opening_start, opening_end, closing_start, closing_end) for collapsed markdown syntax.
 pub type HiddenRegion = (usize, usize, usize, usize);
 
@@ -70,6 +81,42 @@ impl CollapsedDisplayText {
 }
 
 /// Convert a visual position (index into display text, after prefix) to a buffer offset.
+/// Convert a buffer position to a visual index, accounting for hidden regions.
+/// This is the inverse of `visual_to_buffer_pos`.
+pub fn buffer_to_visual_pos(
+    buffer_pos: usize,
+    content_range: &Range<usize>,
+    heading_marker_len: usize,
+    hidden_regions: &[HiddenRegion],
+) -> usize {
+    if content_range.start >= content_range.end || buffer_pos <= content_range.start {
+        return 0;
+    }
+
+    let start = content_range.start + heading_marker_len;
+    let end = buffer_pos.min(content_range.end);
+
+    if hidden_regions.is_empty() {
+        return end.saturating_sub(start);
+    }
+
+    // Count visible characters from start to buffer_pos
+    let mut visible_count = 0usize;
+    for pos in start..end {
+        let is_hidden = hidden_regions.iter().any(
+            |&(opening_start, opening_end, closing_start, closing_end)| {
+                (pos >= opening_start && pos < opening_end)
+                    || (pos >= closing_start && pos < closing_end)
+            },
+        );
+        if !is_hidden {
+            visible_count += 1;
+        }
+    }
+
+    visible_count
+}
+
 pub fn visual_to_buffer_pos(
     visual_index: usize,
     content_range: &Range<usize>,
@@ -141,6 +188,10 @@ pub struct Line {
     truncate_width: Option<Pixels>,
     /// Optional prefix text and runs to prepend before the line content.
     prefix: Option<(String, Vec<TextRun>)>,
+    /// Byte ranges of GitHub refs on this line (for hover detection).
+    github_ref_ranges: Vec<Range<usize>>,
+    /// The currently hovered GitHub ref range (from Editor), if on this line.
+    hovered_ref_range: Option<Range<usize>>,
 }
 
 impl Line {
@@ -153,6 +204,8 @@ impl Line {
         selection_range: Option<Range<usize>>,
         code_highlights: Vec<(HighlightSpan, Rgba)>,
         base_path: Option<PathBuf>,
+        github_ref_ranges: Vec<Range<usize>>,
+        hovered_ref_range: Option<Range<usize>>,
     ) -> Self {
         let substitution = {
             let s = line.substitution_rope(&rope);
@@ -170,6 +223,8 @@ impl Line {
             substitution,
             truncate_width: None,
             prefix: None,
+            github_ref_ranges,
+            hovered_ref_range,
         }
     }
 
@@ -975,6 +1030,27 @@ impl Line {
         .size_full()
     }
 
+    /// Render an invisible element that sets the HoveredRefScreenPosition global during paint.
+    fn render_hovered_ref_position_tracker(
+        &self,
+        ref_visual_start: usize,
+        ref_byte_range: Range<usize>,
+        text_layout: gpui::TextLayout,
+    ) -> impl IntoElement {
+        canvas(
+            move |_bounds, _window, _cx| text_layout.position_for_index(ref_visual_start),
+            move |bounds, pos_result, _window: &mut Window, cx| {
+                let pos = pos_result.unwrap_or_else(|| point(bounds.origin.x, bounds.origin.y));
+                cx.set_global(HoveredRefScreenPosition {
+                    position: Some(pos),
+                    byte_range: Some(ref_byte_range.clone()),
+                });
+            },
+        )
+        .absolute()
+        .size_full()
+    }
+
     fn render_spacer_cursor(&self, char_offset: usize) -> impl IntoElement {
         let cursor_color = self.theme.cursor_color;
         let cursor_font = self.theme.text_font.clone();
@@ -1448,6 +1524,22 @@ impl RenderOnce for Line {
 
         let prefix_len = self.get_substitution().map(|s| s.len()).unwrap_or(0);
 
+        // Add hovered ref position tracker if this line contains the hovered ref
+        if let Some(ref hovered_range) = self.hovered_ref_range {
+            // Convert buffer position to visual index, accounting for hidden markdown syntax.
+            let ref_visual_start = buffer_to_visual_pos(
+                hovered_range.start,
+                &content_range_for_handlers,
+                heading_marker_len,
+                &hidden_regions,
+            ) + prefix_len;
+            text_container = text_container.child(self.render_hovered_ref_position_tracker(
+                ref_visual_start,
+                hovered_range.clone(),
+                text_layout.clone(),
+            ));
+        }
+
         {
             let layout_for_click = text_layout.clone();
             let content_range = content_range_for_handlers.clone();
@@ -1583,6 +1675,8 @@ impl RenderOnce for Line {
                 .map(|region| region.content_range.clone())
                 .collect();
 
+            let github_ref_ranges = self.github_ref_ranges.clone();
+
             text_container =
                 text_container.on_mouse_move(move |event: &MouseMoveEvent, window, cx| {
                     if event.pressed_button == Some(MouseButton::Left) {
@@ -1654,10 +1748,34 @@ impl RenderOnce for Line {
                         .iter()
                         .any(|range| buffer_offset >= range.start && buffer_offset < range.end);
 
+                    // Find if hovering over a GitHub ref
+                    let hovered_github_ref_range = github_ref_ranges
+                        .iter()
+                        .find(|range| buffer_offset >= range.start && buffer_offset < range.end)
+                        .cloned();
+
+                    // Calculate the screen position of the ref's start (not mouse position)
+                    let hovered_ref_position =
+                        hovered_github_ref_range.as_ref().and_then(|range| {
+                            // Convert ref's start byte offset to visual index
+                            let ref_visual_index = buffer_to_visual_pos(
+                                range.start,
+                                &content_range,
+                                heading_marker_len,
+                                &hidden_regions,
+                            );
+                            // Add prefix length to get absolute visual index
+                            let absolute_visual_index = prefix_len + ref_visual_index;
+                            // Get screen position for that index
+                            layout_for_move.position_for_index(absolute_visual_index)
+                        });
+
                     window.dispatch_action(
                         Box::new(DispatchEditorAction(EditorAction::UpdateHover {
                             over_checkbox: hovering_checkbox,
                             over_link: hovering_link_region,
+                            hovered_github_ref_range,
+                            hovered_ref_position,
                         })),
                         cx,
                     );
@@ -1696,6 +1814,90 @@ impl RenderOnce for Line {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_visual_to_buffer_pos_no_hidden() {
+        // Simple case: no hidden regions
+        let content_range = 10..30;
+        let hidden: Vec<HiddenRegion> = vec![];
+
+        // Visual index 0 -> buffer pos 10
+        assert_eq!(visual_to_buffer_pos(0, &content_range, 0, &hidden, 30), 10);
+        // Visual index 5 -> buffer pos 15
+        assert_eq!(visual_to_buffer_pos(5, &content_range, 0, &hidden, 30), 15);
+        // Visual index 20 -> buffer pos 30 (end)
+        assert_eq!(visual_to_buffer_pos(20, &content_range, 0, &hidden, 30), 30);
+    }
+
+    #[test]
+    fn test_visual_to_buffer_pos_with_hidden() {
+        // Content: "**bold** text" at buffer 0..13
+        // Hidden regions: 0..2 (opening **) and 6..8 (closing **)
+        let content_range = 0..13;
+        let hidden: Vec<HiddenRegion> = vec![(0, 2, 6, 8)];
+
+        // Visual "bold text" = 9 chars, buffer has 13
+        // Visual 0 -> cursor before first char -> buffer 0 (loop doesn't run)
+        assert_eq!(visual_to_buffer_pos(0, &content_range, 0, &hidden, 13), 0);
+        // Visual 1 -> after 'b' (first visible) -> counts 1 visible, stops at buffer 3
+        assert_eq!(visual_to_buffer_pos(1, &content_range, 0, &hidden, 13), 3);
+        // Visual 4 -> after "bold" -> buffer 6 (counts 4 visible: b,o,l,d at 2,3,4,5)
+        assert_eq!(visual_to_buffer_pos(4, &content_range, 0, &hidden, 13), 6);
+        // Visual 5 -> after space -> buffer 9 (skips hidden 6,7, counts space at 8)
+        assert_eq!(visual_to_buffer_pos(5, &content_range, 0, &hidden, 13), 9);
+    }
+
+    #[test]
+    fn test_buffer_to_visual_pos_no_hidden() {
+        // Simple case: no hidden regions
+        let content_range = 10..30;
+        let hidden: Vec<HiddenRegion> = vec![];
+
+        // Buffer pos 10 -> visual 0
+        assert_eq!(buffer_to_visual_pos(10, &content_range, 0, &hidden), 0);
+        // Buffer pos 15 -> visual 5
+        assert_eq!(buffer_to_visual_pos(15, &content_range, 0, &hidden), 5);
+        // Buffer pos 30 -> visual 20
+        assert_eq!(buffer_to_visual_pos(30, &content_range, 0, &hidden), 20);
+    }
+
+    #[test]
+    fn test_buffer_to_visual_pos_with_hidden() {
+        // Content: "**bold** text" at buffer 0..13
+        // Hidden regions: 0..2 (opening **) and 6..8 (closing **)
+        let content_range = 0..13;
+        let hidden: Vec<HiddenRegion> = vec![(0, 2, 6, 8)];
+
+        // Buffer 0 -> visual 0 (at start, before any visible char)
+        assert_eq!(buffer_to_visual_pos(0, &content_range, 0, &hidden), 0);
+        // Buffer 2 -> visual 0 (first visible char 'b')
+        assert_eq!(buffer_to_visual_pos(2, &content_range, 0, &hidden), 0);
+        // Buffer 6 -> visual 4 (after "bold", before hidden **)
+        assert_eq!(buffer_to_visual_pos(6, &content_range, 0, &hidden), 4);
+        // Buffer 8 -> visual 4 (after hidden **, space char)
+        assert_eq!(buffer_to_visual_pos(8, &content_range, 0, &hidden), 4);
+        // Buffer 9 -> visual 5 (space counted)
+        assert_eq!(buffer_to_visual_pos(9, &content_range, 0, &hidden), 5);
+    }
+
+    #[test]
+    fn test_buffer_visual_roundtrip() {
+        // Test that the functions are inverses (for visible positions)
+        let content_range = 0..20;
+        let hidden: Vec<HiddenRegion> = vec![(2, 4, 10, 12)]; // hide 2 ranges of 2 chars each
+
+        // For each visual index, converting to buffer and back should give same visual
+        for visual in 0..16 {
+            // 20 - 4 hidden = 16 visible
+            let buffer = visual_to_buffer_pos(visual, &content_range, 0, &hidden, 20);
+            let back = buffer_to_visual_pos(buffer, &content_range, 0, &hidden);
+            assert_eq!(
+                back, visual,
+                "roundtrip failed for visual {}: buffer={}, back={}",
+                visual, buffer, back
+            );
+        }
+    }
 
     #[test]
     fn test_collapsed_display_text_ranges() {
