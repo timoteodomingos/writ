@@ -196,7 +196,7 @@ fn main() {
 
                 if let Some(ctx) = github_context {
                     eprintln!("[writ] GitHub context: {}/{}", ctx.owner, ctx.repo);
-                    editor.update(cx, |editor, _| {
+                    editor.update(cx, |editor, _cx| {
                         editor.set_github_context(ctx);
                     });
                 } else {
@@ -207,7 +207,7 @@ fn main() {
                 if let Some(token) = github_token {
                     eprintln!("[writ] GitHub token provided ({} chars)", token.len());
                     let client = GitHubClient::new(token);
-                    editor.update(cx, |editor, _| {
+                    editor.update(cx, |editor, _cx| {
                         editor.set_github_client(client);
                     });
                 } else {

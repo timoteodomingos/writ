@@ -71,6 +71,15 @@ struct TabCycleCache {
 
 use crate::buffer::RenderSnapshot;
 
+/// The type of autocomplete trigger.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum AutocompleteTrigger {
+    /// Issue/PR autocomplete triggered by `#`.
+    Issue,
+    /// User autocomplete triggered by `@`.
+    User,
+}
+
 /// A suggestion from GitHub autocomplete.
 #[derive(Clone)]
 pub enum AutocompleteSuggestion {
@@ -82,6 +91,8 @@ pub enum AutocompleteSuggestion {
         /// Cached render snapshot for display text (e.g. "#123 PR: title").
         display_snapshot: RenderSnapshot,
     },
+    /// A GitHub user.
+    User { login: String, name: Option<String> },
 }
 
 impl AutocompleteSuggestion {
@@ -107,7 +118,9 @@ impl AutocompleteSuggestion {
 /// State for the autocomplete popup.
 #[derive(Clone)]
 pub struct AutocompleteState {
-    /// Byte offset where the trigger character (`#`) was typed.
+    /// The type of autocomplete (Issue or User).
+    pub trigger: AutocompleteTrigger,
+    /// Byte offset where the trigger character (`#` or `@`) was typed.
     pub trigger_offset: usize,
     /// The prefix typed after the trigger (e.g., "123" for `#123`).
     pub prefix: String,
@@ -1740,6 +1753,7 @@ impl Editor {
         self.github_validation_cache.clear();
         if let Some(client) = &self.github_client {
             client.clear_autocomplete_cache();
+            client.clear_user_cache();
         }
         let line_count = self.state.buffer.line_count();
         let (github_matches, _) = self.detect_links(0, line_count);
@@ -1907,19 +1921,38 @@ impl Editor {
             _ => return,
         };
 
-        let prefix = match &self.autocomplete {
-            Some(ac) => ac.prefix.clone(),
+        let (trigger, prefix) = match &self.autocomplete {
+            Some(ac) => (ac.trigger, ac.prefix.clone()),
             _ => return,
         };
 
+        let owner = context.owner.clone();
+        let repo = context.repo.clone();
+
+        match trigger {
+            AutocompleteTrigger::Issue => {
+                self.fetch_issue_suggestions(client, owner, repo, prefix, cx);
+            }
+            AutocompleteTrigger::User => {
+                self.fetch_user_suggestions(client, owner, repo, prefix, cx);
+            }
+        }
+    }
+
+    /// Fetch issue/PR suggestions (async).
+    fn fetch_issue_suggestions(
+        &mut self,
+        client: GitHubClient,
+        owner: String,
+        repo: String,
+        prefix: String,
+        cx: &mut Context<Self>,
+    ) {
         // Mark as loading and record that we're fetching for this prefix
         if let Some(ref mut ac) = self.autocomplete {
             ac.loading = true;
             ac.fetched_prefix = Some(prefix.clone());
         }
-
-        let owner = context.owner.clone();
-        let repo = context.repo.clone();
 
         cx.spawn(async move |weak, cx| {
             let issues = client
@@ -1931,8 +1964,8 @@ impl Editor {
                 .map(|issue| {
                     AutocompleteSuggestion::new_issue_or_pr(
                         issue.number,
-                        issue.title,
-                        issue.pull_request.is_some(),
+                        issue.title.clone(),
+                        issue.is_pr(),
                     )
                 })
                 .collect();
@@ -1942,17 +1975,19 @@ impl Editor {
                     editor.update(cx, |editor, cx| {
                         // Add fetched suggestions to validation cache
                         for suggestion in &suggestions {
-                            let AutocompleteSuggestion::IssueOrPr { number, .. } = suggestion;
-                            let github_ref = GitHubRef::Issue {
-                                owner: owner.clone(),
-                                repo: repo.clone(),
-                                number: *number,
-                            };
-                            editor.github_validation_cache.set_result(github_ref, true);
+                            if let AutocompleteSuggestion::IssueOrPr { number, .. } = suggestion {
+                                let github_ref = GitHubRef::Issue {
+                                    owner: owner.clone(),
+                                    repo: repo.clone(),
+                                    number: *number,
+                                };
+                                editor.github_validation_cache.set_result(github_ref, true);
+                            }
                         }
 
                         // Only update if autocomplete is still active with the same prefix
                         if let Some(ref mut ac) = editor.autocomplete
+                            && ac.trigger == AutocompleteTrigger::Issue
                             && ac.prefix == prefix
                         {
                             // Check if user's current input is a known valid issue
@@ -1979,6 +2014,54 @@ impl Editor {
                             final_suggestions.extend(suggestions.clone());
 
                             ac.suggestions = final_suggestions;
+                            ac.loading = false;
+                            ac.selected_index = 0;
+                            cx.notify();
+                        }
+                    });
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// Fetch user suggestions (async - uses GraphQL mentionableUsers).
+    fn fetch_user_suggestions(
+        &mut self,
+        client: GitHubClient,
+        owner: String,
+        repo: String,
+        prefix: String,
+        cx: &mut Context<Self>,
+    ) {
+        // Mark as loading
+        if let Some(ref mut ac) = self.autocomplete {
+            ac.loading = true;
+            ac.fetched_prefix = Some(prefix.clone());
+        }
+
+        cx.spawn(async move |weak, cx| {
+            let users = client
+                .users_matching_prefix(&owner, &repo, &prefix, 5)
+                .await;
+
+            let suggestions: Vec<AutocompleteSuggestion> = users
+                .into_iter()
+                .map(|u| AutocompleteSuggestion::User {
+                    login: u.login,
+                    name: u.name,
+                })
+                .collect();
+
+            let _ = cx.update(|cx| {
+                if let Some(editor) = weak.upgrade() {
+                    editor.update(cx, |editor, cx| {
+                        // Only update if autocomplete is still active with the same prefix
+                        if let Some(ref mut ac) = editor.autocomplete
+                            && ac.trigger == AutocompleteTrigger::User
+                            && ac.prefix == prefix
+                        {
+                            ac.suggestions = suggestions;
                             ac.loading = false;
                             ac.selected_index = 0;
                             cx.notify();
@@ -2220,6 +2303,69 @@ impl Editor {
         self.state.insert_text(text);
     }
 
+    /// Try to detect an autocomplete trigger at the given position in line_text.
+    /// Returns Some((trigger_type, trigger_offset, prefix)) if found.
+    fn detect_autocomplete_trigger(
+        line_text: &str,
+        line_start: usize,
+    ) -> Option<(AutocompleteTrigger, usize, String)> {
+        // Try each trigger character, preferring the rightmost one
+        let triggers = [
+            ('#', AutocompleteTrigger::Issue),
+            ('@', AutocompleteTrigger::User),
+        ];
+
+        let mut best_match: Option<(AutocompleteTrigger, usize, String)> = None;
+
+        for (trigger_char, trigger_type) in triggers {
+            if let Some(pos) = line_text.rfind(trigger_char) {
+                // Check word boundary
+                let is_at_word_boundary = pos == 0
+                    || line_text
+                        .as_bytes()
+                        .get(pos - 1)
+                        .is_none_or(|&b| b == b' ' || b == b'\t' || b == b'\n');
+
+                if !is_at_word_boundary {
+                    continue;
+                }
+
+                let prefix = line_text[pos + 1..].to_string();
+
+                // Validate prefix based on trigger type
+                let valid = match trigger_type {
+                    AutocompleteTrigger::Issue => {
+                        // # followed by whitespace is a heading, not an issue ref
+                        !prefix.starts_with(' ') && !prefix.starts_with('\t')
+                    }
+                    AutocompleteTrigger::User => {
+                        // @ prefix: alphanumeric and hyphens, not starting with hyphen
+                        prefix.is_empty()
+                            || (prefix.chars().all(|c| c.is_alphanumeric() || c == '-')
+                                && !prefix.starts_with('-'))
+                    }
+                };
+
+                if !valid {
+                    continue;
+                }
+
+                let trigger_offset = line_start + pos;
+
+                // Keep the rightmost valid trigger
+                if best_match
+                    .as_ref()
+                    .map(|(_, off, _)| trigger_offset > *off)
+                    .unwrap_or(true)
+                {
+                    best_match = Some((trigger_type, trigger_offset, prefix));
+                }
+            }
+        }
+
+        best_match
+    }
+
     /// Check if cursor is inside a GitHub ref and update autocomplete accordingly.
     /// Returns true if we should fetch suggestions.
     fn update_autocomplete_from_cursor(&mut self) -> bool {
@@ -2232,129 +2378,102 @@ impl Editor {
         let cursor = self.state.cursor().offset;
         let cursor_line = self.state.buffer.byte_to_line(cursor);
 
-        // Check if cursor is inside or at the end of a stored GitHub ref
+        // Check if cursor is inside or at the end of a stored GitHub issue ref
         if let Some(refs) = self.github_refs_by_line.get(&cursor_line) {
             for github_match in refs {
-                // Cursor is inside or at the end of this ref
-                if cursor >= github_match.byte_range.start && cursor <= github_match.byte_range.end
+                if cursor >= github_match.byte_range.start
+                    && cursor <= github_match.byte_range.end
+                    && let GitHubRef::Issue { number, .. } = &github_match.reference
                 {
-                    // Extract the prefix (digits after #)
-                    if let GitHubRef::Issue { number, .. } = &github_match.reference {
-                        let prefix = number.to_string();
-                        let trigger_offset = github_match.byte_range.start;
-
-                        // Check if prefix changed
-                        let prefix_changed = self
-                            .autocomplete
-                            .as_ref()
-                            .map(|ac| ac.prefix != prefix)
-                            .unwrap_or(true);
-
-                        if !prefix_changed {
-                            return false; // No change, no fetch needed
-                        }
-
-                        // Only fetch if we haven't already fetched for this prefix
-                        let already_fetched = self
-                            .autocomplete
-                            .as_ref()
-                            .and_then(|ac| ac.fetched_prefix.as_ref())
-                            == Some(&prefix);
-                        let should_fetch = !already_fetched;
-
-                        let old_state = self.autocomplete.take();
-                        self.autocomplete = Some(AutocompleteState {
-                            trigger_offset,
-                            prefix,
-                            suggestions: old_state
-                                .as_ref()
-                                .map(|ac| ac.suggestions.clone())
-                                .unwrap_or_default(),
-                            selected_index: old_state
-                                .as_ref()
-                                .map(|ac| ac.selected_index)
-                                .unwrap_or(0),
-                            loading: false,
-                            fetched_prefix: old_state.and_then(|ac| ac.fetched_prefix),
-                        });
-
-                        return should_fetch;
-                    }
+                    let prefix = number.to_string();
+                    let trigger_offset = github_match.byte_range.start;
+                    return self.set_autocomplete_state(
+                        AutocompleteTrigger::Issue,
+                        trigger_offset,
+                        prefix,
+                    );
                 }
             }
         }
 
-        // Check if cursor is after `#` followed by optional text (for text search)
-        // This enables autocomplete for `#`, `#123`, `#sometext`, etc.
+        // Detect trigger from raw text
         if cursor > 0 {
-            // Scan backwards to find a `#` at word boundary
             let line_start = self.state.buffer.line_to_byte(cursor_line);
             let line_text = self.state.buffer.slice_cow(line_start..cursor).into_owned();
 
-            // Find the last `#` that's at a word boundary
-            if let Some(hash_pos) = line_text.rfind('#') {
-                let hash_offset = line_start + hash_pos;
-
-                // Check that `#` is at word boundary (start of line or after whitespace)
-                let is_at_word_boundary = hash_pos == 0
-                    || line_text
-                        .as_bytes()
-                        .get(hash_pos - 1)
-                        .is_none_or(|&b| b == b' ' || b == b'\t' || b == b'\n');
-
-                if is_at_word_boundary {
-                    // Extract prefix (everything after `#` up to cursor)
-                    let prefix = line_text[hash_pos + 1..].to_string();
-
-                    // Don't trigger autocomplete if prefix starts with whitespace
-                    // (that's a heading, not an issue reference)
-                    if prefix.starts_with(' ') || prefix.starts_with('\t') {
-                        self.autocomplete = None;
-                        return false;
-                    }
-
-                    // Check if prefix changed
-                    let prefix_changed = self
-                        .autocomplete
-                        .as_ref()
-                        .map(|ac| ac.prefix != prefix)
-                        .unwrap_or(true);
-
-                    if !prefix_changed {
-                        return false; // No change, no fetch needed
-                    }
-
-                    let trigger_offset = hash_offset;
-
-                    // Only fetch if we haven't already fetched for this prefix
-                    let already_fetched = self
-                        .autocomplete
-                        .as_ref()
-                        .and_then(|ac| ac.fetched_prefix.as_ref())
-                        == Some(&prefix);
-                    let should_fetch = !already_fetched;
-
-                    let old_state = self.autocomplete.take();
-                    self.autocomplete = Some(AutocompleteState {
-                        trigger_offset,
-                        prefix,
-                        suggestions: old_state
-                            .as_ref()
-                            .map(|ac| ac.suggestions.clone())
-                            .unwrap_or_default(),
-                        selected_index: old_state.as_ref().map(|ac| ac.selected_index).unwrap_or(0),
-                        loading: false,
-                        fetched_prefix: old_state.and_then(|ac| ac.fetched_prefix),
-                    });
-
-                    return should_fetch;
-                }
+            if let Some((trigger, trigger_offset, prefix)) =
+                Self::detect_autocomplete_trigger(&line_text, line_start)
+            {
+                return self.set_autocomplete_state(trigger, trigger_offset, prefix);
             }
         }
 
         // Cursor not inside any ref - close autocomplete
         self.autocomplete = None;
         false
+    }
+
+    /// Update autocomplete state for a detected trigger.
+    /// Returns true if suggestions should be fetched/filtered.
+    fn set_autocomplete_state(
+        &mut self,
+        trigger: AutocompleteTrigger,
+        trigger_offset: usize,
+        prefix: String,
+    ) -> bool {
+        // Check if state actually changed
+        let changed = self
+            .autocomplete
+            .as_ref()
+            .map(|ac| ac.trigger != trigger || ac.prefix != prefix)
+            .unwrap_or(true);
+
+        if !changed {
+            return false;
+        }
+
+        // Preserve old state only if same trigger type
+        let old_state = self.autocomplete.take();
+        let same_trigger = old_state
+            .as_ref()
+            .map(|ac| ac.trigger == trigger)
+            .unwrap_or(false);
+
+        // For Issue trigger, check if we already fetched this prefix
+        let should_fetch = match trigger {
+            AutocompleteTrigger::Issue => {
+                let already_fetched = old_state
+                    .as_ref()
+                    .filter(|_| same_trigger)
+                    .and_then(|ac| ac.fetched_prefix.as_ref())
+                    == Some(&prefix);
+                !already_fetched
+            }
+            // User autocomplete uses pre-cached data, always "fetch" (filter)
+            AutocompleteTrigger::User => true,
+        };
+
+        self.autocomplete = Some(AutocompleteState {
+            trigger,
+            trigger_offset,
+            prefix,
+            suggestions: old_state
+                .as_ref()
+                .filter(|_| same_trigger)
+                .map(|ac| ac.suggestions.clone())
+                .unwrap_or_default(),
+            selected_index: old_state
+                .as_ref()
+                .filter(|_| same_trigger)
+                .map(|ac| ac.selected_index)
+                .unwrap_or(0),
+            loading: false,
+            fetched_prefix: old_state
+                .filter(|_| same_trigger)
+                .and_then(|ac| ac.fetched_prefix),
+        });
+
+        should_fetch
     }
 
     /// Render the autocomplete popup if active.
@@ -2420,28 +2539,42 @@ impl Editor {
                 let is_selected = i == ac.selected_index;
                 let is_first = i == 0;
                 let is_last = i == suggestion_count - 1;
-                let display_snapshot = match suggestion {
+
+                // Build display element based on suggestion type
+                let display_element: AnyElement = match suggestion {
                     AutocompleteSuggestion::IssueOrPr {
                         display_snapshot, ..
-                    } => display_snapshot,
+                    } => {
+                        // Use cached snapshot for display (includes #number and optional PR: prefix)
+                        let display_line = display_snapshot.line_markers(0);
+                        let display_inline_styles = display_snapshot.inline_styles_for_line(0);
+
+                        // 500px popup - 16px padding (px_2 * 2) = 484px available
+                        Line::new(
+                            display_line,
+                            display_snapshot.rope.clone(),
+                            usize::MAX, // no cursor
+                            display_inline_styles,
+                            line_theme.clone(),
+                            None,       // no selection
+                            Vec::new(), // no code highlights
+                            None,       // no base path
+                        )
+                        .truncate(px(484.0))
+                        .into_any_element()
+                    }
+                    AutocompleteSuggestion::User { login, name } => {
+                        // Plain text for users: "@login (Display Name)" or "@login"
+                        let text = match name {
+                            Some(n) => format!("@{} ({})", login, n),
+                            None => format!("@{}", login),
+                        };
+                        div()
+                            .text_color(theme.foreground)
+                            .child(text)
+                            .into_any_element()
+                    }
                 };
-
-                // Use cached snapshot for display (includes #number and optional PR: prefix)
-                let display_line = display_snapshot.line_markers(0);
-                let display_inline_styles = display_snapshot.inline_styles_for_line(0);
-
-                // 500px popup - 16px padding (px_2 * 2) = 484px available
-                let display_element = Line::new(
-                    display_line,
-                    display_snapshot.rope.clone(),
-                    usize::MAX, // no cursor
-                    display_inline_styles,
-                    line_theme.clone(),
-                    None,       // no selection
-                    Vec::new(), // no code highlights
-                    None,       // no base path
-                )
-                .truncate(px(484.0));
 
                 div()
                     .id(("autocomplete-item", i))
@@ -2528,6 +2661,7 @@ impl Editor {
         let suggestion = &ac.suggestions[ac.selected_index];
         let replacement = match suggestion {
             AutocompleteSuggestion::IssueOrPr { number, .. } => format!("#{}", number),
+            AutocompleteSuggestion::User { login, .. } => format!("@{}", login),
         };
 
         // Replace text from trigger_offset to current cursor with the replacement

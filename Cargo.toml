@@ -29,13 +29,12 @@ anyhow = "1"
 async-compat = "0.2"
 clap = { version = "4.5", features = ["derive", "env"] }
 futures = "0.3"
-gix = { version = "0.72", default-features = false }
+gix = { version = "0.77", default-features = false }
 gpui = "0.2"
 notify = "8.2"
-octocrab = "0.49.5"
 open = "5"
 regex = "1.12.2"
-reqwest = { version = "0.13", default-features = false, features = ["http2", "rustls"] }
+reqwest = { version = "0.13", default-features = false, features = ["http2", "rustls", "json"] }
 ropey = "1.6"
 rustls = { version = "0.23.36", features = ["ring"] }
 serde = { version = "1", features = ["derive"] }
