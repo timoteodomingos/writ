@@ -2723,14 +2723,28 @@ impl Editor {
         // Need a hovered ref
         let hovered_range = self.hovered_github_ref_range.as_ref()?;
 
-        // Find the actual GitHubRef from our stored refs
-        let github_ref = self.github_refs_by_line.values().flatten().find_map(|m| {
-            if &m.byte_range == hovered_range {
-                Some(&m.reference)
-            } else {
-                None
-            }
-        })?;
+        // Find the actual GitHubRef from our stored refs (check both regular refs and naked URLs)
+        let github_ref = self
+            .github_refs_by_line
+            .values()
+            .flatten()
+            .find_map(|m| {
+                if &m.byte_range == hovered_range {
+                    Some(&m.reference)
+                } else {
+                    None
+                }
+            })
+            .or_else(|| {
+                // Check naked URLs for GitHub refs
+                self.naked_urls_by_line.values().flatten().find_map(|u| {
+                    if &u.byte_range == hovered_range {
+                        u.github_ref.as_ref()
+                    } else {
+                        None
+                    }
+                })
+            })?;
 
         // Get position from stored mouse position
         let pos = self.hovered_ref_position?;
@@ -3546,7 +3560,7 @@ impl Render for Editor {
                 let mut inline_styles = snapshot.inline_styles_for_line(ix);
 
                 // Add GitHub reference links from pre-detected matches
-                let github_ref_ranges: Vec<Range<usize>> =
+                let mut github_ref_ranges: Vec<Range<usize>> =
                     if let Some(github_matches) = github_matches_by_line.get(&ix) {
                         let github_styles =
                             github_refs_to_styled_regions(github_matches, &github_cache);
@@ -3559,7 +3573,7 @@ impl Render for Editor {
                         Vec::new()
                     };
 
-                // Add naked URL links
+                // Add naked URL links (and include GitHub URLs in hover detection)
                 if let Some(naked_urls) = naked_urls_by_line.get(&ix) {
                     let url_styles = naked_urls_to_styled_regions(
                         naked_urls,
@@ -3567,6 +3581,13 @@ impl Render for Editor {
                         github_context.as_ref(),
                     );
                     inline_styles.extend(url_styles);
+
+                    // Add naked URLs with GitHub refs to hover detection
+                    for url in naked_urls {
+                        if url.github_ref.is_some() {
+                            github_ref_ranges.push(url.byte_range.clone());
+                        }
+                    }
                 }
 
                 inline_styles.sort_by_key(|s| s.full_range.start);
