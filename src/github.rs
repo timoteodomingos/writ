@@ -62,12 +62,68 @@ pub struct IssueOrPr {
     pub number: u64,
     pub title: String,
     pub state: String,
+    /// For issues: reason for closure (COMPLETED, NOT_PLANNED, REOPENED, or null)
+    #[serde(rename = "stateReason")]
+    pub state_reason: Option<String>,
+    /// For PRs: whether it was merged
+    #[serde(default)]
+    pub merged: bool,
+    /// For PRs: whether it's a draft
+    #[serde(rename = "isDraft", default)]
+    pub is_draft: bool,
+}
+
+/// Display status for an issue or PR.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IssueStatus {
+    /// Open issue or PR
+    Open,
+    /// Draft PR
+    Draft,
+    /// Merged PR
+    Merged,
+    /// Closed issue (completed) or closed PR (merged handled separately)
+    Closed,
+    /// Closed issue (not planned) or closed PR (not merged)
+    ClosedNotPlanned,
 }
 
 impl IssueOrPr {
     /// Returns true if this is a pull request (vs an issue).
     pub fn is_pr(&self) -> bool {
         self.typename == "PullRequest"
+    }
+
+    /// Get the display status for coloring.
+    pub fn status(&self) -> IssueStatus {
+        if self.is_pr() {
+            match self.state.as_str() {
+                "OPEN" if self.is_draft => IssueStatus::Draft,
+                "OPEN" => IssueStatus::Open,
+                "MERGED" => IssueStatus::Merged,
+                _ => IssueStatus::ClosedNotPlanned, // CLOSED PR (not merged)
+            }
+        } else {
+            match self.state.as_str() {
+                "OPEN" => IssueStatus::Open,
+                "CLOSED" => {
+                    match self.state_reason.as_deref() {
+                        Some("NOT_PLANNED") => IssueStatus::ClosedNotPlanned,
+                        _ => IssueStatus::Closed, // COMPLETED or other
+                    }
+                }
+                _ => IssueStatus::Open,
+            }
+        }
+    }
+
+    /// Get the unicode symbol for this issue/PR type.
+    pub fn symbol(&self) -> &'static str {
+        if self.is_pr() {
+            "⎇" // merge/branch symbol
+        } else {
+            "●" // filled circle
+        }
     }
 }
 
@@ -386,8 +442,8 @@ impl GitHubClient {
                 search(query: $query, type: ISSUE, first: $limit) {
                     nodes {
                         __typename
-                        ... on Issue { number title state }
-                        ... on PullRequest { number title state }
+                        ... on Issue { number title state stateReason }
+                        ... on PullRequest { number title state merged isDraft }
                     }
                 }
             }
@@ -422,15 +478,15 @@ impl GitHubClient {
                 repository(owner: $owner, name: $repo) {
                     issueOrPullRequest(number: $number) {
                         __typename
-                        ... on Issue { number title state }
-                        ... on PullRequest { number title state }
+                        ... on Issue { number title state stateReason }
+                        ... on PullRequest { number title state merged isDraft }
                     }
                 }
                 search(query: $query, type: ISSUE, first: $limit) {
                     nodes {
                         __typename
-                        ... on Issue { number title state }
-                        ... on PullRequest { number title state }
+                        ... on Issue { number title state stateReason }
+                        ... on PullRequest { number title state merged isDraft }
                     }
                 }
             }
@@ -453,10 +509,10 @@ impl GitHubClient {
         let mut results = Vec::new();
 
         // Add exact match first if it exists
-        if let Some(repo_data) = data.repository {
-            if let Some(issue) = repo_data.issue_or_pull_request {
-                results.push(issue);
-            }
+        if let Some(repo_data) = data.repository
+            && let Some(issue) = repo_data.issue_or_pull_request
+        {
+            results.push(issue);
         }
 
         // Add search results, deduplicating

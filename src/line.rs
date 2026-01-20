@@ -139,6 +139,8 @@ pub struct Line {
     substitution: Option<String>,
     /// When set, truncate text with ellipsis at this pixel width.
     truncate_width: Option<Pixels>,
+    /// Optional prefix text and runs to prepend before the line content.
+    prefix: Option<(String, Vec<TextRun>)>,
 }
 
 impl Line {
@@ -167,12 +169,19 @@ impl Line {
             base_path,
             substitution,
             truncate_width: None,
+            prefix: None,
         }
     }
 
     /// Enable truncation with ellipsis at the given pixel width.
     pub fn truncate(mut self, width: Pixels) -> Self {
         self.truncate_width = Some(width);
+        self
+    }
+
+    /// Add a prefix with styled text runs before the line content.
+    pub fn with_prefix(mut self, text: String, runs: Vec<TextRun>) -> Self {
+        self.prefix = Some((text, runs));
         self
     }
 
@@ -1072,7 +1081,18 @@ impl RenderOnce for Line {
             ));
         }
 
-        let (display_text, mut runs, collapsed_regions) = self.build_styled_content();
+        let (display_text, runs, collapsed_regions) = self.build_styled_content();
+
+        // Prepend prefix if set
+        let (display_text, mut runs) = if let Some((prefix_text, prefix_runs)) = &self.prefix {
+            let mut new_text = prefix_text.clone();
+            new_text.push_str(&display_text);
+            let mut new_runs = prefix_runs.clone();
+            new_runs.extend(runs);
+            (new_text, new_runs)
+        } else {
+            (display_text, runs)
+        };
 
         let display_text = if display_text.is_empty() {
             runs.push(self.text_run(1, self.line_font(), self.theme.text_color));

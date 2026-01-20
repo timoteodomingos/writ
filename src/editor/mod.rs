@@ -13,7 +13,7 @@ use std::sync::mpsc;
 use gpui::{
     AnyElement, App, Context, Corner, CursorStyle, DragMoveEvent, Empty, FocusHandle, Focusable,
     IntoElement, KeyDownEvent, ListAlignment, ListState, ModifiersChangedEvent, MouseButton,
-    ReadGlobal, Render, Window, anchored, div, font, list, point, prelude::*, px, rems,
+    ReadGlobal, Render, TextRun, Window, anchored, div, font, list, point, prelude::*, px, rems,
 };
 
 /// Marker type for text selection drag operations.
@@ -69,8 +69,6 @@ struct TabCycleCache {
     states: Vec<String>,
 }
 
-use crate::buffer::RenderSnapshot;
-
 /// The type of autocomplete trigger.
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum AutocompleteTrigger {
@@ -80,39 +78,30 @@ pub enum AutocompleteTrigger {
     User,
 }
 
+use crate::buffer::RenderSnapshot;
+use crate::github::IssueStatus;
+
+/// Create a RenderSnapshot from issue/PR title text for markdown rendering.
+fn render_snapshot_for_title(title: &str) -> RenderSnapshot {
+    let mut buffer: Buffer = title.parse().unwrap_or_default();
+    buffer.render_snapshot()
+}
+
 /// A suggestion from GitHub autocomplete.
 #[derive(Clone)]
 pub enum AutocompleteSuggestion {
     /// An issue or pull request.
     IssueOrPr {
         number: u64,
-        title: String,
-        is_pr: bool,
-        /// Cached render snapshot for display text (e.g. "#123 PR: title").
+        /// Unicode symbol (● for issue, ⎇ for PR)
+        symbol: String,
+        /// Status for coloring
+        status: IssueStatus,
+        /// Cached render snapshot for the title (markdown-rendered).
         display_snapshot: RenderSnapshot,
     },
     /// A GitHub user.
     User { login: String, name: Option<String> },
-}
-
-impl AutocompleteSuggestion {
-    /// Create a new issue/PR suggestion, parsing the display text as markdown.
-    fn new_issue_or_pr(number: u64, title: String, is_pr: bool) -> Self {
-        // Build display text with prefix: "#123 title" or "#123 PR: title"
-        let display_text = if is_pr {
-            format!("#{} PR: {}", number, title)
-        } else {
-            format!("#{} {}", number, title)
-        };
-        let mut buffer: Buffer = display_text.parse().unwrap_or_default();
-        let display_snapshot = buffer.render_snapshot();
-        Self::IssueOrPr {
-            number,
-            title,
-            is_pr,
-            display_snapshot,
-        }
-    }
 }
 
 /// State for the autocomplete popup.
@@ -1961,12 +1950,11 @@ impl Editor {
 
             let suggestions: Vec<AutocompleteSuggestion> = issues
                 .into_iter()
-                .map(|issue| {
-                    AutocompleteSuggestion::new_issue_or_pr(
-                        issue.number,
-                        issue.title.clone(),
-                        issue.is_pr(),
-                    )
+                .map(|issue| AutocompleteSuggestion::IssueOrPr {
+                    number: issue.number,
+                    symbol: issue.symbol().to_string(),
+                    status: issue.status(),
+                    display_snapshot: render_snapshot_for_title(&issue.title),
                 })
                 .collect();
 
@@ -2003,11 +1991,13 @@ impl Editor {
                                 {
                                     // Don't add if it's already in the suggestions
                                     if !suggestions.iter().any(|s| matches!(s, AutocompleteSuggestion::IssueOrPr { number, .. } if *number == num)) {
-                                        final_suggestions.push(AutocompleteSuggestion::new_issue_or_pr(
-                                            num,
-                                            String::new(),
-                                            false,
-                                        ));
+                                        // Fallback: we know the number is valid but don't have details
+                                        final_suggestions.push(AutocompleteSuggestion::IssueOrPr {
+                                            number: num,
+                                            symbol: "●".to_string(), // assume issue
+                                            status: IssueStatus::Open, // assume open
+                                            display_snapshot: render_snapshot_for_title(""),
+                                        });
                                     }
                                 }
                             }
@@ -2499,15 +2489,23 @@ impl Editor {
         // Get viewport bounds for fallback
         let viewport = self.list_state.viewport_bounds();
 
-        let popup_width = px(500.0);
+        // Fixed width for issues/PRs (needs truncation), dynamic for users
+        let popup_width = match ac.trigger {
+            AutocompleteTrigger::Issue => Some(px(500.0)),
+            AutocompleteTrigger::User => None, // auto-sized
+        };
         let popup_max_height = px(300.0);
         let gap = px(4.0);
 
-        // Clamp x to keep popup within content area
-        let content_right = cursor_screen_pos
-            .content_right_edge
-            .unwrap_or(viewport.origin.x + viewport.size.width);
-        let popup_x = cursor_pos.x.min(content_right - popup_width);
+        // Clamp x to keep popup within content area (only if fixed width)
+        let popup_x = if let Some(width) = popup_width {
+            let content_right = cursor_screen_pos
+                .content_right_edge
+                .unwrap_or(viewport.origin.x + viewport.size.width);
+            cursor_pos.x.min(content_right - width)
+        } else {
+            cursor_pos.x
+        };
 
         // Position Y below the cursor row, or flip above if not enough space below
         let line_height = self.config.line_height.to_pixels(window.rem_size());
@@ -2543,9 +2541,39 @@ impl Editor {
                 // Build display element based on suggestion type
                 let display_element: AnyElement = match suggestion {
                     AutocompleteSuggestion::IssueOrPr {
-                        display_snapshot, ..
+                        number,
+                        symbol,
+                        status,
+                        display_snapshot,
                     } => {
-                        // Use cached snapshot for display (includes #number and optional PR: prefix)
+                        // Color based on status
+                        let status_color = match status {
+                            IssueStatus::Open => theme.green,
+                            IssueStatus::Draft => theme.comment,
+                            IssueStatus::Merged | IssueStatus::Closed => theme.purple,
+                            IssueStatus::ClosedNotPlanned => theme.red,
+                        };
+
+                        // Build prefix: "● #123 " with colored runs
+                        let prefix_text = format!("{} #{} ", symbol, number);
+                        let text_font = line_theme.text_font.clone();
+                        let make_run = |len: usize, color: gpui::Rgba| TextRun {
+                            len,
+                            font: text_font.clone(),
+                            color: color.into(),
+                            background_color: None,
+                            underline: None,
+                            strikethrough: None,
+                        };
+
+                        let number_str = format!("#{} ", number);
+                        let prefix_runs = vec![
+                            make_run(symbol.len(), status_color),   // symbol
+                            make_run(1, theme.foreground),          // space
+                            make_run(number_str.len(), theme.cyan), // #123 + space
+                        ];
+
+                        // Use Line with prefix for markdown-rendered title
                         let display_line = display_snapshot.line_markers(0);
                         let display_inline_styles = display_snapshot.inline_styles_for_line(0);
 
@@ -2560,19 +2588,18 @@ impl Editor {
                             Vec::new(), // no code highlights
                             None,       // no base path
                         )
+                        .with_prefix(prefix_text, prefix_runs)
                         .truncate(px(484.0))
                         .into_any_element()
                     }
                     AutocompleteSuggestion::User { login, name } => {
-                        // Plain text for users: "@login (Display Name)" or "@login"
-                        let text = match name {
-                            Some(n) => format!("@{} ({})", login, n),
-                            None => format!("@{}", login),
-                        };
-                        div()
-                            .text_color(theme.foreground)
-                            .child(text)
-                            .into_any_element()
+                        // Styled text for users: cyan "@login" + dimmed "Display Name"
+                        let mut row = div().flex().flex_row().gap_1();
+                        row = row.child(div().text_color(theme.cyan).child(format!("@{}", login)));
+                        if let Some(n) = name {
+                            row = row.child(div().text_color(theme.comment).child(n.clone()));
+                        }
+                        row.into_any_element()
                     }
                 };
 
@@ -2580,7 +2607,7 @@ impl Editor {
                     .id(("autocomplete-item", i))
                     .px_2()
                     .py_1()
-                    .w(px(500.0))
+                    .when_some(popup_width, |d, w| d.w(w))
                     .cursor_pointer()
                     .when(is_first, |d| d.rounded_t_md())
                     .when(is_last, |d| d.rounded_b_md())
@@ -2626,7 +2653,7 @@ impl Editor {
                         .rounded_md()
                         .shadow_md()
                         .overflow_hidden()
-                        .w(px(500.0))
+                        .when_some(popup_width, |d, w| d.w(w))
                         .max_h(px(300.0))
                         .overflow_y_scroll()
                         .text_size(px(14.0))
