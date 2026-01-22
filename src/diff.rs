@@ -4,7 +4,8 @@
 //! 1. Snapshot the current buffer state (via RenderSnapshot)
 //! 2. Apply the new content to the buffer
 //! 3. Compute line-level hunks between old and new
-//! 4. Store DiffState for rendering ghost lines and accept/reject
+//! 4. For replacement hunks, compute word-level changes for precise highlighting
+//! 5. Store DiffState for rendering ghost lines and accept/reject
 
 use crate::buffer::RenderSnapshot;
 use imara_diff::{Algorithm, Diff, InternedInput};
@@ -17,6 +18,13 @@ pub enum HunkStatus {
     Pending,
 }
 
+/// A word-level change within a line.
+#[derive(Debug, Clone)]
+pub struct InlineChange {
+    /// Byte range within the line (relative to line start).
+    pub range: Range<usize>,
+}
+
 /// A single diff hunk representing a contiguous change.
 #[derive(Debug, Clone)]
 pub struct DiffHunk {
@@ -26,9 +34,16 @@ pub struct DiffHunk {
     pub new_lines: Range<usize>,
     /// Current status of this hunk.
     pub status: HunkStatus,
+    /// Word-level deletions within old lines, indexed by line offset within hunk.
+    /// Each entry is (line_offset, Vec<InlineChange>).
+    pub old_inline_changes: Vec<(usize, Vec<InlineChange>)>,
+    /// Word-level additions within new lines, indexed by line offset within hunk.
+    /// Each entry is (line_offset, Vec<InlineChange>).
+    pub new_inline_changes: Vec<(usize, Vec<InlineChange>)>,
 }
 
 /// State for an active diff review session.
+#[derive(Clone)]
 pub struct DiffState {
     /// Snapshot of the document before the agent edit.
     /// Used for rendering ghost lines with proper markdown styling.
@@ -64,8 +79,92 @@ impl DiffState {
         self.hunks.clear();
     }
 
-    /// Get the old line range for a hunk if it exists and overlaps with the given new line.
-    /// Returns (old_line_start, old_line_count) for rendering ghost lines.
+    /// Get the old text content for a hunk from the snapshot.
+    /// Returns the text that was deleted (to be restored on reject).
+    pub fn old_text_for_hunk(&self, index: usize) -> Option<String> {
+        let hunk = self.hunks.get(index)?;
+        if hunk.old_lines.is_empty() {
+            return Some(String::new());
+        }
+
+        let rope = &self.old_snapshot.rope;
+        let start_line = hunk.old_lines.start;
+        let end_line = hunk.old_lines.end;
+
+        // Get byte range for the old lines
+        let start_byte = rope.line_to_byte(start_line);
+        let end_byte = if end_line >= rope.len_lines() {
+            rope.len_bytes()
+        } else {
+            rope.line_to_byte(end_line)
+        };
+
+        Some(
+            rope.slice(rope.byte_to_char(start_byte)..rope.byte_to_char(end_byte))
+                .to_string(),
+        )
+    }
+
+    /// Find the hunk index that contains the given line (in the new buffer).
+    /// Returns None if the line is not part of any hunk.
+    pub fn hunk_at_line(&self, new_line: usize) -> Option<usize> {
+        for (idx, hunk) in self.hunks.iter().enumerate() {
+            if hunk.status == HunkStatus::Pending {
+                // Check if line is in the new_lines range (additions)
+                if hunk.new_lines.contains(&new_line) {
+                    return Some(idx);
+                }
+                // Also check if cursor is at the start of a pure deletion
+                // (ghost lines appear before new_lines.start)
+                if hunk.new_lines.is_empty() && hunk.new_lines.start == new_line {
+                    return Some(idx);
+                }
+            }
+        }
+        None
+    }
+
+    /// Reject a hunk by index.
+    /// Returns (old_text, new_line_range) - the old content to restore and where to put it.
+    /// After calling this, the caller should replace lines new_line_range with old_text,
+    /// then call `remove_hunk` to update the diff state.
+    pub fn reject_hunk_info(&self, index: usize) -> Option<(String, Range<usize>)> {
+        let hunk = self.hunks.get(index)?;
+        let old_text = self.old_text_for_hunk(index)?;
+        Some((old_text, hunk.new_lines.clone()))
+    }
+
+    /// Remove a hunk after it's been accepted or rejected.
+    /// Adjusts subsequent hunk line numbers based on the line delta.
+    pub fn remove_hunk(&mut self, index: usize, line_delta: isize) {
+        if index >= self.hunks.len() {
+            return;
+        }
+        self.hunks.remove(index);
+
+        // Adjust line numbers for subsequent hunks
+        if line_delta != 0 {
+            for hunk in &mut self.hunks[index..] {
+                if line_delta > 0 {
+                    hunk.new_lines.start += line_delta as usize;
+                    hunk.new_lines.end += line_delta as usize;
+                } else {
+                    let delta = (-line_delta) as usize;
+                    hunk.new_lines.start = hunk.new_lines.start.saturating_sub(delta);
+                    hunk.new_lines.end = hunk.new_lines.end.saturating_sub(delta);
+                }
+            }
+        }
+    }
+
+    /// Reject all pending hunks.
+    /// Returns the full old text to restore the entire document.
+    pub fn reject_all_text(&self) -> String {
+        self.old_snapshot.rope.to_string()
+    }
+
+    /// Get the old line range for a hunk if it should render ghost lines before this new line.
+    /// Returns the range of old lines to render as ghosts.
     pub fn ghost_lines_before(&self, new_line: usize) -> Option<Range<usize>> {
         for hunk in &self.hunks {
             if hunk.status == HunkStatus::Pending && hunk.new_lines.start == new_line {
@@ -83,21 +182,222 @@ impl DiffState {
             .iter()
             .any(|h| h.status == HunkStatus::Pending && h.new_lines.contains(&new_line))
     }
+
+    /// Get inline changes for an old line (ghost line) if any.
+    /// Returns byte ranges within the line that were deleted.
+    pub fn old_inline_changes(&self, old_line: usize) -> Option<&[InlineChange]> {
+        for hunk in &self.hunks {
+            if hunk.status == HunkStatus::Pending && hunk.old_lines.contains(&old_line) {
+                let line_offset = old_line - hunk.old_lines.start;
+                for (offset, changes) in &hunk.old_inline_changes {
+                    if *offset == line_offset {
+                        return Some(changes);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Get inline changes for a new line (addition) if any.
+    /// Returns byte ranges within the line that were added.
+    pub fn new_inline_changes(&self, new_line: usize) -> Option<&[InlineChange]> {
+        for hunk in &self.hunks {
+            if hunk.status == HunkStatus::Pending && hunk.new_lines.contains(&new_line) {
+                let line_offset = new_line - hunk.new_lines.start;
+                for (offset, changes) in &hunk.new_inline_changes {
+                    if *offset == line_offset {
+                        return Some(changes);
+                    }
+                }
+            }
+        }
+        None
+    }
 }
 
-/// Compute line-level hunks between old and new text.
+/// Normalize text for diffing: ensure consistent trailing newline.
+/// This prevents spurious diffs on the last line when one text has a trailing
+/// newline and the other doesn't.
+fn normalize_for_diff(text: &str) -> String {
+    if text.ends_with('\n') {
+        text.to_string()
+    } else {
+        format!("{}\n", text)
+    }
+}
+
+/// Compute line-level hunks between old and new text, with word-level detail for replacements.
 fn compute_line_hunks(old_text: &str, new_text: &str) -> Vec<DiffHunk> {
-    let input = InternedInput::new(old_text, new_text);
+    // Normalize trailing newlines to avoid spurious diffs on the last line.
+    // imara-diff includes newlines as part of each line, so "line3" vs "line3\n"
+    // would otherwise show as a change.
+    let old_normalized = normalize_for_diff(old_text);
+    let new_normalized = normalize_for_diff(new_text);
+
+    let old_lines: Vec<&str> = old_normalized.lines().collect();
+    let new_lines: Vec<&str> = new_normalized.lines().collect();
+
+    let input = InternedInput::new(old_normalized.as_str(), new_normalized.as_str());
     let mut diff = Diff::compute(Algorithm::Histogram, &input);
     diff.postprocess_lines(&input);
 
     diff.hunks()
-        .map(|hunk| DiffHunk {
-            old_lines: hunk.before.start as usize..hunk.before.end as usize,
-            new_lines: hunk.after.start as usize..hunk.after.end as usize,
-            status: HunkStatus::Pending,
+        .map(|hunk| {
+            let old_range = hunk.before.start as usize..hunk.before.end as usize;
+            let new_range = hunk.after.start as usize..hunk.after.end as usize;
+
+            // Compute word-level changes for replacement hunks
+            let (old_inline, new_inline) = if !old_range.is_empty() && !new_range.is_empty() {
+                compute_word_changes(&old_lines[old_range.clone()], &new_lines[new_range.clone()])
+            } else {
+                (vec![], vec![])
+            };
+
+            DiffHunk {
+                old_lines: old_range,
+                new_lines: new_range,
+                status: HunkStatus::Pending,
+                old_inline_changes: old_inline,
+                new_inline_changes: new_inline,
+            }
         })
         .collect()
+}
+
+/// Compute word-level changes between old and new line sets.
+/// Returns (old_changes, new_changes) where each is Vec<(line_offset, Vec<InlineChange>)>.
+fn compute_word_changes(
+    old_lines: &[&str],
+    new_lines: &[&str],
+) -> (
+    Vec<(usize, Vec<InlineChange>)>,
+    Vec<(usize, Vec<InlineChange>)>,
+) {
+    // Join lines for word-level diff
+    let old_text = old_lines.join("\n");
+    let new_text = new_lines.join("\n");
+
+    // Tokenize into words (keeping track of positions)
+    let old_tokens = tokenize_with_positions(&old_text);
+    let new_tokens = tokenize_with_positions(&new_text);
+
+    if old_tokens.is_empty() || new_tokens.is_empty() {
+        return (vec![], vec![]);
+    }
+
+    // Build word strings joined by newline for line-based diffing
+    let old_words: Vec<&str> = old_tokens.iter().map(|(s, _)| *s).collect();
+    let new_words: Vec<&str> = new_tokens.iter().map(|(s, _)| *s).collect();
+
+    let old_joined = old_words.join("\n");
+    let new_joined = new_words.join("\n");
+
+    // Diff treating each word as a "line"
+    let input = InternedInput::new(old_joined.as_str(), new_joined.as_str());
+    let mut diff = Diff::compute(Algorithm::Histogram, &input);
+    diff.postprocess_lines(&input);
+
+    // Collect deleted/added word positions
+    let mut old_deleted_ranges: Vec<Range<usize>> = vec![];
+    let mut new_added_ranges: Vec<Range<usize>> = vec![];
+
+    for hunk in diff.hunks() {
+        // hunk.before/after are line ranges, which correspond to word indices
+        for word_idx in hunk.before.start as usize..hunk.before.end as usize {
+            if let Some((_, range)) = old_tokens.get(word_idx) {
+                old_deleted_ranges.push(range.clone());
+            }
+        }
+        for word_idx in hunk.after.start as usize..hunk.after.end as usize {
+            if let Some((_, range)) = new_tokens.get(word_idx) {
+                new_added_ranges.push(range.clone());
+            }
+        }
+    }
+
+    // Convert absolute positions to per-line positions
+    let old_changes = ranges_to_per_line_changes(&old_text, old_lines, &old_deleted_ranges);
+    let new_changes = ranges_to_per_line_changes(&new_text, new_lines, &new_added_ranges);
+
+    (old_changes, new_changes)
+}
+
+/// Tokenize text into words with their byte positions.
+/// Returns Vec<(word, byte_range)>.
+fn tokenize_with_positions(text: &str) -> Vec<(&str, Range<usize>)> {
+    let mut tokens = vec![];
+    let mut start = None;
+
+    for (i, c) in text.char_indices() {
+        if c.is_alphanumeric() || c == '_' || c == '-' {
+            if start.is_none() {
+                start = Some(i);
+            }
+        } else if let Some(s) = start {
+            tokens.push((&text[s..i], s..i));
+            start = None;
+        }
+    }
+
+    // Handle last token
+    if let Some(s) = start {
+        tokens.push((&text[s..], s..text.len()));
+    }
+
+    tokens
+}
+
+/// Convert absolute byte ranges to per-line (line_offset, Vec<InlineChange>).
+fn ranges_to_per_line_changes(
+    full_text: &str,
+    lines: &[&str],
+    ranges: &[Range<usize>],
+) -> Vec<(usize, Vec<InlineChange>)> {
+    if ranges.is_empty() {
+        return vec![];
+    }
+
+    // Build line start offsets
+    let mut line_starts = vec![0usize];
+    let mut pos = 0;
+    for line in lines {
+        pos += line.len() + 1; // +1 for newline
+        line_starts.push(pos.min(full_text.len()));
+    }
+
+    // Group ranges by line
+    let mut per_line: Vec<(usize, Vec<InlineChange>)> = vec![];
+
+    for range in ranges {
+        // Find which line this range belongs to
+        for (line_idx, window) in line_starts.windows(2).enumerate() {
+            let line_start = window[0];
+            let line_end = window[1];
+
+            if range.start >= line_start && range.start < line_end {
+                let relative_range =
+                    (range.start - line_start)..(range.end - line_start).min(lines[line_idx].len());
+
+                // Find or create entry for this line
+                if let Some((_, changes)) = per_line.iter_mut().find(|(idx, _)| *idx == line_idx) {
+                    changes.push(InlineChange {
+                        range: relative_range,
+                    });
+                } else {
+                    per_line.push((
+                        line_idx,
+                        vec![InlineChange {
+                            range: relative_range,
+                        }],
+                    ));
+                }
+                break;
+            }
+        }
+    }
+
+    per_line
 }
 
 #[cfg(test)]
@@ -135,5 +435,59 @@ mod tests {
         assert_eq!(hunks.len(), 1);
         assert_eq!(hunks[0].old_lines, 1..2); // one line removed
         assert_eq!(hunks[0].new_lines, 1..2); // one line added
+    }
+
+    #[test]
+    fn test_word_level_changes() {
+        let old = "The Histogram algorithm was originally ported from git and has since undergone significant optimization.";
+        let new =
+            "The Histogram algorithm, originally ported from git, has been extensively optimized.";
+        let hunks = compute_line_hunks(&format!("{}\n", old), &format!("{}\n", new));
+
+        assert_eq!(hunks.len(), 1);
+        assert!(
+            !hunks[0].old_inline_changes.is_empty(),
+            "Should have old inline changes"
+        );
+        assert!(
+            !hunks[0].new_inline_changes.is_empty(),
+            "Should have new inline changes"
+        );
+
+        // Print what we found
+        eprintln!("Old inline changes: {:?}", hunks[0].old_inline_changes);
+        eprintln!("New inline changes: {:?}", hunks[0].new_inline_changes);
+    }
+
+    #[test]
+    fn test_identical_lines_no_hunks() {
+        let text = "line1\nline2\nline3\n";
+        let hunks = compute_line_hunks(text, text);
+        assert_eq!(hunks.len(), 0, "Identical text should produce no hunks");
+    }
+
+    #[test]
+    fn test_trailing_newline_difference() {
+        // Text with and without trailing newline - should produce no hunks
+        // because we normalize trailing newlines before diffing
+        let old = "line1\nline2\nline3";
+        let new = "line1\nline2\nline3\n";
+        let hunks = compute_line_hunks(old, new);
+        assert_eq!(
+            hunks.len(),
+            0,
+            "Trailing newline difference should not produce hunks"
+        );
+    }
+
+    #[test]
+    fn test_trailing_whitespace_difference() {
+        // Lines with trailing spaces - this IS a real content change
+        let old = "line1\nline2  \nline3\n";
+        let new = "line1\nline2\nline3\n";
+        let hunks = compute_line_hunks(old, new);
+        assert_eq!(hunks.len(), 1, "Trailing whitespace is a real change");
+        assert_eq!(hunks[0].old_lines, 1..2);
+        assert_eq!(hunks[0].new_lines, 1..2);
     }
 }

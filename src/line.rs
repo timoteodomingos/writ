@@ -196,9 +196,16 @@ pub struct Line {
     input_blocked: bool,
     /// Maximum width for line content. None means fill container.
     max_line_width: Option<Pixels>,
+    /// Optional background color for the entire line.
+    line_background: Option<Rgba>,
+    /// Byte ranges within the line to highlight more strongly (e.g., changed words).
+    inline_highlight_ranges: Vec<Range<usize>>,
+    /// Color for inline highlight ranges.
+    inline_highlight_color: Option<Rgba>,
 }
 
 impl Line {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         line: LineMarkers,
         rope: Rope,
@@ -212,6 +219,9 @@ impl Line {
         hovered_ref_range: Option<Range<usize>>,
         input_blocked: bool,
         max_line_width: Option<Pixels>,
+        line_background: Option<Rgba>,
+        inline_highlight_ranges: Vec<Range<usize>>,
+        inline_highlight_color: Option<Rgba>,
     ) -> Self {
         let substitution = {
             let s = line.substitution_rope(&rope);
@@ -233,6 +243,9 @@ impl Line {
             hovered_ref_range,
             input_blocked,
             max_line_width,
+            line_background,
+            inline_highlight_ranges,
+            inline_highlight_color,
         }
     }
 
@@ -395,6 +408,58 @@ impl Line {
         selection_range: Range<usize>,
     ) -> Vec<TextRun> {
         let selection_color: Hsla = self.theme.selection_color.into();
+        self.apply_background_to_runs(runs, &[selection_range], selection_color)
+    }
+
+    /// Apply inline highlight to runs.
+    /// The ranges are byte offsets within the line content.
+    fn apply_inline_highlight_to_runs(
+        &self,
+        runs: Vec<TextRun>,
+        display_text: &str,
+        highlight_color: Rgba,
+    ) -> Vec<TextRun> {
+        // Map byte ranges from line content to display text positions
+        // For now, use a simple approach: the content starts after markers
+        let content_start = self.line.content_start();
+        let line_start = self.line.range.start;
+
+        // Convert inline_highlight_ranges (relative to line start) to display positions
+        let display_ranges: Vec<Range<usize>> = self
+            .inline_highlight_ranges
+            .iter()
+            .filter_map(|range| {
+                // The range is relative to line content start
+                // We need to map it to display_text positions
+                let abs_start = line_start + range.start;
+                let abs_end = line_start + range.end;
+
+                // Check if the range is within content area
+                if abs_start >= content_start {
+                    let display_start = abs_start - content_start;
+                    let display_end = (abs_end - content_start).min(display_text.len());
+                    if display_start < display_text.len() {
+                        return Some(display_start..display_end);
+                    }
+                }
+                None
+            })
+            .collect();
+
+        self.apply_background_to_runs(runs, &display_ranges, highlight_color.into())
+    }
+
+    /// Apply background color to runs for the given ranges.
+    fn apply_background_to_runs(
+        &self,
+        runs: Vec<TextRun>,
+        ranges: &[Range<usize>],
+        bg_color: Hsla,
+    ) -> Vec<TextRun> {
+        if ranges.is_empty() {
+            return runs;
+        }
+
         let mut result = Vec::new();
         let mut pos = 0;
 
@@ -402,44 +467,60 @@ impl Line {
             let run_start = pos;
             let run_end = pos + run.len;
 
-            if run_end <= selection_range.start || run_start >= selection_range.end {
+            // Check if any range overlaps this run
+            let overlapping: Vec<_> = ranges
+                .iter()
+                .filter(|r| r.start < run_end && r.end > run_start)
+                .cloned()
+                .collect();
+
+            if overlapping.is_empty() {
                 result.push(run);
             } else {
-                let sel_start_in_run = selection_range.start.saturating_sub(run_start);
-                let sel_end_in_run = (selection_range.end - run_start).min(run.len);
+                // Split the run at range boundaries
+                let mut current_pos = run_start;
+                let mut remaining_len = run.len;
 
-                if sel_start_in_run > 0 {
-                    result.push(TextRun {
-                        len: sel_start_in_run,
-                        font: run.font.clone(),
-                        color: run.color,
-                        background_color: run.background_color,
-                        underline: run.underline,
-                        strikethrough: run.strikethrough,
-                    });
-                }
+                while remaining_len > 0 {
+                    // Find if we're inside a highlighted range
+                    let in_highlight = overlapping
+                        .iter()
+                        .any(|r| current_pos >= r.start && current_pos < r.end);
 
-                let selected_len = sel_end_in_run - sel_start_in_run;
-                if selected_len > 0 {
-                    result.push(TextRun {
-                        len: selected_len,
-                        font: run.font.clone(),
-                        color: run.color,
-                        background_color: Some(selection_color),
-                        underline: run.underline,
-                        strikethrough: run.strikethrough,
-                    });
-                }
+                    // Find next boundary
+                    let next_boundary = overlapping
+                        .iter()
+                        .filter_map(|r| {
+                            if r.start > current_pos && r.start < current_pos + remaining_len {
+                                Some(r.start)
+                            } else if r.end > current_pos && r.end < current_pos + remaining_len {
+                                Some(r.end)
+                            } else {
+                                None
+                            }
+                        })
+                        .min()
+                        .unwrap_or(current_pos + remaining_len);
 
-                if sel_end_in_run < run.len {
-                    result.push(TextRun {
-                        len: run.len - sel_end_in_run,
-                        font: run.font.clone(),
-                        color: run.color,
-                        background_color: run.background_color,
-                        underline: run.underline,
-                        strikethrough: run.strikethrough,
-                    });
+                    let segment_len = next_boundary - current_pos;
+                    if segment_len > 0 {
+                        result.push(TextRun {
+                            len: segment_len,
+                            font: run.font.clone(),
+                            color: run.color,
+                            background_color: if in_highlight {
+                                Some(bg_color)
+                            } else {
+                                run.background_color
+                            },
+                            underline: run.underline,
+                            strikethrough: run.strikethrough,
+                        });
+                        remaining_len -= segment_len;
+                        current_pos = next_boundary;
+                    } else {
+                        break;
+                    }
                 }
             }
 
@@ -1202,6 +1283,13 @@ impl RenderOnce for Line {
             runs
         };
 
+        // Apply inline highlighting (e.g., word-level diff changes)
+        if !self.inline_highlight_ranges.is_empty() {
+            if let Some(color) = self.inline_highlight_color {
+                runs = self.apply_inline_highlight_to_runs(runs, &display_text, color);
+            }
+        }
+
         // Truncate text with ellipsis if width is specified
         let shared_text: SharedString = if let Some(truncate_width) = self.truncate_width {
             let text_style = window.text_style();
@@ -1219,7 +1307,8 @@ impl RenderOnce for Line {
         let mut line_div = line_base(line_number, max_line_width)
             .relative()
             .flex()
-            .flex_row();
+            .flex_row()
+            .when_some(self.line_background, |d, bg| d.bg(bg));
 
         let mut spacers: Vec<gpui::Div> = Vec::new();
         let cursor_in_markers = self.cursor_in_marker_area();

@@ -120,8 +120,19 @@ impl AgentView {
             return;
         };
 
-        // Process all available events
-        while let Some(event) = client.try_recv() {
+        // If a write is pending from the ACP thread, block file watcher reloads
+        // This prevents the race where file watcher reloads before we process WriteFile
+        if client.is_write_pending() {
+            self.document_editor.update(cx, |editor, _cx| {
+                editor.set_pending_agent_write(true);
+            });
+        }
+
+        // Collect all available events first to avoid borrow issues
+        let events: Vec<_> = std::iter::from_fn(|| client.try_recv()).collect();
+
+        // Process collected events
+        for event in events {
             match event {
                 AcpEvent::Ready => {
                     // Agent connected, update chat with welcome message
@@ -146,61 +157,20 @@ impl AgentView {
                     self.awaiting_response = false;
                     self.chat_editor.update(cx, |editor, cx| {
                         editor.end_streaming(cx);
-                        // Add separator after response
-                        editor.append("\n\n---\n\n", cx);
+                        // Ensure consistent spacing after response
+                        let ends_n = editor.ends_with("\n");
+                        let ends_nn = editor.ends_with("\n\n");
+                        if !ends_n {
+                            editor.append("\n\n", cx);
+                        } else if !ends_nn {
+                            editor.append("\n", cx);
+                        }
                     });
                 }
                 AcpEvent::WriteFile { path, content } => {
-                    eprintln!(
-                        "[ACP] Write request for {}: {} bytes",
-                        path.display(),
-                        content.len()
-                    );
-
-                    // Check if this write is for the document we're editing
-                    let document_path =
-                        self.document_editor.read(cx).file_path().map(|p| p.clone());
-
-                    let is_our_file = document_path
-                        .as_ref()
-                        .map(|doc_path| {
-                            // Canonicalize both paths for comparison
-                            let doc_canonical = std::fs::canonicalize(doc_path).ok();
-                            let write_canonical = std::fs::canonicalize(&path).ok();
-                            match (doc_canonical, write_canonical) {
-                                (Some(a), Some(b)) => a == b,
-                                _ => doc_path == &path,
-                            }
-                        })
-                        .unwrap_or(false);
-
-                    if is_our_file {
-                        eprintln!("[ACP] Write matches our document, creating diff state");
-
-                        // 1. Snapshot current buffer state
-                        // 2. Get old text
-                        // 3. Apply new content
-                        // 4. Compute diff and store DiffState
-                        self.document_editor.update(cx, |editor, cx| {
-                            let old_snapshot = editor.render_snapshot();
-                            let old_text = editor.text();
-
-                            // Apply the new content
-                            editor.set_text(&content, cx);
-
-                            // Compute diff between old and new
-                            let diff_state = DiffState::compute(old_snapshot, &old_text, &content);
-
-                            eprintln!("[ACP] Diff computed: {} hunks", diff_state.hunks.len());
-
-                            // Store the diff state for rendering
-                            editor.set_diff_state(Some(diff_state));
-                        });
-                    } else {
-                        eprintln!(
-                            "[ACP] Write for different file (doc: {:?}, write: {:?})",
-                            document_path, path
-                        );
+                    self.apply_agent_content_change(&path, &content, cx);
+                    if let Some(client) = &self.acp_client {
+                        client.clear_pending_write();
                     }
                 }
                 AcpEvent::Error(msg) => {
@@ -209,6 +179,49 @@ impl AgentView {
                     });
                 }
             }
+        }
+    }
+
+    /// Apply a content change from the agent (edit or write).
+    /// Returns true if the change was applied, false if it was for a different file.
+    fn apply_agent_content_change(
+        &mut self,
+        path: &PathBuf,
+        content: &str,
+        cx: &mut Context<Self>,
+    ) -> bool {
+        let document_path = self.document_editor.read(cx).file_path().cloned();
+
+        let is_our_file = document_path
+            .as_ref()
+            .map(|doc_path| {
+                let doc_canonical = std::fs::canonicalize(doc_path).ok();
+                let change_canonical = std::fs::canonicalize(path).ok();
+                match (doc_canonical, change_canonical) {
+                    (Some(a), Some(b)) => a == b,
+                    _ => doc_path == path,
+                }
+            })
+            .unwrap_or(false);
+
+        if is_our_file {
+            self.document_editor.update(cx, |editor, cx| {
+                let old_snapshot = editor.render_snapshot();
+                let old_text = editor.text();
+
+                editor.set_text(content, cx);
+
+                let diff_state = DiffState::compute(old_snapshot, &old_text, content);
+                editor.set_diff_state(Some(diff_state));
+                editor.set_pending_agent_write(false);
+            });
+            true
+        } else {
+            eprintln!(
+                "[ACP] Change for different file (doc: {:?}, change: {:?})",
+                document_path, path
+            );
+            false
         }
     }
 
@@ -224,18 +237,34 @@ impl AgentView {
             return;
         }
 
+        // If we're still waiting for a response, cancel it first
+        if self.awaiting_response {
+            let _ = client.cancel();
+            self.chat_editor.update(cx, |editor, cx| {
+                editor.end_streaming(cx);
+                editor.append("\n\n*Cancelled*\n\n", cx);
+            });
+        }
+
+        // Get the file path from the document editor
+        let file_path = self.document_editor.read(cx).file_path().cloned();
+
         // Clear the prompt editor
         self.prompt_editor.update(cx, |editor, cx| {
             editor.set_text("", cx);
         });
 
-        // Add the user message to the chat
+        // Add the user message to the chat (with background highlighting)
         self.chat_editor.update(cx, |editor, cx| {
-            editor.append(&format!("**You:** {}\n\n", prompt.trim()), cx);
+            editor.append_user_message(&format!("{}\n\n", prompt.trim()), cx);
         });
 
-        // Send to the agent
-        if let Err(e) = client.send_prompt(prompt) {
+        // Mark as awaiting response before sending
+        self.awaiting_response = true;
+
+        // Send to the agent with file context
+        if let Err(e) = client.send_prompt(prompt, file_path) {
+            self.awaiting_response = false;
             self.chat_editor.update(cx, |editor, cx| {
                 editor.append(&format!("**Error:** Failed to send prompt: {}\n\n", e), cx);
             });

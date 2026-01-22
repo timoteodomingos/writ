@@ -447,6 +447,21 @@ impl BufferContent {
         self.text.len_bytes() == 0
     }
 
+    /// Check if buffer ends with the given string (efficient, doesn't copy whole buffer).
+    pub fn ends_with(&self, suffix: &str) -> bool {
+        let len = self.text.len_bytes();
+        let suffix_len = suffix.len();
+        if len < suffix_len {
+            return false;
+        }
+        let start = len - suffix_len;
+        self.text
+            .byte_slice(start..len)
+            .as_str()
+            .map(|s| s == suffix)
+            .unwrap_or(false)
+    }
+
     /// Get a single byte at the given offset, if it exists.
     pub fn byte_at(&self, offset: usize) -> Option<u8> {
         if offset >= self.text.len_bytes() {

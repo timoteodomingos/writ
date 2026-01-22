@@ -17,8 +17,8 @@ static NEXT_EDITOR_ID: AtomicUsize = AtomicUsize::new(0);
 
 use gpui::{
     AnyElement, App, Context, Corner, CursorStyle, DragMoveEvent, Empty, FocusHandle, Focusable,
-    IntoElement, KeyDownEvent, ListAlignment, ListState, ModifiersChangedEvent, MouseButton,
-    ReadGlobal, Render, TextRun, Window, anchored, div, font, list, point, prelude::*, px,
+    Hsla, IntoElement, KeyDownEvent, ListAlignment, ListState, ModifiersChangedEvent, MouseButton,
+    ReadGlobal, Render, Rgba, TextRun, Window, anchored, div, font, list, point, prelude::*, px,
 };
 
 /// Marker type for text selection drag operations.
@@ -44,8 +44,9 @@ use crate::cursor::{Cursor, Selection};
 use crate::diff::DiffState;
 use crate::github::{GitHubClient, GitHubValidationCache, IssueOrPr, IssueStatus};
 use crate::inline::{
-    GitHubContext, GitHubRef, NakedUrl, RawGitHubMatch, detect_github_references_in_line,
-    detect_naked_urls, github_refs_to_styled_regions, naked_urls_to_styled_regions,
+    GitHubContext, GitHubRef, NakedUrl, RawGitHubMatch, StyledRegion,
+    detect_github_references_in_line, detect_naked_urls, github_refs_to_styled_regions,
+    naked_urls_to_styled_regions,
 };
 use crate::line::{Line, LineTheme};
 use crate::paste::{PasteContext, transform_paste};
@@ -1693,6 +1694,13 @@ pub struct Editor {
     /// Diff state for reviewing agent edits. When set, the editor shows
     /// inline diff decorations (ghost lines for deletions, green highlights for additions).
     diff_state: Option<DiffState>,
+    /// When true, an agent write is pending and file watcher reloads should be blocked.
+    /// This prevents the race condition where file watcher reloads the new content
+    /// before we can capture the old content for diffing.
+    pending_agent_write: bool,
+    /// Line ranges that are user messages (for chat editor background highlighting).
+    /// Each range is start_line..end_line (exclusive).
+    user_message_lines: Vec<Range<usize>>,
 }
 
 impl Editor {
@@ -1741,6 +1749,8 @@ impl Editor {
             is_primary: true, // Default to primary; secondary editors should call set_primary(false)
             instance_id: NEXT_EDITOR_ID.fetch_add(1, Ordering::Relaxed),
             diff_state: None,
+            pending_agent_write: false,
+            user_message_lines: Vec::new(),
         }
     }
 
@@ -1769,6 +1779,102 @@ impl Editor {
     /// Get a reference to the current diff state, if any.
     pub fn diff_state(&self) -> Option<&DiffState> {
         self.diff_state.as_ref()
+    }
+
+    /// Accept the hunk at the current cursor position.
+    /// Since changes are already applied, just remove the hunk from diff state.
+    pub fn accept_current_hunk(&mut self, cx: &mut Context<Self>) {
+        let cursor_line = self.state.buffer.byte_to_line(self.state.selection.head);
+
+        if let Some(ref mut diff_state) = self.diff_state {
+            if let Some(hunk_idx) = diff_state.hunk_at_line(cursor_line) {
+                // Accept = just remove the hunk (changes already applied)
+                diff_state.remove_hunk(hunk_idx, 0);
+
+                // If no more hunks, clear diff state entirely
+                if diff_state.hunks.is_empty() {
+                    self.diff_state = None;
+                }
+                cx.notify();
+            }
+        }
+    }
+
+    /// Accept all pending hunks.
+    pub fn accept_all_hunks(&mut self, cx: &mut Context<Self>) {
+        if self.diff_state.is_some() {
+            self.diff_state = None;
+            cx.notify();
+        }
+    }
+
+    /// Reject the hunk at the current cursor position.
+    /// Restores the old content from the snapshot.
+    pub fn reject_current_hunk(&mut self, cx: &mut Context<Self>) {
+        let cursor_line = self.state.buffer.byte_to_line(self.state.selection.head);
+
+        // Need to extract info before mutating
+        let reject_info = if let Some(ref diff_state) = self.diff_state {
+            if let Some(hunk_idx) = diff_state.hunk_at_line(cursor_line) {
+                diff_state
+                    .reject_hunk_info(hunk_idx)
+                    .map(|info| (hunk_idx, info))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if let Some((hunk_idx, (old_text, new_line_range))) = reject_info {
+            // Replace the new lines with the old content
+            let start_byte = self.state.buffer.line_to_byte(new_line_range.start);
+            let end_byte = if new_line_range.end >= self.state.buffer.line_count() {
+                self.state.buffer.len_bytes()
+            } else {
+                self.state.buffer.line_to_byte(new_line_range.end)
+            };
+
+            // Replace the new content with old content
+            let cursor_before = self.state.selection.head;
+            self.state
+                .buffer
+                .replace(start_byte..end_byte, &old_text, cursor_before);
+
+            // Calculate line delta for adjusting subsequent hunks
+            let old_lines = old_text.chars().filter(|c| *c == '\n').count();
+            let new_line_count = new_line_range.len();
+            let line_delta = old_lines as isize - new_line_count as isize;
+
+            // Update diff state
+            if let Some(ref mut diff_state) = self.diff_state {
+                diff_state.remove_hunk(hunk_idx, line_delta);
+
+                if diff_state.hunks.is_empty() {
+                    self.diff_state = None;
+                }
+            }
+
+            // Move cursor to start of restored content
+            self.state.selection = Selection::new(start_byte, start_byte);
+            cx.notify();
+        }
+    }
+
+    /// Reject all pending hunks, restoring the entire old document.
+    pub fn reject_all_hunks(&mut self, cx: &mut Context<Self>) {
+        if let Some(ref diff_state) = self.diff_state {
+            let old_text = diff_state.reject_all_text();
+            self.set_text(&old_text, cx);
+            self.diff_state = None;
+            cx.notify();
+        }
+    }
+
+    /// Set the pending agent write flag.
+    /// When true, file watcher reloads are blocked to prevent race conditions.
+    pub fn set_pending_agent_write(&mut self, pending: bool) {
+        self.pending_agent_write = pending;
     }
 
     /// Set the GitHub context for autolink detection.
@@ -2219,6 +2325,16 @@ impl Editor {
 
     /// Reload the file from disk, replacing buffer contents.
     fn reload_file(&mut self, cx: &mut Context<Self>) {
+        // Don't reload while reviewing agent changes - the diff state would be lost
+        if self.diff_state.is_some() {
+            return;
+        }
+
+        // Don't reload if an agent write is pending - we need to capture the old content first
+        if self.pending_agent_write {
+            return;
+        }
+
         let Some(path) = &self.file_path else { return };
 
         if let Some(last_save_mtime) = self.last_save_mtime
@@ -2255,6 +2371,11 @@ impl Editor {
     /// Returns true if the buffer is empty.
     pub fn is_empty(&self) -> bool {
         self.state.buffer.len_bytes() == 0
+    }
+
+    /// Check if buffer ends with the given string (efficient, doesn't copy whole buffer).
+    pub fn ends_with(&self, suffix: &str) -> bool {
+        self.state.buffer.ends_with(suffix)
     }
 
     /// Find the nearest heading above or at the given line.
@@ -2319,6 +2440,28 @@ impl Editor {
         let new_end = self.state.buffer.len_bytes();
         self.state.selection = Selection::new(new_end, new_end);
         cx.notify();
+    }
+
+    /// Append a user message to the end of the buffer, tracking its line range
+    /// for background highlighting. Trailing empty lines are not included in the range.
+    pub fn append_user_message(&mut self, text: &str, cx: &mut Context<Self>) {
+        let line_count_before = self.state.buffer.line_count();
+        self.append(text, cx);
+
+        // The content we just added spans from the old last line to (new_count - trailing_blanks)
+        let content_lines = text.trim_end().lines().count();
+        // Content starts at line_count_before - 1 (the old empty last line)
+        let start_line = line_count_before.saturating_sub(1);
+        let end_line = start_line + content_lines;
+
+        if end_line > start_line {
+            self.user_message_lines.push(start_line..end_line);
+        }
+    }
+
+    /// Check if a line is part of a user message.
+    pub fn is_user_message_line(&self, line: usize) -> bool {
+        self.user_message_lines.iter().any(|r| r.contains(&line))
     }
 
     /// Append text and scroll to keep the cursor visible.
@@ -2658,6 +2801,9 @@ impl Editor {
                             None,       // no hovered ref in popup
                             true,       // input blocked in popup
                             None,       // no max width in popup
+                            None,       // no line background
+                            Vec::new(), // no inline highlight ranges
+                            None,       // no inline highlight color
                         )
                         .with_prefix(prefix_text, prefix_runs)
                         .truncate(px(484.0))
@@ -2860,6 +3006,9 @@ impl Editor {
                     None,       // no hovered ref in popup
                     true,       // input blocked in popup
                     None,       // no max width in popup
+                    None,       // no line background
+                    Vec::new(), // no inline highlight ranges
+                    None,       // no inline highlight color
                 )
                 .with_prefix(prefix_text, prefix_runs)
                 .truncate(px(484.0))
@@ -3062,6 +3211,17 @@ impl Editor {
         let extend = keystroke.modifiers.shift;
 
         match keystroke.key.as_str() {
+            // Diff accept/reject keybindings - must come before unguarded backspace/enter
+            "backspace"
+                if (keystroke.modifiers.control || keystroke.modifiers.platform)
+                    && self.diff_state.is_some() =>
+            {
+                if keystroke.modifiers.shift {
+                    self.reject_all_hunks(cx);
+                } else {
+                    self.reject_current_hunk(cx);
+                }
+            }
             "backspace" => {
                 self.delete_backward();
             }
@@ -3097,6 +3257,17 @@ impl Editor {
                 };
                 self.move_cursor(new_cursor, extend);
                 self.scroll_to_cursor_pending = true;
+            }
+            // Diff accept keybinding - must come before unguarded enter
+            "enter"
+                if (keystroke.modifiers.control || keystroke.modifiers.platform)
+                    && self.diff_state.is_some() =>
+            {
+                if keystroke.modifiers.shift {
+                    self.accept_all_hunks(cx);
+                } else {
+                    self.accept_current_hunk(cx);
+                }
             }
             "enter" => {
                 if keystroke.modifiers.shift && keystroke.modifiers.alt {
@@ -3545,6 +3716,34 @@ impl Render for Editor {
             monospace_char_width,
             line_height: self.config.line_height,
         };
+
+        // Compute diff colors for line backgrounds and inline highlights
+        let diff_deleted_bg: Rgba = {
+            let mut c: Hsla = theme.red.into();
+            c.a = 0.05;
+            c.into()
+        };
+        let diff_added_bg: Rgba = {
+            let mut c: Hsla = theme.green.into();
+            c.a = 0.05;
+            c.into()
+        };
+        let diff_deleted_inline: Rgba = {
+            let mut c: Hsla = theme.red.into();
+            c.a = 0.25;
+            c.into()
+        };
+        let diff_added_inline: Rgba = {
+            let mut c: Hsla = theme.green.into();
+            c.a = 0.25;
+            c.into()
+        };
+        let user_message_bg: Rgba = {
+            let mut c: Hsla = theme.purple.into();
+            c.a = 0.05;
+            c.into()
+        };
+
         // Only show cursor and selection when this editor is focused and input is not blocked
         let is_focused = self.focus_handle.is_focused(window);
         let show_cursor = is_focused && !self.input_blocked;
@@ -3567,9 +3766,9 @@ impl Render for Editor {
         let cursor_line_changed = self.last_cursor_line != Some(cursor_line);
         self.last_cursor_line = Some(cursor_line);
 
-        // When scroll is requested (e.g., typing), check if cursor line is near
-        // the bottom edge and scroll to provide buffer for line height growth.
-        if self.scroll_to_cursor_pending {
+        // When scroll is requested (e.g., typing) or in streaming mode,
+        // check if cursor line is near the bottom edge and scroll.
+        if self.scroll_to_cursor_pending || self.streaming_mode {
             self.scroll_to_cursor_pending = false;
             let scroll_buffer = self.config.line_height.to_pixels(window.rem_size());
             if let Some(cursor_bounds) = self.list_state.bounds_for_item(cursor_line) {
@@ -3606,6 +3805,8 @@ impl Render for Editor {
         let padding_bottom = self.config.padding_bottom;
         let max_line_width = self.config.max_line_width;
         let snapshot = self.state.buffer.render_snapshot();
+        let diff_state = self.diff_state.clone();
+        let user_message_lines = self.user_message_lines.clone();
 
         let github_cache = self.github_validation_cache.clone();
         let github_context = self.github_context.clone();
@@ -3625,15 +3826,68 @@ impl Render for Editor {
                     );
                     return div().into_any_element();
                 }
-                let line = snapshot.line_markers(ix);
-                let mut inline_styles = snapshot.inline_styles_for_line(ix);
 
-                // Add GitHub reference links from pre-detected matches
+                // Helper to build a Line element from a snapshot
+                let build_line = |snap: &RenderSnapshot,
+                                  line_idx: usize,
+                                  extra_styles: Vec<StyledRegion>,
+                                  github_ref_ranges: Vec<Range<usize>>,
+                                  hovered_ref_range: Option<Range<usize>>,
+                                  line_background: Option<Rgba>,
+                                  inline_highlight_ranges: Vec<Range<usize>>,
+                                  inline_highlight_color: Option<Rgba>,
+                                  block_input: bool|
+                 -> Line {
+                    let line_markers = snap.line_markers(line_idx);
+                    let mut inline_styles = snap.inline_styles_for_line(line_idx);
+                    inline_styles.extend(extra_styles);
+                    inline_styles.sort_by_key(|s| s.full_range.start);
+
+                    let code_highlights: Vec<_> = snap
+                        .code_highlights_for_line(line_idx)
+                        .iter()
+                        .map(|span| {
+                            (
+                                span.clone(),
+                                theme_for_highlights.color_for_highlight(span.highlight_id),
+                            )
+                        })
+                        .collect();
+
+                    Line::new(
+                        line_markers,
+                        snap.rope.clone(),
+                        if block_input {
+                            usize::MAX
+                        } else {
+                            visual_cursor_offset
+                        },
+                        inline_styles,
+                        line_theme_for_list.clone(),
+                        if block_input {
+                            None
+                        } else {
+                            selection_range.clone()
+                        },
+                        code_highlights,
+                        base_path.clone(),
+                        github_ref_ranges,
+                        hovered_ref_range,
+                        block_input || input_blocked,
+                        max_line_width,
+                        line_background,
+                        inline_highlight_ranges,
+                        inline_highlight_color,
+                    )
+                };
+
+                // Collect GitHub reference links and URLs for this line
+                let mut extra_styles = Vec::new();
                 let mut github_ref_ranges: Vec<Range<usize>> =
                     if let Some(github_matches) = github_matches_by_line.get(&ix) {
                         let github_styles =
                             github_refs_to_styled_regions(github_matches, &github_cache);
-                        inline_styles.extend(github_styles);
+                        extra_styles.extend(github_styles);
                         github_matches
                             .iter()
                             .map(|m| m.byte_range.clone())
@@ -3642,16 +3896,14 @@ impl Render for Editor {
                         Vec::new()
                     };
 
-                // Add naked URL links (and include GitHub URLs in hover detection)
                 if let Some(naked_urls) = naked_urls_by_line.get(&ix) {
                     let url_styles = naked_urls_to_styled_regions(
                         naked_urls,
                         &github_cache,
                         github_context.as_ref(),
                     );
-                    inline_styles.extend(url_styles);
+                    extra_styles.extend(url_styles);
 
-                    // Add naked URLs with GitHub refs to hover detection
                     for url in naked_urls {
                         if url.github_ref.is_some() {
                             github_ref_ranges.push(url.byte_range.clone());
@@ -3659,42 +3911,93 @@ impl Render for Editor {
                     }
                 }
 
-                inline_styles.sort_by_key(|s| s.full_range.start);
-                let code_highlights: Vec<_> = snapshot
-                    .code_highlights_for_line(ix)
-                    .iter()
-                    .map(|span| {
-                        (
-                            span.clone(),
-                            theme_for_highlights.color_for_highlight(span.highlight_id),
-                        )
-                    })
-                    .collect();
+                let hovered_ref_on_this_line = hovered_github_ref_range.as_ref().and_then(|hr| {
+                    if github_ref_ranges.iter().any(|r| r == hr) {
+                        Some(hr.clone())
+                    } else {
+                        None
+                    }
+                });
 
-                // Check if the hovered ref is on this line
-                let hovered_ref_on_this_line: Option<Range<usize>> =
-                    hovered_github_ref_range.as_ref().and_then(|hr| {
-                        if github_ref_ranges.iter().any(|r| r == hr) {
-                            Some(hr.clone())
-                        } else {
-                            None
-                        }
-                    });
+                // Determine line background and inline highlight colors
+                let is_addition = diff_state
+                    .as_ref()
+                    .map(|ds| ds.is_addition(ix))
+                    .unwrap_or(false);
+                let is_user_message = user_message_lines.iter().any(|r| r.contains(&ix));
 
-                let line_element = Line::new(
-                    line,
-                    snapshot.rope.clone(),
-                    visual_cursor_offset,
-                    inline_styles,
-                    line_theme_for_list.clone(),
-                    selection_range.clone(),
-                    code_highlights,
-                    base_path.clone(),
+                let line_bg = if is_addition {
+                    Some(diff_added_bg)
+                } else if is_user_message {
+                    Some(user_message_bg)
+                } else {
+                    None
+                };
+
+                // Get inline diff ranges for this line (word-level changes)
+                let inline_highlight_ranges: Vec<Range<usize>> = diff_state
+                    .as_ref()
+                    .and_then(|ds| ds.new_inline_changes(ix))
+                    .map(|changes| changes.iter().map(|c| c.range.clone()).collect())
+                    .unwrap_or_default();
+                let inline_highlight_color = if !inline_highlight_ranges.is_empty() {
+                    Some(diff_added_inline)
+                } else {
+                    None
+                };
+
+                // Build the main line element
+                let line_element = build_line(
+                    &snapshot,
+                    ix,
+                    extra_styles,
                     github_ref_ranges,
                     hovered_ref_on_this_line,
-                    input_blocked,
-                    max_line_width,
+                    line_bg,
+                    inline_highlight_ranges,
+                    inline_highlight_color,
+                    false, // don't block input for main lines
                 );
+
+                // Check for ghost lines (deleted lines from old snapshot) before this line
+                let ghost_line_elements: Vec<_> = if let Some(ds) = diff_state.as_ref() {
+                    if let Some(old_line_range) = ds.ghost_lines_before(ix) {
+                        old_line_range
+                            .filter_map(|old_ix| {
+                                if old_ix >= ds.old_snapshot.line_count() {
+                                    return None;
+                                }
+                                // Get inline diff ranges for this ghost line
+                                let ghost_inline_ranges: Vec<Range<usize>> = ds
+                                    .old_inline_changes(old_ix)
+                                    .map(|changes| {
+                                        changes.iter().map(|c| c.range.clone()).collect()
+                                    })
+                                    .unwrap_or_default();
+                                let ghost_inline_color = if !ghost_inline_ranges.is_empty() {
+                                    Some(diff_deleted_inline)
+                                } else {
+                                    None
+                                };
+                                Some(build_line(
+                                    &ds.old_snapshot,
+                                    old_ix,
+                                    Vec::new(),
+                                    Vec::new(),
+                                    None,
+                                    Some(diff_deleted_bg), // ghost line background
+                                    ghost_inline_ranges,
+                                    ghost_inline_color,
+                                    true, // block input for ghost lines
+                                ))
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    }
+                } else {
+                    Vec::new()
+                };
 
                 // Add top padding to first line, bottom padding to last line
                 let is_first = ix == 0;
@@ -3702,6 +4005,7 @@ impl Render for Editor {
                 div()
                     .when(is_first, |d| d.pt(padding_top))
                     .when(is_last, |d| d.pb(padding_bottom))
+                    .children(ghost_line_elements)
                     .child(line_element)
                     .into_any_element()
             })
