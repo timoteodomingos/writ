@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use gpui::Rems;
+use gpui::{Pixels, Rems, px};
 
 use super::theme::{DEFAULT_CODE_FONT, DEFAULT_TEXT_FONT, EditorTheme};
 
@@ -29,10 +29,14 @@ pub struct EditorConfig {
     pub base_path: Option<PathBuf>,
     /// Horizontal padding (left and right).
     pub padding_x: Rems,
-    /// Vertical padding (top and bottom).
-    pub padding_y: Rems,
+    /// Top padding (before first line).
+    pub padding_top: Rems,
+    /// Bottom padding (after last line).
+    pub padding_bottom: Rems,
     /// Line height for text lines.
     pub line_height: Rems,
+    /// Maximum width for line content. None means fill container.
+    pub max_line_width: Option<Pixels>,
 }
 
 impl Default for EditorConfig {
@@ -43,8 +47,10 @@ impl Default for EditorConfig {
             code_font: DEFAULT_CODE_FONT.to_string(),
             base_path: None,
             padding_x: Rems(0.0),
-            padding_y: Rems(0.0),
+            padding_top: Rems(1.6),
+            padding_bottom: Rems(4.8),
             line_height: Rems(1.6),
+            max_line_width: Some(px(800.0)),
         }
     }
 }

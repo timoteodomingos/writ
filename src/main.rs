@@ -4,9 +4,10 @@ use std::time::Duration;
 use clap::Parser;
 use gpui::{
     Application, Bounds, Entity, FocusHandle, Focusable, KeyBinding, Point, Rems, Size, Timer,
-    Window, WindowBounds, WindowDecorations, WindowOptions, div, prelude::*,
+    Window, WindowBounds, WindowDecorations, WindowOptions, div, prelude::*, px,
 };
 use writ::{
+    agent_view::{AgentView, ToggleChatPanel},
     buffer::Buffer,
     config::Config,
     demo::{DemoStep, DemoTiming, demo_script},
@@ -77,12 +78,12 @@ fn run_demo(editor: Entity<Editor>, cx: &mut gpui::App) {
 
 pub struct Root {
     focus_handle: FocusHandle,
-    editor: Entity<Editor>,
+    agent_view: Entity<AgentView>,
     theme: EditorTheme,
 }
 
 impl Render for Root {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         window_shadow(self.theme.clone()).child(
             div()
                 .id("root")
@@ -99,11 +100,16 @@ impl Render for Root {
                 .on_action(|Quit, _, cx| {
                     cx.quit();
                 })
+                .on_action(cx.listener(|this, _: &ToggleChatPanel, _window, cx| {
+                    this.agent_view.update(cx, |view, cx| {
+                        view.toggle_chat_panel(cx);
+                    });
+                }))
                 .flex()
                 .flex_col()
                 .size_full()
                 .overflow_hidden()
-                .child(self.editor.clone()),
+                .child(self.agent_view.clone()),
         )
     }
 }
@@ -149,6 +155,9 @@ fn main() {
             KeyBinding::new("ctrl-w", CloseWindow, None),
             KeyBinding::new("cmd-w", CloseWindow, None),
             KeyBinding::new("cmd-q", Quit, None),
+            // Toggle chat panel with Cmd+Shift+A (or Ctrl+Shift+A on Linux)
+            KeyBinding::new("cmd-shift-a", ToggleChatPanel, None),
+            KeyBinding::new("ctrl-shift-a", ToggleChatPanel, None),
         ]);
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
@@ -177,16 +186,21 @@ fn main() {
                     code_font: cli_config.code_font.clone(),
                     base_path: file_path.parent().map(|p| p.to_path_buf()),
                     padding_x: Rems(2.0),
-                    padding_y: Rems(1.6),
+                    padding_top: Rems(1.6),
+                    padding_bottom: Rems(4.8),
                     line_height: Rems(1.6),
+                    max_line_width: Some(px(800.0)),
                 };
 
                 // Extract GitHub config before borrowing cx mutably
                 let github_repo = cli_config.github_repo.clone();
                 let github_token = cli_config.github_token.clone();
 
-                // Create editor with file content and config
-                let editor = cx.new(|cx| Editor::with_config(&content, editor_config, cx));
+                // Create the agent view (contains document editor + chat panel)
+                let agent_view = cx.new(|cx| AgentView::new(&content, editor_config, cx));
+
+                // Get the document editor from the agent view for configuration
+                let document_editor = agent_view.read(cx).document_editor().clone();
 
                 // Set up GitHub context for autolink detection
                 // Priority: CLI arg/env var > auto-detect from .git/config
@@ -197,7 +211,7 @@ fn main() {
 
                 if let Some(ctx) = github_context {
                     eprintln!("[writ] GitHub context: {}/{}", ctx.owner, ctx.repo);
-                    editor.update(cx, |editor, _cx| {
+                    document_editor.update(cx, |editor, _cx| {
                         editor.set_github_context(ctx);
                     });
                 } else {
@@ -208,7 +222,7 @@ fn main() {
                 if let Some(token) = github_token {
                     eprintln!("[writ] GitHub token provided ({} chars)", token.len());
                     let client = GitHubClient::new(token);
-                    editor.update(cx, |editor, _cx| {
+                    document_editor.update(cx, |editor, _cx| {
                         editor.set_github_client(client);
                     });
                 } else {
@@ -217,20 +231,20 @@ fn main() {
 
                 // Set up file watching for external changes
                 let watch_path = file_path.clone();
-                editor.update(cx, |editor, cx| {
+                document_editor.update(cx, |editor, cx| {
                     editor.watch_file(watch_path, cx);
                 });
 
-                // Focus the editor so it receives keyboard input
-                editor.focus_handle(cx).focus(window);
+                // Focus the document editor so it receives keyboard input
+                document_editor.focus_handle(cx).focus(window);
 
                 // Start demo if in demo mode
                 if demo_mode {
                     // Block user input during demo
-                    editor.update(cx, |editor, _| {
+                    document_editor.update(cx, |editor, _| {
                         editor.set_input_blocked(true);
                     });
-                    run_demo(editor.clone(), cx);
+                    run_demo(document_editor.clone(), cx);
                 }
 
                 cx.new(|cx| {
@@ -246,7 +260,7 @@ fn main() {
 
                     Root {
                         focus_handle: cx.focus_handle(),
-                        editor,
+                        agent_view,
                         theme,
                     }
                 })

@@ -9,12 +9,16 @@ pub use theme::EditorTheme;
 use std::collections::HashMap;
 use std::ops::Range;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc;
+
+/// Counter for generating unique editor instance IDs.
+static NEXT_EDITOR_ID: AtomicUsize = AtomicUsize::new(0);
 
 use gpui::{
     AnyElement, App, Context, Corner, CursorStyle, DragMoveEvent, Empty, FocusHandle, Focusable,
     IntoElement, KeyDownEvent, ListAlignment, ListState, ModifiersChangedEvent, MouseButton,
-    ReadGlobal, Render, TextRun, Window, anchored, div, font, list, point, prelude::*, px, rems,
+    ReadGlobal, Render, TextRun, Window, anchored, div, font, list, point, prelude::*, px,
 };
 
 /// Marker type for text selection drag operations.
@@ -1682,6 +1686,11 @@ pub struct Editor {
     autocomplete: Option<AutocompleteState>,
     /// Pending autocomplete fetch (for debouncing).
     autocomplete_debounce_task: Option<gpui::Task<()>>,
+    /// Whether this is the primary editor that updates global state (status bar, title bar).
+    /// Only one editor should have this set to true at a time.
+    is_primary: bool,
+    /// Unique instance ID for element IDs to prevent GPUI element caching conflicts.
+    instance_id: usize,
 }
 
 impl Editor {
@@ -1727,7 +1736,15 @@ impl Editor {
             github_refs_by_line: HashMap::new(),
             autocomplete: None,
             autocomplete_debounce_task: None,
+            is_primary: true, // Default to primary; secondary editors should call set_primary(false)
+            instance_id: NEXT_EDITOR_ID.fetch_add(1, Ordering::Relaxed),
         }
+    }
+
+    /// Set whether this editor is the primary editor that updates global state.
+    /// Only the primary editor should update StatusBarInfo and FileInfo globals.
+    pub fn set_primary(&mut self, is_primary: bool) {
+        self.is_primary = is_primary;
     }
 
     /// Set the GitHub context for autolink detection.
@@ -2615,6 +2632,8 @@ impl Editor {
                             None,       // no base path
                             Vec::new(), // no github refs in popup
                             None,       // no hovered ref in popup
+                            true,       // input blocked in popup
+                            None,       // no max width in popup
                         )
                         .with_prefix(prefix_text, prefix_runs)
                         .truncate(px(484.0))
@@ -2815,6 +2834,8 @@ impl Editor {
                     None,       // no base path
                     Vec::new(), // no github refs in popup
                     None,       // no hovered ref in popup
+                    true,       // input blocked in popup
+                    None,       // no max width in popup
                 )
                 .with_prefix(prefix_text, prefix_runs)
                 .truncate(px(484.0))
@@ -3390,23 +3411,21 @@ impl Focusable for Editor {
 
 impl Render for Editor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        eprintln!(
-            "[render] called, autocomplete={:?}",
-            self.autocomplete.as_ref().map(|ac| ac.suggestions.len())
-        );
-
         let buffer_version = self.state.buffer.version();
         if buffer_version != self.last_synced_version {
             self.last_synced_version = buffer_version;
             self.sync_list_state(cx);
         }
 
-        let file_info = FileInfo::global(cx);
-        if file_info.dirty != self.state.buffer.is_dirty() {
-            cx.set_global(FileInfo {
-                path: file_info.path.clone(),
-                dirty: self.state.buffer.is_dirty(),
-            });
+        // Only primary editor updates global file info (dirty state for title bar)
+        if self.is_primary {
+            let file_info = FileInfo::global(cx);
+            if file_info.dirty != self.state.buffer.is_dirty() {
+                cx.set_global(FileInfo {
+                    path: file_info.path.clone(),
+                    dirty: self.state.buffer.is_dirty(),
+                });
+            }
         }
 
         // Update status bar info
@@ -3452,17 +3471,20 @@ impl Render for Editor {
             self.fetch_autocomplete_suggestions_debounced(cx);
         }
 
-        let new_status_bar_info = StatusBarInfo {
-            context_markers,
-            heading_level,
-            cursor_line: cursor_line + 1, // 1-indexed
-            cursor_col: cursor_col + 1,   // 1-indexed
-            total_lines,
-            first_visible_line,
-            last_visible_line,
-        };
-        if new_status_bar_info != *StatusBarInfo::global(cx) {
-            cx.set_global(new_status_bar_info);
+        // Only primary editor updates global status bar info
+        if self.is_primary {
+            let new_status_bar_info = StatusBarInfo {
+                context_markers,
+                heading_level,
+                cursor_line: cursor_line + 1, // 1-indexed
+                cursor_col: cursor_col + 1,   // 1-indexed
+                total_lines,
+                first_visible_line,
+                last_visible_line,
+            };
+            if new_status_bar_info != *StatusBarInfo::global(cx) {
+                cx.set_global(new_status_bar_info);
+            }
         }
 
         let theme = self.config.theme.clone();
@@ -3499,11 +3521,20 @@ impl Render for Editor {
             monospace_char_width,
             line_height: self.config.line_height,
         };
+        // Only show cursor and selection when this editor is focused and input is not blocked
+        let is_focused = self.focus_handle.is_focused(window);
+        let show_cursor = is_focused && !self.input_blocked;
         let cursor_offset = self.state.selection.head;
-        let selection_range = if self.state.selection.is_collapsed() {
-            None
-        } else {
+        let selection_range = if show_cursor && !self.state.selection.is_collapsed() {
             Some(self.state.selection.range())
+        } else {
+            None
+        };
+        // Pass usize::MAX to hide cursor visually when not focused or input blocked
+        let visual_cursor_offset = if show_cursor {
+            cursor_offset
+        } else {
+            usize::MAX
         };
 
         let base_path = self.config.base_path.clone();
@@ -3547,15 +3578,29 @@ impl Render for Editor {
 
         let line_theme_for_list = line_theme.clone();
         let theme_for_highlights = self.config.theme.clone();
-        let line_height = self.config.line_height;
+        let padding_top = self.config.padding_top;
+        let padding_bottom = self.config.padding_bottom;
+        let max_line_width = self.config.max_line_width;
         let snapshot = self.state.buffer.render_snapshot();
 
         let github_cache = self.github_validation_cache.clone();
         let github_context = self.github_context.clone();
         let hovered_github_ref_range = self.hovered_github_ref_range.clone();
+        let input_blocked = self.input_blocked;
 
-        let line_list = div().id("line-list").size_full().child(
+        let editor_id = self.instance_id;
+        let line_list = div().id(("line-list", editor_id)).size_full().child(
             list(self.list_state.clone(), move |ix, _window, _cx| {
+                // Bounds check: ensure line index is valid for this snapshot
+                if ix >= snapshot.line_count() {
+                    eprintln!(
+                        "[writ] list callback: ix {} >= line_count {}, rope_len {}",
+                        ix,
+                        snapshot.line_count(),
+                        snapshot.rope.len_bytes()
+                    );
+                    return div().into_any_element();
+                }
                 let line = snapshot.line_markers(ix);
                 let mut inline_styles = snapshot.inline_styles_for_line(ix);
 
@@ -3615,7 +3660,7 @@ impl Render for Editor {
                 let line_element = Line::new(
                     line,
                     snapshot.rope.clone(),
-                    cursor_offset,
+                    visual_cursor_offset,
                     inline_styles,
                     line_theme_for_list.clone(),
                     selection_range.clone(),
@@ -3623,14 +3668,16 @@ impl Render for Editor {
                     base_path.clone(),
                     github_ref_ranges,
                     hovered_ref_on_this_line,
+                    input_blocked,
+                    max_line_width,
                 );
 
                 // Add top padding to first line, bottom padding to last line
                 let is_first = ix == 0;
                 let is_last = ix == snapshot.line_count().saturating_sub(1);
                 div()
-                    .when(is_first, |d| d.pt(line_height))
-                    .when(is_last, |d| d.pb(rems(4.8)))
+                    .when(is_first, |d| d.pt(padding_top))
+                    .when(is_last, |d| d.pb(padding_bottom))
                     .child(line_element)
                     .into_any_element()
             })
@@ -3638,7 +3685,7 @@ impl Render for Editor {
         );
 
         div()
-            .id("editor")
+            .id(("editor", editor_id))
             .track_focus(&self.focus_handle)
             .key_context("Editor")
             .on_key_down(cx.listener(Self::on_key_down))
@@ -3648,9 +3695,22 @@ impl Render for Editor {
                     editor.handle_action(&action.0, cx);
                 },
             ))
+            // IMPORTANT: Use capture phase to focus this editor BEFORE child elements
+            // (Line components) handle mouse events. This ensures DispatchEditorAction
+            // from Line click handlers will be routed to THIS editor.
+            // Don't focus if input is blocked (read-only mode).
+            .capture_any_mouse_down(cx.listener(
+                |editor, _event: &gpui::MouseDownEvent, window, _cx| {
+                    if !editor.input_blocked {
+                        editor.focus_handle.focus(window);
+                    }
+                },
+            ))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|editor, event: &gpui::MouseDownEvent, window, cx| {
+                    // Focus already handled in capture phase above
+
                     if editor.input_blocked {
                         return;
                     }

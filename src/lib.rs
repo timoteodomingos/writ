@@ -36,8 +36,10 @@
 //! editor.update(cx, |e, cx| e.end_streaming(cx));
 //! ```
 
+pub use agent_view::{AgentView, ToggleChatPanel};
 pub use editor::{Direction, Editor, EditorAction, EditorConfig, EditorTheme};
 
+pub mod agent_view;
 pub mod buffer;
 pub mod config;
 pub mod cursor;

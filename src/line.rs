@@ -192,6 +192,10 @@ pub struct Line {
     github_ref_ranges: Vec<Range<usize>>,
     /// The currently hovered GitHub ref range (from Editor), if on this line.
     hovered_ref_range: Option<Range<usize>>,
+    /// When true, don't dispatch click actions (read-only mode).
+    input_blocked: bool,
+    /// Maximum width for line content. None means fill container.
+    max_line_width: Option<Pixels>,
 }
 
 impl Line {
@@ -206,6 +210,8 @@ impl Line {
         base_path: Option<PathBuf>,
         github_ref_ranges: Vec<Range<usize>>,
         hovered_ref_range: Option<Range<usize>>,
+        input_blocked: bool,
+        max_line_width: Option<Pixels>,
     ) -> Self {
         let substitution = {
             let s = line.substitution_rope(&rope);
@@ -225,6 +231,8 @@ impl Line {
             prefix: None,
             github_ref_ranges,
             hovered_ref_range,
+            input_blocked,
+            max_line_width,
         }
     }
 
@@ -1098,18 +1106,20 @@ impl Line {
     }
 }
 
-fn line_base(line_number: usize) -> gpui::Stateful<gpui::Div> {
-    div()
-        .id(("line", line_number))
-        .max_w(px(800.0))
-        .w_full()
-        .mx_auto()
+fn line_base(line_number: usize, max_width: Option<Pixels>) -> gpui::Stateful<gpui::Div> {
+    let d = div().id(("line", line_number)).w_full();
+    match max_width {
+        Some(w) => d.max_w(w).mx_auto(),
+        None => d,
+    }
 }
 
 impl RenderOnce for Line {
     fn render(self, window: &mut Window, _cx: &mut App) -> impl IntoElement {
         let line_number = self.line.line_number;
         let line_range = self.line.range.clone();
+        let input_blocked = self.input_blocked;
+        let max_line_width = self.max_line_width;
 
         let standalone_image = self.standalone_image_url().map(|url| {
             let source = self.resolve_image_source(url);
@@ -1133,28 +1143,33 @@ impl RenderOnce for Line {
             && !self.cursor_on_line()
             && !self.selection_on_line()
         {
-            return line_base(line_number).child(img(source).max_w_full().on_mouse_down(
-                MouseButton::Left,
-                move |event: &MouseDownEvent, window, cx| {
-                    if event.modifiers.control || event.modifiers.platform {
+            return line_base(line_number, max_line_width).child(
+                img(source).max_w_full().on_mouse_down(
+                    MouseButton::Left,
+                    move |event: &MouseDownEvent, window, cx| {
+                        if input_blocked {
+                            return;
+                        }
+                        if event.modifiers.control || event.modifiers.platform {
+                            window.dispatch_action(
+                                Box::new(DispatchEditorAction(EditorAction::OpenLink {
+                                    url: open_url.clone(),
+                                })),
+                                cx,
+                            );
+                            return;
+                        }
                         window.dispatch_action(
-                            Box::new(DispatchEditorAction(EditorAction::OpenLink {
-                                url: open_url.clone(),
+                            Box::new(DispatchEditorAction(EditorAction::Click {
+                                offset: line_end,
+                                shift: event.modifiers.shift,
+                                click_count: event.click_count,
                             })),
                             cx,
                         );
-                        return;
-                    }
-                    window.dispatch_action(
-                        Box::new(DispatchEditorAction(EditorAction::Click {
-                            offset: line_end,
-                            shift: event.modifiers.shift,
-                            click_count: event.click_count,
-                        })),
-                        cx,
-                    );
-                },
-            ));
+                    },
+                ),
+            );
         }
 
         let (display_text, runs, collapsed_regions) = self.build_styled_content();
@@ -1201,7 +1216,10 @@ impl RenderOnce for Line {
         let styled_text = StyledText::new(shared_text).with_runs(runs);
         let text_layout = styled_text.layout().clone();
 
-        let mut line_div = line_base(line_number).relative().flex().flex_row();
+        let mut line_div = line_base(line_number, max_line_width)
+            .relative()
+            .flex()
+            .flex_row();
 
         let mut spacers: Vec<gpui::Div> = Vec::new();
         let cursor_in_markers = self.cursor_in_marker_area();
@@ -1262,6 +1280,9 @@ impl RenderOnce for Line {
                     spacer = spacer.on_mouse_down(
                         MouseButton::Left,
                         move |event: &MouseDownEvent, window, cx| {
+                            if input_blocked {
+                                return;
+                            }
                             cx.stop_propagation();
                             window.dispatch_action(
                                 Box::new(DispatchEditorAction(EditorAction::Click {
@@ -1275,6 +1296,9 @@ impl RenderOnce for Line {
                     );
                     let marker_start = marker.range.start;
                     spacer = spacer.on_mouse_move(move |event: &MouseMoveEvent, window, cx| {
+                        if input_blocked {
+                            return;
+                        }
                         if event.pressed_button == Some(MouseButton::Left) {
                             cx.stop_propagation();
                             window.dispatch_action(
@@ -1312,7 +1336,7 @@ impl RenderOnce for Line {
                             .h(px(1.0))
                             .bg(self.theme.border_color);
 
-                        let mut hr_div = line_base(line_number)
+                        let mut hr_div = line_base(line_number, max_line_width)
                             .relative()
                             .child(styled_text)
                             .child(hr_line);
@@ -1320,6 +1344,9 @@ impl RenderOnce for Line {
                         hr_div = hr_div.on_mouse_down(
                             MouseButton::Left,
                             move |event: &MouseDownEvent, window, cx| {
+                                if input_blocked {
+                                    return;
+                                }
                                 let visual_index =
                                     match text_layout.index_for_position(event.position) {
                                         Ok(idx) => idx,
@@ -1540,11 +1567,12 @@ impl RenderOnce for Line {
             ));
         }
 
-        {
+        if !input_blocked {
             let layout_for_click = text_layout.clone();
             let content_range = content_range_for_handlers.clone();
             let line_number = self.line.line_number;
-            let hidden_regions = hidden_regions.clone();
+            let hidden_regions_for_click = hidden_regions.clone();
+            let hidden_regions_for_move = hidden_regions;
             let collapsed_regions_for_click = collapsed_regions.clone();
             let text_font_for_click = self.theme.text_font.clone();
 
@@ -1621,7 +1649,7 @@ impl RenderOnce for Line {
                             content_visual_index,
                             &content_range,
                             heading_marker_len,
-                            &hidden_regions,
+                            &hidden_regions_for_click,
                             line_range.end,
                         )
                     };
@@ -1651,9 +1679,7 @@ impl RenderOnce for Line {
                     );
                 },
             );
-        }
 
-        {
             let layout_for_move = text_layout;
             let line_range_for_move = self.line.range.clone();
             let content_range = content_range_for_handlers;
@@ -1714,7 +1740,7 @@ impl RenderOnce for Line {
                                 content_visual_index,
                                 &content_range,
                                 heading_marker_len,
-                                &hidden_regions,
+                                &hidden_regions_for_move,
                                 line_range_for_move.end,
                             )
                         };
@@ -1741,7 +1767,7 @@ impl RenderOnce for Line {
                         content_visual_index,
                         &content_range,
                         heading_marker_len,
-                        &hidden_regions,
+                        &hidden_regions_for_move,
                         line_range_for_move.end,
                     );
                     let hovering_link_region = link_content_ranges
@@ -1762,7 +1788,7 @@ impl RenderOnce for Line {
                                 range.start,
                                 &content_range,
                                 heading_marker_len,
-                                &hidden_regions,
+                                &hidden_regions_for_move,
                             );
                             // Add prefix length to get absolute visual index
                             let absolute_visual_index = prefix_len + ref_visual_index;
@@ -1789,13 +1815,11 @@ impl RenderOnce for Line {
         line_div = line_div.child(text_container);
 
         if let Some((source, _, open_url)) = standalone_image {
-            return div()
-                .id(line_number)
-                .max_w(px(800.0))
-                .w_full()
-                .mx_auto()
-                .flex()
-                .flex_col()
+            let mut container = div().id(line_number).w_full().flex().flex_col();
+            if let Some(w) = max_line_width {
+                container = container.max_w(w).mx_auto();
+            }
+            return container
                 .child(line_div)
                 .child(img(source).max_w_full().on_mouse_down(
                     MouseButton::Left,
