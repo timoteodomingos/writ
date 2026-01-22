@@ -25,10 +25,13 @@ name = "writd"
 path = "src/writd.rs"
 
 [dependencies]
+agent-client-protocol = "0.9"
 anyhow = "1"
 async-compat = "0.2"
+async-trait = "0.1"
 clap = { version = "4.5", features = ["derive", "env"] }
 futures = "0.3"
+imara-diff = "0.2"
 gix = { version = "0.77", default-features = false }
 gpui = "0.2"
 notify = "8.2"
@@ -40,6 +43,7 @@ rustls = { version = "0.23.36", features = ["ring"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["compat"] }
 tokio-tungstenite = "0.28"
 tree-sitter = "0.26"
 tree-sitter-bash = "0.25"

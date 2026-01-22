@@ -39,8 +39,9 @@ use crate::marker::{LineMarkers, MarkerKind, OrderedMarker, UnorderedMarker};
 use crate::status_bar::StatusBarInfo;
 use crate::title_bar::FileInfo;
 
-use crate::buffer::Buffer;
+use crate::buffer::{Buffer, RenderSnapshot};
 use crate::cursor::{Cursor, Selection};
+use crate::diff::DiffState;
 use crate::github::{GitHubClient, GitHubValidationCache, IssueOrPr, IssueStatus};
 use crate::inline::{
     GitHubContext, GitHubRef, NakedUrl, RawGitHubMatch, detect_github_references_in_line,
@@ -82,8 +83,6 @@ pub enum AutocompleteTrigger {
     /// User autocomplete triggered by `@`.
     User,
 }
-
-use crate::buffer::RenderSnapshot;
 
 /// Create a RenderSnapshot from issue/PR title text for markdown rendering.
 fn render_snapshot_for_title(title: &str) -> RenderSnapshot {
@@ -1691,6 +1690,9 @@ pub struct Editor {
     is_primary: bool,
     /// Unique instance ID for element IDs to prevent GPUI element caching conflicts.
     instance_id: usize,
+    /// Diff state for reviewing agent edits. When set, the editor shows
+    /// inline diff decorations (ghost lines for deletions, green highlights for additions).
+    diff_state: Option<DiffState>,
 }
 
 impl Editor {
@@ -1738,6 +1740,7 @@ impl Editor {
             autocomplete_debounce_task: None,
             is_primary: true, // Default to primary; secondary editors should call set_primary(false)
             instance_id: NEXT_EDITOR_ID.fetch_add(1, Ordering::Relaxed),
+            diff_state: None,
         }
     }
 
@@ -1745,6 +1748,27 @@ impl Editor {
     /// Only the primary editor should update StatusBarInfo and FileInfo globals.
     pub fn set_primary(&mut self, is_primary: bool) {
         self.is_primary = is_primary;
+    }
+
+    /// Get a render snapshot of the current buffer state.
+    /// Useful for capturing state before agent edits.
+    pub fn render_snapshot(&mut self) -> RenderSnapshot {
+        self.state.buffer.render_snapshot()
+    }
+
+    /// Get the file path this editor is editing, if any.
+    pub fn file_path(&self) -> Option<&PathBuf> {
+        self.file_path.as_ref()
+    }
+
+    /// Set the diff state for reviewing agent edits.
+    pub fn set_diff_state(&mut self, diff_state: Option<DiffState>) {
+        self.diff_state = diff_state;
+    }
+
+    /// Get a reference to the current diff state, if any.
+    pub fn diff_state(&self) -> Option<&DiffState> {
+        self.diff_state.as_ref()
     }
 
     /// Set the GitHub context for autolink detection.

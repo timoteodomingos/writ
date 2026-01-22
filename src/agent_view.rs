@@ -4,13 +4,17 @@
 //! an optional chat panel (right) for agent responses.
 
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, IntoElement, Rems, Render, Window, actions, div,
-    prelude::*, px, rgb,
+    App, Context, Entity, FocusHandle, Focusable, IntoElement, Rems, Render, Timer, Window,
+    actions, div, prelude::*, px, rgb,
 };
+use std::path::PathBuf;
+use std::time::Duration;
 
+use crate::acp::{AcpClientHandle, AcpEvent};
+use crate::diff::DiffState;
 use crate::editor::{Editor, EditorConfig};
 
-actions!(agent_view, [ToggleChatPanel]);
+actions!(agent_view, [ToggleChatPanel, SubmitPrompt]);
 
 /// Container managing the document editor and optional chat panel.
 pub struct AgentView {
@@ -24,6 +28,10 @@ pub struct AgentView {
     chat_panel_visible: bool,
     /// Focus handle for the agent view.
     focus_handle: FocusHandle,
+    /// Optional ACP client for communicating with an agent.
+    acp_client: Option<AcpClientHandle>,
+    /// Whether we're currently waiting for an agent response.
+    awaiting_response: bool,
 }
 
 impl AgentView {
@@ -35,30 +43,9 @@ impl AgentView {
         let document_editor =
             cx.new(|cx| Editor::with_config(document_content, config.clone(), cx));
 
-        // Create the chat editor with hardcoded sample content for now
-        let chat_content = r#"# Agent Response
-
-This is a **sample response** from the AI agent.
-
-## Features
-
-- Markdown rendering works
-- Code blocks are highlighted
-- Lists render properly
-
-```rust
-fn main() {
-    println!("Hello from the agent!");
-}
-```
-
-> The chat panel uses the same Editor component
-> but in read-only mode.
-
-Try toggling this panel with the keybinding!
-"#;
+        // Create the chat editor - starts empty, will be filled by agent responses
         let chat_editor = cx.new(|cx| {
-            let mut editor = Editor::with_config(chat_content, config.clone(), cx);
+            let mut editor = Editor::with_config("", config.clone(), cx);
             // Block input to make it read-only
             editor.set_input_blocked(true);
             // Not primary - don't update global status bar/title bar
@@ -87,6 +74,171 @@ Try toggling this panel with the keybinding!
             prompt_editor,
             chat_panel_visible: false,
             focus_handle,
+            acp_client: None,
+            awaiting_response: false,
+        }
+    }
+
+    /// Connect to an agent using the given command.
+    pub fn connect_agent(&mut self, agent_command: String, cwd: PathBuf, cx: &mut Context<Self>) {
+        // Spawn the ACP client in a background thread
+        let client = AcpClientHandle::spawn(agent_command, cwd);
+        self.acp_client = Some(client);
+
+        // Start polling for events
+        self.start_event_polling(cx);
+    }
+
+    /// Start polling for ACP events.
+    fn start_event_polling(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |this, cx| {
+            loop {
+                // Poll every 16ms (~60fps)
+                Timer::after(Duration::from_millis(16)).await;
+
+                let should_continue = cx
+                    .update(|cx| {
+                        this.update(cx, |view, cx| {
+                            view.poll_acp_events(cx);
+                            view.acp_client.is_some()
+                        })
+                        .unwrap_or(false)
+                    })
+                    .unwrap_or(false);
+
+                if !should_continue {
+                    break;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// Poll for and handle ACP events.
+    fn poll_acp_events(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = &self.acp_client else {
+            return;
+        };
+
+        // Process all available events
+        while let Some(event) = client.try_recv() {
+            match event {
+                AcpEvent::Ready => {
+                    // Agent connected, update chat with welcome message
+                    self.chat_editor.update(cx, |editor, cx| {
+                        editor.set_text("*Agent connected. Type a message below.*\n\n", cx);
+                    });
+                }
+                AcpEvent::AgentMessageChunk(text) => {
+                    // Start streaming mode on first chunk
+                    if !self.awaiting_response {
+                        self.awaiting_response = true;
+                        self.chat_editor.update(cx, |editor, cx| {
+                            editor.begin_streaming(cx);
+                        });
+                    }
+                    // Append the chunk
+                    self.chat_editor.update(cx, |editor, cx| {
+                        editor.append(&text, cx);
+                    });
+                }
+                AcpEvent::ResponseComplete => {
+                    self.awaiting_response = false;
+                    self.chat_editor.update(cx, |editor, cx| {
+                        editor.end_streaming(cx);
+                        // Add separator after response
+                        editor.append("\n\n---\n\n", cx);
+                    });
+                }
+                AcpEvent::WriteFile { path, content } => {
+                    eprintln!(
+                        "[ACP] Write request for {}: {} bytes",
+                        path.display(),
+                        content.len()
+                    );
+
+                    // Check if this write is for the document we're editing
+                    let document_path =
+                        self.document_editor.read(cx).file_path().map(|p| p.clone());
+
+                    let is_our_file = document_path
+                        .as_ref()
+                        .map(|doc_path| {
+                            // Canonicalize both paths for comparison
+                            let doc_canonical = std::fs::canonicalize(doc_path).ok();
+                            let write_canonical = std::fs::canonicalize(&path).ok();
+                            match (doc_canonical, write_canonical) {
+                                (Some(a), Some(b)) => a == b,
+                                _ => doc_path == &path,
+                            }
+                        })
+                        .unwrap_or(false);
+
+                    if is_our_file {
+                        eprintln!("[ACP] Write matches our document, creating diff state");
+
+                        // 1. Snapshot current buffer state
+                        // 2. Get old text
+                        // 3. Apply new content
+                        // 4. Compute diff and store DiffState
+                        self.document_editor.update(cx, |editor, cx| {
+                            let old_snapshot = editor.render_snapshot();
+                            let old_text = editor.text();
+
+                            // Apply the new content
+                            editor.set_text(&content, cx);
+
+                            // Compute diff between old and new
+                            let diff_state = DiffState::compute(old_snapshot, &old_text, &content);
+
+                            eprintln!("[ACP] Diff computed: {} hunks", diff_state.hunks.len());
+
+                            // Store the diff state for rendering
+                            editor.set_diff_state(Some(diff_state));
+                        });
+                    } else {
+                        eprintln!(
+                            "[ACP] Write for different file (doc: {:?}, write: {:?})",
+                            document_path, path
+                        );
+                    }
+                }
+                AcpEvent::Error(msg) => {
+                    self.chat_editor.update(cx, |editor, cx| {
+                        editor.append(&format!("\n\n**Error:** {}\n\n", msg), cx);
+                    });
+                }
+            }
+        }
+    }
+
+    /// Submit the current prompt to the agent.
+    pub fn submit_prompt(&mut self, cx: &mut Context<Self>) {
+        let Some(client) = &self.acp_client else {
+            return;
+        };
+
+        // Get the prompt text
+        let prompt = self.prompt_editor.read(cx).text();
+        if prompt.trim().is_empty() {
+            return;
+        }
+
+        // Clear the prompt editor
+        self.prompt_editor.update(cx, |editor, cx| {
+            editor.set_text("", cx);
+        });
+
+        // Add the user message to the chat
+        self.chat_editor.update(cx, |editor, cx| {
+            editor.append(&format!("**You:** {}\n\n", prompt.trim()), cx);
+        });
+
+        // Send to the agent
+        if let Err(e) = client.send_prompt(prompt) {
+            self.chat_editor.update(cx, |editor, cx| {
+                editor.append(&format!("**Error:** Failed to send prompt: {}\n\n", e), cx);
+            });
         }
     }
 
@@ -136,6 +288,9 @@ impl Render for AgentView {
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _: &ToggleChatPanel, _window, cx| {
                 this.toggle_chat_panel(cx);
+            }))
+            .on_action(cx.listener(|this, _: &SubmitPrompt, _window, cx| {
+                this.submit_prompt(cx);
             }))
             .flex()
             .flex_row()

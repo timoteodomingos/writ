@@ -7,7 +7,7 @@ use gpui::{
     Window, WindowBounds, WindowDecorations, WindowOptions, div, prelude::*, px,
 };
 use writ::{
-    agent_view::{AgentView, ToggleChatPanel},
+    agent_view::{AgentView, SubmitPrompt, ToggleChatPanel},
     buffer::Buffer,
     config::Config,
     demo::{DemoStep, DemoTiming, demo_script},
@@ -158,6 +158,9 @@ fn main() {
             // Toggle chat panel with Cmd+Shift+A (or Ctrl+Shift+A on Linux)
             KeyBinding::new("cmd-shift-a", ToggleChatPanel, None),
             KeyBinding::new("ctrl-shift-a", ToggleChatPanel, None),
+            // Submit prompt with Cmd+Enter (or Ctrl+Enter on Linux)
+            KeyBinding::new("cmd-enter", SubmitPrompt, None),
+            KeyBinding::new("ctrl-enter", SubmitPrompt, None),
         ]);
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
@@ -192,12 +195,27 @@ fn main() {
                     max_line_width: Some(px(800.0)),
                 };
 
-                // Extract GitHub config before borrowing cx mutably
+                // Extract config before borrowing cx mutably
                 let github_repo = cli_config.github_repo.clone();
                 let github_token = cli_config.github_token.clone();
+                let agent_command = cli_config.agent.clone();
 
                 // Create the agent view (contains document editor + chat panel)
                 let agent_view = cx.new(|cx| AgentView::new(&content, editor_config, cx));
+
+                // Connect to agent if specified
+                if let Some(agent_cmd) = agent_command {
+                    let cwd = file_path
+                        .parent()
+                        .map(|p| p.to_path_buf())
+                        .unwrap_or_else(|| std::env::current_dir().unwrap_or_default());
+                    eprintln!("[writ] Connecting to agent: {}", agent_cmd);
+                    agent_view.update(cx, |view, cx| {
+                        view.connect_agent(agent_cmd, cwd, cx);
+                        // Show the chat panel when agent is connected
+                        view.set_chat_panel_visible(true, cx);
+                    });
+                }
 
                 // Get the document editor from the agent view for configuration
                 let document_editor = agent_view.read(cx).document_editor().clone();
