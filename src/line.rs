@@ -419,30 +419,27 @@ impl Line {
         display_text: &str,
         highlight_color: Rgba,
     ) -> Vec<TextRun> {
-        // Map byte ranges from line content to display text positions
-        // For now, use a simple approach: the content starts after markers
-        let content_start = self.line.content_start();
         let line_start = self.line.range.start;
 
-        // Convert inline_highlight_ranges (relative to line start) to display positions
+        // Convert inline_highlight_ranges (relative to line start) to visual positions.
+        // Use buffer_to_visual_pos to account for hidden regions (collapsed markers like **).
         let display_ranges: Vec<Range<usize>> = self
             .inline_highlight_ranges
             .iter()
             .filter_map(|range| {
-                // The range is relative to line content start
-                // We need to map it to display_text positions
+                // The range is relative to line start in buffer coordinates
                 let abs_start = line_start + range.start;
                 let abs_end = line_start + range.end;
 
-                // Check if the range is within content area
-                if abs_start >= content_start {
-                    let display_start = abs_start - content_start;
-                    let display_end = (abs_end - content_start).min(display_text.len());
-                    if display_start < display_text.len() {
-                        return Some(display_start..display_end);
-                    }
+                // Convert buffer positions to visual positions
+                let visual_start = self.buffer_to_visual_pos(abs_start, display_text);
+                let visual_end = self.buffer_to_visual_pos(abs_end, display_text);
+
+                if visual_start < visual_end {
+                    Some(visual_start..visual_end)
+                } else {
+                    None
                 }
-                None
             })
             .collect();
 
@@ -1284,10 +1281,10 @@ impl RenderOnce for Line {
         };
 
         // Apply inline highlighting (e.g., word-level diff changes)
-        if !self.inline_highlight_ranges.is_empty() {
-            if let Some(color) = self.inline_highlight_color {
-                runs = self.apply_inline_highlight_to_runs(runs, &display_text, color);
-            }
+        if !self.inline_highlight_ranges.is_empty()
+            && let Some(color) = self.inline_highlight_color
+        {
+            runs = self.apply_inline_highlight_to_runs(runs, &display_text, color);
         }
 
         // Truncate text with ellipsis if width is specified

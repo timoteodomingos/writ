@@ -1786,17 +1786,17 @@ impl Editor {
     pub fn accept_current_hunk(&mut self, cx: &mut Context<Self>) {
         let cursor_line = self.state.buffer.byte_to_line(self.state.selection.head);
 
-        if let Some(ref mut diff_state) = self.diff_state {
-            if let Some(hunk_idx) = diff_state.hunk_at_line(cursor_line) {
-                // Accept = just remove the hunk (changes already applied)
-                diff_state.remove_hunk(hunk_idx, 0);
+        if let Some(ref mut diff_state) = self.diff_state
+            && let Some(hunk_idx) = diff_state.hunk_at_line(cursor_line)
+        {
+            // Accept = just remove the hunk (changes already applied)
+            diff_state.remove_hunk(hunk_idx, 0);
 
-                // If no more hunks, clear diff state entirely
-                if diff_state.hunks.is_empty() {
-                    self.diff_state = None;
-                }
-                cx.notify();
+            // If no more hunks, clear diff state entirely
+            if diff_state.hunks.is_empty() {
+                self.diff_state = None;
             }
+            cx.notify();
         }
     }
 

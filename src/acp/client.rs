@@ -1,23 +1,33 @@
 //! ACP client implementation for Writ.
 //!
-//! Uses GPUI's async executor to run the ACP protocol.
+//! Uses a channel-based design where a single long-running task owns the
+//! connection and processes commands sequentially.
 
 use agent_client_protocol::{
     Agent, CancelNotification, Client, ClientCapabilities, ClientSideConnection, ContentBlock,
     FileSystemCapability, Implementation, InitializeRequest, NewSessionRequest,
     PermissionOptionKind, PromptRequest, ReadTextFileRequest, ReadTextFileResponse,
     RequestPermissionOutcome, RequestPermissionRequest, RequestPermissionResponse, ResourceLink,
-    SelectedPermissionOutcome, SessionId, SessionNotification, SessionUpdate, TextContent,
+    SelectedPermissionOutcome, SessionNotification, SessionUpdate, TextContent,
     WriteTextFileRequest, WriteTextFileResponse,
 };
-use async_process::{Child, Command, Stdio};
+use async_process::{Command, Stdio};
 use gpui::{AppContext, Context, Entity, Task};
 use smol::channel;
-use std::cell::RefCell;
 use std::path::PathBuf;
-use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Commands sent to the ACP connection task.
+enum AcpCommand {
+    /// Send a prompt to the agent.
+    SendPrompt {
+        text: String,
+        file_path: Option<PathBuf>,
+    },
+    /// Cancel the current prompt.
+    Cancel,
+}
 
 /// Events emitted by the ACP client for the UI to handle.
 #[derive(Debug, Clone)]
@@ -126,22 +136,19 @@ impl Client for ClientHandler {
 }
 
 /// ACP client state managed as a GPUI entity.
+///
+/// Uses a channel-based design: commands are sent to a single task that owns
+/// the connection, and events are received from that task.
 pub struct AcpClient {
-    /// Channel to receive events from the ACP connection.
+    /// Channel to send commands to the connection task.
+    command_tx: channel::Sender<AcpCommand>,
+    /// Channel to receive events from the connection task.
     event_rx: channel::Receiver<AcpEvent>,
-    /// Channel to send events (for internal use like ResponseComplete).
-    event_tx: channel::Sender<AcpEvent>,
-    /// The ACP connection (wrapped for sharing with spawned tasks).
-    connection: Rc<RefCell<Option<ClientSideConnection>>>,
-    /// Current session ID.
-    session_id: Rc<RefCell<Option<SessionId>>>,
     /// Shared flag indicating a write event is pending.
     pending_write: Arc<AtomicBool>,
-    /// Handle to the I/O task.
+    /// Handle to the connection task (keeps it alive).
     #[allow(dead_code)]
-    io_task: Task<()>,
-    /// Handle to the child process.
-    child: Rc<RefCell<Option<Child>>>,
+    task: Task<()>,
 }
 
 impl AcpClient {
@@ -152,195 +159,48 @@ impl AcpClient {
         cx: &mut Context<V>,
     ) -> Entity<Self> {
         cx.new(|cx: &mut Context<Self>| {
+            let (command_tx, command_rx) = channel::unbounded::<AcpCommand>();
             let (event_tx, event_rx) = channel::unbounded::<AcpEvent>();
             let pending_write = Arc::new(AtomicBool::new(false));
-            let connection: Rc<RefCell<Option<ClientSideConnection>>> = Rc::new(RefCell::new(None));
-            let session_id: Rc<RefCell<Option<SessionId>>> = Rc::new(RefCell::new(None));
-            let child: Rc<RefCell<Option<Child>>> = Rc::new(RefCell::new(None));
 
-            // Spawn the connection setup task
-            let io_task = {
-                let connection = Rc::clone(&connection);
-                let session_id = Rc::clone(&session_id);
-                let child_rc = Rc::clone(&child);
-                let pending_write = Arc::clone(&pending_write);
-                let event_tx_clone = event_tx.clone();
-                let foreground = cx.foreground_executor().clone();
+            let pending_write_clone = Arc::clone(&pending_write);
+            let foreground = cx.foreground_executor().clone();
 
-                cx.spawn(async move |_, _cx| {
-                    if let Err(e) = Self::setup_connection(
-                        agent_command,
-                        cwd,
-                        connection,
-                        session_id,
-                        child_rc,
-                        pending_write,
-                        event_tx_clone.clone(),
-                        foreground,
-                    )
-                    .await
-                    {
-                        let _ = event_tx_clone.send(AcpEvent::Error(e.to_string())).await;
-                    }
-                })
-            };
+            // Spawn the main connection task
+            let task = cx.spawn(async move |_, _cx| {
+                if let Err(e) = run_connection(
+                    agent_command,
+                    cwd,
+                    command_rx,
+                    event_tx.clone(),
+                    pending_write_clone,
+                    foreground,
+                )
+                .await
+                {
+                    let _ = event_tx.send(AcpEvent::Error(e.to_string())).await;
+                }
+            });
 
             Self {
+                command_tx,
                 event_rx,
-                event_tx,
-                connection,
-                session_id,
                 pending_write,
-                io_task,
-                child,
+                task,
             }
         })
-    }
-
-    async fn setup_connection(
-        agent_command: String,
-        cwd: PathBuf,
-        connection_rc: Rc<RefCell<Option<ClientSideConnection>>>,
-        session_id_rc: Rc<RefCell<Option<SessionId>>>,
-        child_rc: Rc<RefCell<Option<Child>>>,
-        pending_write: Arc<AtomicBool>,
-        event_tx: channel::Sender<AcpEvent>,
-        foreground: gpui::ForegroundExecutor,
-    ) -> anyhow::Result<()> {
-        // Spawn the agent subprocess
-        let mut child = Command::new(&agent_command)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
-            .spawn()?;
-
-        let stdin = child.stdin.take().expect("stdin should be available");
-        let stdout = child.stdout.take().expect("stdout should be available");
-
-        // Store the child process handle
-        *child_rc.borrow_mut() = Some(child);
-
-        let handler = ClientHandler {
-            event_tx: event_tx.clone(),
-            pending_write,
-        };
-
-        // Create the ACP connection using GPUI's foreground executor for spawning
-        let (conn, io_future) = ClientSideConnection::new(handler, stdin, stdout, move |fut| {
-            foreground.spawn(fut).detach();
-        });
-
-        // Store the connection
-        *connection_rc.borrow_mut() = Some(conn);
-
-        // Run the I/O handler in the background
-        smol::spawn(async move {
-            if let Err(e) = io_future.await {
-                eprintln!("ACP I/O error: {}", e);
-            }
-        })
-        .detach();
-
-        // Initialize the connection
-        {
-            use agent_client_protocol::ProtocolVersion;
-
-            let fs_caps = FileSystemCapability::new()
-                .read_text_file(true)
-                .write_text_file(true);
-            let client_caps = ClientCapabilities::new().fs(fs_caps);
-
-            let request = InitializeRequest::new(ProtocolVersion::LATEST)
-                .client_info(Implementation::new(
-                    "writ".to_string(),
-                    env!("CARGO_PKG_VERSION").to_string(),
-                ))
-                .client_capabilities(client_caps);
-
-            if let Some(ref conn) = *connection_rc.borrow() {
-                conn.initialize(request).await?;
-            }
-        }
-
-        // Create a session
-        {
-            let request = NewSessionRequest::new(cwd);
-            if let Some(ref conn) = *connection_rc.borrow() {
-                let response = conn.new_session(request).await?;
-                *session_id_rc.borrow_mut() = Some(response.session_id);
-            }
-        }
-
-        // Signal that we're ready
-        let _ = event_tx.send(AcpEvent::Ready).await;
-
-        Ok(())
     }
 
     /// Send a prompt to the agent.
-    pub fn send_prompt(&self, text: String, file_path: Option<PathBuf>, cx: &mut Context<Self>) {
-        let connection = Rc::clone(&self.connection);
-        let session_id = self.session_id.borrow().clone();
-        let event_tx = self.event_tx.clone();
-
-        if let Some(session_id) = session_id {
-            cx.spawn(async move |_, _| {
-                // Build prompt content blocks
-                let mut content_blocks: Vec<ContentBlock> = Vec::new();
-
-                if let Some(ref path) = file_path {
-                    let uri = format!("file://{}", path.display());
-                    let name = path
-                        .file_name()
-                        .map(|n| n.to_string_lossy().to_string())
-                        .unwrap_or_else(|| "file".to_string());
-                    content_blocks.push(ContentBlock::ResourceLink(ResourceLink::new(name, uri)));
-                }
-
-                content_blocks.push(ContentBlock::Text(TextContent::new(text)));
-
-                let request = PromptRequest::new(session_id, content_blocks);
-
-                let result = {
-                    if let Some(ref conn) = *connection.borrow() {
-                        Some(conn.prompt(request).await)
-                    } else {
-                        None
-                    }
-                };
-
-                // Send completion event
-                match result {
-                    Some(Ok(_)) => {
-                        let _ = event_tx.send(AcpEvent::ResponseComplete).await;
-                    }
-                    Some(Err(e)) => {
-                        let _ = event_tx.send(AcpEvent::Error(e.to_string())).await;
-                    }
-                    None => {
-                        let _ = event_tx
-                            .send(AcpEvent::Error("No connection".to_string()))
-                            .await;
-                    }
-                }
-            })
-            .detach();
-        }
+    pub fn send_prompt(&self, text: String, file_path: Option<PathBuf>, _cx: &mut Context<Self>) {
+        let _ = self
+            .command_tx
+            .try_send(AcpCommand::SendPrompt { text, file_path });
     }
 
     /// Cancel the current prompt.
-    pub fn cancel(&self, cx: &mut Context<Self>) {
-        let connection = Rc::clone(&self.connection);
-        let session_id = self.session_id.borrow().clone();
-
-        if let Some(session_id) = session_id {
-            cx.spawn(async move |_, _| {
-                if let Some(ref conn) = *connection.borrow() {
-                    let _ = conn.cancel(CancelNotification::new(session_id)).await;
-                }
-            })
-            .detach();
-        }
+    pub fn cancel(&self, _cx: &mut Context<Self>) {
+        let _ = self.command_tx.try_send(AcpCommand::Cancel);
     }
 
     /// Try to receive the next event, non-blocking.
@@ -359,11 +219,107 @@ impl AcpClient {
     }
 }
 
-impl Drop for AcpClient {
-    fn drop(&mut self) {
-        // Kill the child process if still running
-        if let Some(ref mut child) = *self.child.borrow_mut() {
-            let _ = child.kill();
+/// The main connection task that owns the ACP connection and processes commands.
+async fn run_connection(
+    agent_command: String,
+    cwd: PathBuf,
+    command_rx: channel::Receiver<AcpCommand>,
+    event_tx: channel::Sender<AcpEvent>,
+    pending_write: Arc<AtomicBool>,
+    foreground: gpui::ForegroundExecutor,
+) -> anyhow::Result<()> {
+    // Spawn the agent subprocess
+    let mut child = Command::new(&agent_command)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true)
+        .spawn()?;
+
+    let stdin = child.stdin.take().expect("stdin should be available");
+    let stdout = child.stdout.take().expect("stdout should be available");
+
+    let handler = ClientHandler {
+        event_tx: event_tx.clone(),
+        pending_write,
+    };
+
+    // Create the ACP connection
+    let (conn, io_future) = ClientSideConnection::new(handler, stdin, stdout, move |fut| {
+        foreground.spawn(fut).detach();
+    });
+
+    // Run the I/O handler in the background
+    smol::spawn(async move {
+        if let Err(e) = io_future.await {
+            eprintln!("ACP I/O error: {}", e);
+        }
+    })
+    .detach();
+
+    // Initialize the connection
+    let session_id = {
+        use agent_client_protocol::ProtocolVersion;
+
+        let fs_caps = FileSystemCapability::new()
+            .read_text_file(true)
+            .write_text_file(true);
+        let client_caps = ClientCapabilities::new().fs(fs_caps);
+
+        let request = InitializeRequest::new(ProtocolVersion::LATEST)
+            .client_info(Implementation::new(
+                "writ".to_string(),
+                env!("CARGO_PKG_VERSION").to_string(),
+            ))
+            .client_capabilities(client_caps);
+
+        conn.initialize(request).await?;
+
+        // Create a session
+        let request = NewSessionRequest::new(cwd);
+        let response = conn.new_session(request).await?;
+        response.session_id
+    };
+
+    // Signal that we're ready
+    let _ = event_tx.send(AcpEvent::Ready).await;
+
+    // Process commands
+    while let Ok(cmd) = command_rx.recv().await {
+        match cmd {
+            AcpCommand::SendPrompt { text, file_path } => {
+                // Build prompt content blocks
+                let mut content_blocks: Vec<ContentBlock> = Vec::new();
+
+                if let Some(ref path) = file_path {
+                    let uri = format!("file://{}", path.display());
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "file".to_string());
+                    content_blocks.push(ContentBlock::ResourceLink(ResourceLink::new(name, uri)));
+                }
+
+                content_blocks.push(ContentBlock::Text(TextContent::new(text)));
+
+                let request = PromptRequest::new(session_id.clone(), content_blocks);
+
+                match conn.prompt(request).await {
+                    Ok(_) => {
+                        let _ = event_tx.send(AcpEvent::ResponseComplete).await;
+                    }
+                    Err(e) => {
+                        let _ = event_tx.send(AcpEvent::Error(e.to_string())).await;
+                    }
+                }
+            }
+            AcpCommand::Cancel => {
+                let _ = conn
+                    .cancel(CancelNotification::new(session_id.clone()))
+                    .await;
+            }
         }
     }
+
+    Ok(())
 }

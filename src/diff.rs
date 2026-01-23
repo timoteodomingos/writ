@@ -25,6 +25,9 @@ pub struct InlineChange {
     pub range: Range<usize>,
 }
 
+/// Per-line inline changes: (line_offset_in_hunk, changes).
+type LineInlineChanges = Vec<(usize, Vec<InlineChange>)>;
+
 /// A single diff hunk representing a contiguous change.
 #[derive(Debug, Clone)]
 pub struct DiffHunk {
@@ -35,11 +38,9 @@ pub struct DiffHunk {
     /// Current status of this hunk.
     pub status: HunkStatus,
     /// Word-level deletions within old lines, indexed by line offset within hunk.
-    /// Each entry is (line_offset, Vec<InlineChange>).
-    pub old_inline_changes: Vec<(usize, Vec<InlineChange>)>,
+    pub old_inline_changes: LineInlineChanges,
     /// Word-level additions within new lines, indexed by line offset within hunk.
-    /// Each entry is (line_offset, Vec<InlineChange>).
-    pub new_inline_changes: Vec<(usize, Vec<InlineChange>)>,
+    pub new_inline_changes: LineInlineChanges,
 }
 
 /// State for an active diff review session.
@@ -167,10 +168,11 @@ impl DiffState {
     /// Returns the range of old lines to render as ghosts.
     pub fn ghost_lines_before(&self, new_line: usize) -> Option<Range<usize>> {
         for hunk in &self.hunks {
-            if hunk.status == HunkStatus::Pending && hunk.new_lines.start == new_line {
-                if !hunk.old_lines.is_empty() {
-                    return Some(hunk.old_lines.clone());
-                }
+            if hunk.status == HunkStatus::Pending
+                && hunk.new_lines.start == new_line
+                && !hunk.old_lines.is_empty()
+            {
+                return Some(hunk.old_lines.clone());
             }
         }
         None
@@ -265,15 +267,24 @@ fn compute_line_hunks(old_text: &str, new_text: &str) -> Vec<DiffHunk> {
         .collect()
 }
 
+/// Maximum number of lines in a hunk to compute word-level diffs.
+/// Larger hunks are shown as full line additions/deletions for readability.
+/// This matches Zed's approach (MAX_WORD_DIFF_LINE_COUNT: 5).
+const MAX_WORD_DIFF_LINE_COUNT: usize = 5;
+
 /// Compute word-level changes between old and new line sets.
-/// Returns (old_changes, new_changes) where each is Vec<(line_offset, Vec<InlineChange>)>.
+/// Returns (old_changes, new_changes) for highlighting deleted/added words.
+/// Returns empty vecs if the hunk is too large (exceeds MAX_WORD_DIFF_LINE_COUNT).
 fn compute_word_changes(
     old_lines: &[&str],
     new_lines: &[&str],
-) -> (
-    Vec<(usize, Vec<InlineChange>)>,
-    Vec<(usize, Vec<InlineChange>)>,
-) {
+) -> (LineInlineChanges, LineInlineChanges) {
+    // Skip word-level diff for large hunks - they'd be overwhelming to read
+    let total_lines = old_lines.len() + new_lines.len();
+    if total_lines > MAX_WORD_DIFF_LINE_COUNT {
+        return (vec![], vec![]);
+    }
+
     // Join lines for word-level diff
     let old_text = old_lines.join("\n");
     let new_text = new_lines.join("\n");
@@ -303,7 +314,6 @@ fn compute_word_changes(
     let mut new_added_ranges: Vec<Range<usize>> = vec![];
 
     for hunk in diff.hunks() {
-        // hunk.before/after are line ranges, which correspond to word indices
         for word_idx in hunk.before.start as usize..hunk.before.end as usize {
             if let Some((_, range)) = old_tokens.get(word_idx) {
                 old_deleted_ranges.push(range.clone());
