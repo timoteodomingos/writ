@@ -51,6 +51,8 @@ tree-sitter-highlight = "0.26"
 tree-sitter-md = "0.5"
 tree-sitter-rust = "0.24"
 undo = "0.52"
+smol = "2.0.2"
+async-process = "2.5.0"
 
 [profile.release]
 lto = "thin"

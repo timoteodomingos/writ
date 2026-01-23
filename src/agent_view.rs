@@ -10,7 +10,7 @@ use gpui::{
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::acp::{AcpClientHandle, AcpEvent};
+use crate::acp::{AcpClient, AcpEvent};
 use crate::diff::DiffState;
 use crate::editor::{Editor, EditorConfig};
 
@@ -29,7 +29,7 @@ pub struct AgentView {
     /// Focus handle for the agent view.
     focus_handle: FocusHandle,
     /// Optional ACP client for communicating with an agent.
-    acp_client: Option<AcpClientHandle>,
+    acp_client: Option<Entity<AcpClient>>,
     /// Whether we're currently waiting for an agent response.
     awaiting_response: bool,
 }
@@ -81,8 +81,8 @@ impl AgentView {
 
     /// Connect to an agent using the given command.
     pub fn connect_agent(&mut self, agent_command: String, cwd: PathBuf, cx: &mut Context<Self>) {
-        // Spawn the ACP client in a background thread
-        let client = AcpClientHandle::spawn(agent_command, cwd);
+        // Create the ACP client as an entity
+        let client = AcpClient::new(agent_command, cwd, cx);
         self.acp_client = Some(client);
 
         // Start polling for events
@@ -120,16 +120,16 @@ impl AgentView {
             return;
         };
 
-        // If a write is pending from the ACP thread, block file watcher reloads
-        // This prevents the race where file watcher reloads before we process WriteFile
-        if client.is_write_pending() {
+        // If a write is pending from the ACP client, block file watcher reloads
+        let is_write_pending = client.read(cx).is_write_pending();
+        if is_write_pending {
             self.document_editor.update(cx, |editor, _cx| {
                 editor.set_pending_agent_write(true);
             });
         }
 
         // Collect all available events first to avoid borrow issues
-        let events: Vec<_> = std::iter::from_fn(|| client.try_recv()).collect();
+        let events: Vec<_> = std::iter::from_fn(|| client.read(cx).try_recv()).collect();
 
         // Process collected events
         for event in events {
@@ -166,11 +166,15 @@ impl AgentView {
                             editor.append("\n", cx);
                         }
                     });
+                    // Save the document so the file on disk matches what the agent wrote
+                    self.document_editor.update(cx, |editor, cx| {
+                        editor.save(cx);
+                    });
                 }
                 AcpEvent::WriteFile { path, content } => {
                     self.apply_agent_content_change(&path, &content, cx);
                     if let Some(client) = &self.acp_client {
-                        client.clear_pending_write();
+                        client.read(cx).clear_pending_write();
                     }
                 }
                 AcpEvent::Error(msg) => {
@@ -239,7 +243,7 @@ impl AgentView {
 
         // If we're still waiting for a response, cancel it first
         if self.awaiting_response {
-            let _ = client.cancel();
+            client.update(cx, |c, cx| c.cancel(cx));
             self.chat_editor.update(cx, |editor, cx| {
                 editor.end_streaming(cx);
                 editor.append("\n\n*Cancelled*\n\n", cx);
@@ -263,12 +267,9 @@ impl AgentView {
         self.awaiting_response = true;
 
         // Send to the agent with file context
-        if let Err(e) = client.send_prompt(prompt, file_path) {
-            self.awaiting_response = false;
-            self.chat_editor.update(cx, |editor, cx| {
-                editor.append(&format!("**Error:** Failed to send prompt: {}\n\n", e), cx);
-            });
-        }
+        client.update(cx, |c, cx| {
+            c.send_prompt(prompt, file_path, cx);
+        });
     }
 
     /// Get a reference to the document editor.

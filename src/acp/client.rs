@@ -1,7 +1,6 @@
 //! ACP client implementation for Writ.
 //!
-//! The ACP library requires a single-threaded async runtime with local task support.
-//! We run it in a dedicated thread with tokio's LocalSet and communicate via channels.
+//! Uses GPUI's async executor to run the ACP protocol.
 
 use agent_client_protocol::{
     Agent, CancelNotification, Client, ClientCapabilities, ClientSideConnection, ContentBlock,
@@ -11,18 +10,14 @@ use agent_client_protocol::{
     SelectedPermissionOutcome, SessionId, SessionNotification, SessionUpdate, TextContent,
     WriteTextFileRequest, WriteTextFileResponse,
 };
-use futures::future::LocalBoxFuture;
+use async_process::{Child, Command, Stdio};
+use gpui::{AppContext, Context, Entity, Task};
+use smol::channel;
 use std::cell::RefCell;
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::mpsc as std_mpsc;
-use std::thread;
-use tokio::process::Command;
-use tokio::runtime::Runtime;
-use tokio::sync::mpsc;
-use tokio::task::LocalSet;
 
 /// Events emitted by the ACP client for the UI to handle.
 #[derive(Debug, Clone)]
@@ -39,24 +34,9 @@ pub enum AcpEvent {
     Error(String),
 }
 
-/// Commands sent to the ACP worker thread.
-#[derive(Debug)]
-pub enum AcpCommand {
-    /// Send a prompt to the agent, with optional file context.
-    Prompt {
-        text: String,
-        /// If set, prepend file context to the prompt.
-        file_path: Option<PathBuf>,
-    },
-    /// Cancel the current prompt.
-    Cancel,
-    /// Shutdown the connection.
-    Shutdown,
-}
-
 /// Handler that receives ACP callbacks and forwards them as events.
 struct ClientHandler {
-    event_tx: mpsc::UnboundedSender<AcpEvent>,
+    event_tx: channel::Sender<AcpEvent>,
     /// Shared flag to signal a write is pending (blocks file watcher reload).
     pending_write: Arc<AtomicBool>,
 }
@@ -98,7 +78,7 @@ impl Client for ClientHandler {
         match notification.update {
             SessionUpdate::AgentMessageChunk(chunk) => {
                 if let ContentBlock::Text(TextContent { text, .. }) = chunk.content {
-                    let _ = self.event_tx.send(AcpEvent::AgentMessageChunk(text));
+                    let _ = self.event_tx.send(AcpEvent::AgentMessageChunk(text)).await;
                 }
             }
             SessionUpdate::ToolCall(_) => {
@@ -134,77 +114,233 @@ impl Client for ClientHandler {
         // Set pending write flag BEFORE sending event to prevent file watcher race
         self.pending_write.store(true, Ordering::SeqCst);
         // Don't actually write - send event for the UI to handle through the diff system
-        let _ = self.event_tx.send(AcpEvent::WriteFile {
-            path: request.path.clone(),
-            content: request.content.clone(),
-        });
+        let _ = self
+            .event_tx
+            .send(AcpEvent::WriteFile {
+                path: request.path.clone(),
+                content: request.content.clone(),
+            })
+            .await;
         Ok(WriteTextFileResponse::new())
     }
 }
 
-/// Handle to an ACP client running in a background thread.
-pub struct AcpClientHandle {
-    /// Receiver for events from the ACP connection.
-    event_rx: std_mpsc::Receiver<AcpEvent>,
-    /// Sender for commands to the ACP worker.
-    command_tx: std_mpsc::Sender<AcpCommand>,
-    /// Handle to the worker thread.
-    #[allow(dead_code)]
-    thread_handle: thread::JoinHandle<()>,
+/// ACP client state managed as a GPUI entity.
+pub struct AcpClient {
+    /// Channel to receive events from the ACP connection.
+    event_rx: channel::Receiver<AcpEvent>,
+    /// Channel to send events (for internal use like ResponseComplete).
+    event_tx: channel::Sender<AcpEvent>,
+    /// The ACP connection (wrapped for sharing with spawned tasks).
+    connection: Rc<RefCell<Option<ClientSideConnection>>>,
+    /// Current session ID.
+    session_id: Rc<RefCell<Option<SessionId>>>,
     /// Shared flag indicating a write event is pending.
-    /// Used to prevent file watcher from reloading during the race window.
     pending_write: Arc<AtomicBool>,
+    /// Handle to the I/O task.
+    #[allow(dead_code)]
+    io_task: Task<()>,
+    /// Handle to the child process.
+    child: Rc<RefCell<Option<Child>>>,
 }
 
-impl AcpClientHandle {
+impl AcpClient {
     /// Spawn an agent subprocess and establish an ACP connection.
-    ///
-    /// This runs the ACP protocol in a dedicated thread with its own tokio runtime.
-    pub fn spawn(agent_command: String, cwd: PathBuf) -> Self {
-        let (event_tx, event_rx) = std_mpsc::channel();
-        let (command_tx, command_rx) = std_mpsc::channel();
-        let pending_write = Arc::new(AtomicBool::new(false));
-        let pending_write_clone = pending_write.clone();
+    pub fn new<V: 'static>(
+        agent_command: String,
+        cwd: PathBuf,
+        cx: &mut Context<V>,
+    ) -> Entity<Self> {
+        cx.new(|cx: &mut Context<Self>| {
+            let (event_tx, event_rx) = channel::unbounded::<AcpEvent>();
+            let pending_write = Arc::new(AtomicBool::new(false));
+            let connection: Rc<RefCell<Option<ClientSideConnection>>> = Rc::new(RefCell::new(None));
+            let session_id: Rc<RefCell<Option<SessionId>>> = Rc::new(RefCell::new(None));
+            let child: Rc<RefCell<Option<Child>>> = Rc::new(RefCell::new(None));
 
-        let thread_handle = thread::spawn(move || {
-            let rt = Runtime::new().expect("Failed to create tokio runtime");
-            let local = LocalSet::new();
+            // Spawn the connection setup task
+            let io_task = {
+                let connection = Rc::clone(&connection);
+                let session_id = Rc::clone(&session_id);
+                let child_rc = Rc::clone(&child);
+                let pending_write = Arc::clone(&pending_write);
+                let event_tx_clone = event_tx.clone();
+                let foreground = cx.foreground_executor().clone();
 
-            local.block_on(&rt, async move {
-                if let Err(e) = run_acp_worker(
-                    agent_command,
-                    cwd,
-                    event_tx.clone(),
-                    command_rx,
-                    pending_write_clone,
-                )
-                .await
-                {
-                    let _ = event_tx.send(AcpEvent::Error(e.to_string()));
-                }
-            });
+                cx.spawn(async move |_, _cx| {
+                    if let Err(e) = Self::setup_connection(
+                        agent_command,
+                        cwd,
+                        connection,
+                        session_id,
+                        child_rc,
+                        pending_write,
+                        event_tx_clone.clone(),
+                        foreground,
+                    )
+                    .await
+                    {
+                        let _ = event_tx_clone.send(AcpEvent::Error(e.to_string())).await;
+                    }
+                })
+            };
+
+            Self {
+                event_rx,
+                event_tx,
+                connection,
+                session_id,
+                pending_write,
+                io_task,
+                child,
+            }
+        })
+    }
+
+    async fn setup_connection(
+        agent_command: String,
+        cwd: PathBuf,
+        connection_rc: Rc<RefCell<Option<ClientSideConnection>>>,
+        session_id_rc: Rc<RefCell<Option<SessionId>>>,
+        child_rc: Rc<RefCell<Option<Child>>>,
+        pending_write: Arc<AtomicBool>,
+        event_tx: channel::Sender<AcpEvent>,
+        foreground: gpui::ForegroundExecutor,
+    ) -> anyhow::Result<()> {
+        // Spawn the agent subprocess
+        let mut child = Command::new(&agent_command)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::inherit())
+            .spawn()?;
+
+        let stdin = child.stdin.take().expect("stdin should be available");
+        let stdout = child.stdout.take().expect("stdout should be available");
+
+        // Store the child process handle
+        *child_rc.borrow_mut() = Some(child);
+
+        let handler = ClientHandler {
+            event_tx: event_tx.clone(),
+            pending_write,
+        };
+
+        // Create the ACP connection using GPUI's foreground executor for spawning
+        let (conn, io_future) = ClientSideConnection::new(handler, stdin, stdout, move |fut| {
+            foreground.spawn(fut).detach();
         });
 
-        Self {
-            event_rx,
-            command_tx,
-            thread_handle,
-            pending_write,
+        // Store the connection
+        *connection_rc.borrow_mut() = Some(conn);
+
+        // Run the I/O handler in the background
+        smol::spawn(async move {
+            if let Err(e) = io_future.await {
+                eprintln!("ACP I/O error: {}", e);
+            }
+        })
+        .detach();
+
+        // Initialize the connection
+        {
+            use agent_client_protocol::ProtocolVersion;
+
+            let fs_caps = FileSystemCapability::new()
+                .read_text_file(true)
+                .write_text_file(true);
+            let client_caps = ClientCapabilities::new().fs(fs_caps);
+
+            let request = InitializeRequest::new(ProtocolVersion::LATEST)
+                .client_info(Implementation::new(
+                    "writ".to_string(),
+                    env!("CARGO_PKG_VERSION").to_string(),
+                ))
+                .client_capabilities(client_caps);
+
+            if let Some(ref conn) = *connection_rc.borrow() {
+                conn.initialize(request).await?;
+            }
         }
+
+        // Create a session
+        {
+            let request = NewSessionRequest::new(cwd);
+            if let Some(ref conn) = *connection_rc.borrow() {
+                let response = conn.new_session(request).await?;
+                *session_id_rc.borrow_mut() = Some(response.session_id);
+            }
+        }
+
+        // Signal that we're ready
+        let _ = event_tx.send(AcpEvent::Ready).await;
+
+        Ok(())
     }
 
     /// Send a prompt to the agent.
-    pub fn send_prompt(
-        &self,
-        text: String,
-        file_path: Option<PathBuf>,
-    ) -> Result<(), std_mpsc::SendError<AcpCommand>> {
-        self.command_tx.send(AcpCommand::Prompt { text, file_path })
+    pub fn send_prompt(&self, text: String, file_path: Option<PathBuf>, cx: &mut Context<Self>) {
+        let connection = Rc::clone(&self.connection);
+        let session_id = self.session_id.borrow().clone();
+        let event_tx = self.event_tx.clone();
+
+        if let Some(session_id) = session_id {
+            cx.spawn(async move |_, _| {
+                // Build prompt content blocks
+                let mut content_blocks: Vec<ContentBlock> = Vec::new();
+
+                if let Some(ref path) = file_path {
+                    let uri = format!("file://{}", path.display());
+                    let name = path
+                        .file_name()
+                        .map(|n| n.to_string_lossy().to_string())
+                        .unwrap_or_else(|| "file".to_string());
+                    content_blocks.push(ContentBlock::ResourceLink(ResourceLink::new(name, uri)));
+                }
+
+                content_blocks.push(ContentBlock::Text(TextContent::new(text)));
+
+                let request = PromptRequest::new(session_id, content_blocks);
+
+                let result = {
+                    if let Some(ref conn) = *connection.borrow() {
+                        Some(conn.prompt(request).await)
+                    } else {
+                        None
+                    }
+                };
+
+                // Send completion event
+                match result {
+                    Some(Ok(_)) => {
+                        let _ = event_tx.send(AcpEvent::ResponseComplete).await;
+                    }
+                    Some(Err(e)) => {
+                        let _ = event_tx.send(AcpEvent::Error(e.to_string())).await;
+                    }
+                    None => {
+                        let _ = event_tx
+                            .send(AcpEvent::Error("No connection".to_string()))
+                            .await;
+                    }
+                }
+            })
+            .detach();
+        }
     }
 
     /// Cancel the current prompt.
-    pub fn cancel(&self) -> Result<(), std_mpsc::SendError<AcpCommand>> {
-        self.command_tx.send(AcpCommand::Cancel)
+    pub fn cancel(&self, cx: &mut Context<Self>) {
+        let connection = Rc::clone(&self.connection);
+        let session_id = self.session_id.borrow().clone();
+
+        if let Some(session_id) = session_id {
+            cx.spawn(async move |_, _| {
+                if let Some(ref conn) = *connection.borrow() {
+                    let _ = conn.cancel(CancelNotification::new(session_id)).await;
+                }
+            })
+            .detach();
+        }
     }
 
     /// Try to receive the next event, non-blocking.
@@ -212,204 +348,22 @@ impl AcpClientHandle {
         self.event_rx.try_recv().ok()
     }
 
-    /// Check if a write is pending (set when agent sends write, cleared after processing).
+    /// Check if a write is pending.
     pub fn is_write_pending(&self) -> bool {
         self.pending_write.load(Ordering::SeqCst)
     }
 
-    /// Clear the pending write flag (call after processing WriteFile event).
+    /// Clear the pending write flag.
     pub fn clear_pending_write(&self) {
         self.pending_write.store(false, Ordering::SeqCst);
     }
-
-    /// Shutdown the connection.
-    pub fn shutdown(&self) {
-        let _ = self.command_tx.send(AcpCommand::Shutdown);
-    }
 }
 
-impl Drop for AcpClientHandle {
+impl Drop for AcpClient {
     fn drop(&mut self) {
-        self.shutdown();
-    }
-}
-
-/// Run the ACP worker loop.
-async fn run_acp_worker(
-    agent_command: String,
-    cwd: PathBuf,
-    event_tx: std_mpsc::Sender<AcpEvent>,
-    command_rx: std_mpsc::Receiver<AcpCommand>,
-    pending_write: Arc<AtomicBool>,
-) -> anyhow::Result<()> {
-    // Spawn the agent subprocess
-    let mut child = Command::new(&agent_command)
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::inherit())
-        .spawn()?;
-
-    let stdin = child.stdin.take().expect("stdin should be available");
-    let stdout = child.stdout.take().expect("stdout should be available");
-
-    // Create channels for ACP events (async side)
-    let (async_event_tx, mut async_event_rx) = mpsc::unbounded_channel();
-    let handler = ClientHandler {
-        event_tx: async_event_tx,
-        pending_write,
-    };
-
-    // Wrap tokio types with futures-compatible wrappers
-    let reader = tokio_util::compat::TokioAsyncReadCompatExt::compat(stdout);
-    let writer = tokio_util::compat::TokioAsyncWriteCompatExt::compat_write(stdin);
-
-    let spawn_fn = |fut: LocalBoxFuture<'static, ()>| {
-        tokio::task::spawn_local(fut);
-    };
-
-    let (connection, io_future) = ClientSideConnection::new(handler, writer, reader, spawn_fn);
-
-    // Wrap in Rc<RefCell<>> so we can share it with spawned tasks
-    let connection = Rc::new(RefCell::new(connection));
-
-    // Spawn the I/O handler
-    tokio::task::spawn_local(async move {
-        if let Err(e) = io_future.await {
-            eprintln!("ACP I/O error: {}", e);
-        }
-    });
-
-    // Initialize the connection
-    {
-        use agent_client_protocol::ProtocolVersion;
-
-        // Advertise our filesystem capabilities so the agent uses our RPC methods
-        // instead of writing directly to disk
-        let fs_caps = FileSystemCapability::new()
-            .read_text_file(true)
-            .write_text_file(true);
-        let client_caps = ClientCapabilities::new().fs(fs_caps);
-
-        let request = InitializeRequest::new(ProtocolVersion::LATEST)
-            .client_info(Implementation::new(
-                "writ".to_string(),
-                env!("CARGO_PKG_VERSION").to_string(),
-            ))
-            .client_capabilities(client_caps);
-        connection.borrow().initialize(request).await?;
-    }
-
-    // Create a session
-    let session_id: SessionId = {
-        let request = NewSessionRequest::new(cwd);
-        let response = connection.borrow().new_session(request).await?;
-        response.session_id
-    };
-
-    // Signal that we're ready
-    let _ = event_tx.send(AcpEvent::Ready);
-
-    // Channel for prompt completion signals (so we don't block the event loop)
-    let (prompt_done_tx, mut prompt_done_rx) = mpsc::unbounded_channel::<Result<(), String>>();
-
-    // Main event loop - poll both command channel and ACP events
-    loop {
-        tokio::select! {
-            // Handle ACP events from the connection (agent message chunks, etc.)
-            Some(acp_event) = async_event_rx.recv() => {
-                if event_tx.send(acp_event).is_err() {
-                    // Receiver dropped, exit
-                    break;
-                }
-            }
-
-            // Handle prompt completion from spawned task
-            Some(result) = prompt_done_rx.recv() => {
-                match result {
-                    Ok(()) => {
-                        let _ = event_tx.send(AcpEvent::ResponseComplete);
-                    }
-                    Err(e) => {
-                        let _ = event_tx.send(AcpEvent::Error(e));
-                    }
-                }
-            }
-
-            // Check for commands (non-blocking since std_mpsc isn't async)
-            _ = tokio::time::sleep(std::time::Duration::from_millis(10)) => {
-                match command_rx.try_recv() {
-                    Ok(AcpCommand::Prompt { text, file_path }) => {
-                        // Build prompt content blocks
-                        let mut content_blocks: Vec<ContentBlock> = Vec::new();
-
-                        // Include file as ResourceLink if we have a path
-                        if let Some(ref path) = file_path {
-                            let uri = format!("file://{}", path.display());
-                            let name = path
-                                .file_name()
-                                .map(|n| n.to_string_lossy().to_string())
-                                .unwrap_or_else(|| "file".to_string());
-                            content_blocks
-                                .push(ContentBlock::ResourceLink(ResourceLink::new(name, uri)));
-                        }
-
-                        // Add the user's text message
-                        content_blocks.push(ContentBlock::Text(TextContent::new(text)));
-
-                        let request = PromptRequest::new(session_id.clone(), content_blocks);
-
-                        // Spawn the prompt call as a separate task so we don't block
-                        // the event loop while waiting for the response. This allows
-                        // agent message chunks to be processed as they arrive.
-                        let connection_rc = Rc::clone(&connection);
-                        let done_tx = prompt_done_tx.clone();
-                        tokio::task::spawn_local(async move {
-                            match connection_rc.borrow().prompt(request).await {
-                                Ok(_) => {
-                                    let _ = done_tx.send(Ok(()));
-                                }
-                                Err(e) => {
-                                    let _ = done_tx.send(Err(e.to_string()));
-                                }
-                            }
-                        });
-                    }
-                    Ok(AcpCommand::Cancel) => {
-                        // Send cancel notification to stop the current prompt
-                        let connection_rc = Rc::clone(&connection);
-                        let sid = session_id.clone();
-                        tokio::task::spawn_local(async move {
-                            let _ = connection_rc
-                                .borrow()
-                                .cancel(CancelNotification::new(sid))
-                                .await;
-                        });
-                    }
-                    Ok(AcpCommand::Shutdown) => {
-                        break;
-                    }
-                    Err(std_mpsc::TryRecvError::Empty) => {
-                        // No commands, continue
-                    }
-                    Err(std_mpsc::TryRecvError::Disconnected) => {
-                        // Command channel closed, exit
-                        break;
-                    }
-                }
-            }
+        // Kill the child process if still running
+        if let Some(ref mut child) = *self.child.borrow_mut() {
+            let _ = child.kill();
         }
     }
-
-    // Drop the connection to close stdin, signaling the agent to exit
-    drop(connection);
-
-    // Give the agent a moment to exit gracefully, then force kill if needed
-    tokio::select! {
-        _ = child.wait() => {}
-        _ = tokio::time::sleep(std::time::Duration::from_secs(2)) => {
-            let _ = child.kill().await;
-        }
-    }
-
-    Ok(())
 }

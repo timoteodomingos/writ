@@ -5,4 +5,4 @@
 
 mod client;
 
-pub use client::{AcpClientHandle, AcpCommand, AcpEvent};
+pub use client::{AcpClient, AcpEvent};
