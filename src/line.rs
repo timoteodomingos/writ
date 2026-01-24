@@ -935,9 +935,10 @@ impl Line {
     fn hidden_bytes_before(&self, offset: usize, content_range: &Range<usize>) -> usize {
         let mut hidden = 0usize;
 
-        // For headings, the marker is hidden when cursor is not on line
+        // For headings, the marker is hidden when cursor and selection are not on line
         if self.line.heading_level().is_some()
             && !self.cursor_on_line()
+            && !self.selection_on_line()
             && let Some(marker_range) = self.line.marker_range()
             && offset > marker_range.end
         {
