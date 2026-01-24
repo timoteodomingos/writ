@@ -1,7 +1,7 @@
 //! ACP client implementation for Writ.
 //!
-//! Uses a channel-based design where a single long-running task owns the
-//! connection and processes commands sequentially.
+//! Uses GPUI's EventEmitter pattern - the handler emits events via AsyncApp,
+//! and AgentView subscribes to receive them.
 
 use agent_client_protocol::{
     Agent, CancelNotification, Client, ClientCapabilities, ClientSideConnection, ContentBlock,
@@ -12,43 +12,97 @@ use agent_client_protocol::{
     WriteTextFileRequest, WriteTextFileResponse,
 };
 use async_process::{Command, Stdio};
-use gpui::{AppContext, Context, Entity, Task};
+use gpui::{App, AppContext, AsyncApp, Context, Entity, EventEmitter, Task, WeakEntity};
 use smol::channel;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 
-/// Commands sent to the ACP connection task.
-enum AcpCommand {
-    /// Send a prompt to the agent.
-    SendPrompt {
-        text: String,
-        file_path: Option<PathBuf>,
-    },
-    /// Cancel the current prompt.
-    Cancel,
-}
+use crate::editor::Editor;
 
-/// Events emitted by the ACP client for the UI to handle.
+/// Events emitted by AcpClient that subscribers can handle.
 #[derive(Debug, Clone)]
 pub enum AcpEvent {
-    /// Connection established and ready.
     Ready,
-    /// Agent is streaming a chunk of its response message.
     AgentMessageChunk(String),
-    /// Agent response is complete.
     ResponseComplete,
-    /// Agent wants to write a file (via fs/write_text_file RPC).
+    WritePending,
     WriteFile { path: PathBuf, content: String },
-    /// Connection error or agent process exited.
     Error(String),
 }
 
-/// Handler that receives ACP callbacks and forwards them as events.
+/// Handler that receives ACP callbacks and emits events via AsyncApp.
 struct ClientHandler {
-    event_tx: channel::Sender<AcpEvent>,
-    /// Shared flag to signal a write is pending (blocks file watcher reload).
-    pending_write: Arc<AtomicBool>,
+    /// Async app context for accessing GPUI state.
+    async_app: AsyncApp,
+    /// The document editor to read from.
+    document_editor: Entity<Editor>,
+    /// Weak reference to the AcpClient entity for emitting events.
+    acp_client: WeakEntity<AcpClient>,
+}
+
+impl ClientHandler {
+    /// Emit an event to subscribers.
+    fn emit(&self, event: AcpEvent) {
+        if let Some(client) = self.acp_client.upgrade() {
+            let _ = self.async_app.clone().update_entity(&client, |_, cx| {
+                cx.emit(event);
+            });
+        }
+    }
+
+    /// Read file content, preferring the editor buffer for the current document.
+    fn read_file_content(
+        &self,
+        path: &PathBuf,
+        line: Option<u32>,
+        limit: Option<u32>,
+    ) -> Result<String, String> {
+        // Try to read from editor buffer if it's our file
+        let result =
+            self.async_app
+                .read_entity(&self.document_editor, |editor: &Editor, _: &App| {
+                    let document_path = editor.file_path();
+
+                    let is_our_file = document_path
+                        .map(|doc_path| {
+                            let doc_canonical = std::fs::canonicalize(doc_path).ok();
+                            let change_canonical = std::fs::canonicalize(path).ok();
+                            match (doc_canonical, change_canonical) {
+                                (Some(a), Some(b)) => a == b,
+                                _ => doc_path == path,
+                            }
+                        })
+                        .unwrap_or(false);
+
+                    if is_our_file {
+                        Some(editor.text())
+                    } else {
+                        None
+                    }
+                });
+
+        let content = match result {
+            Ok(Some(text)) => text,
+            Ok(None) | Err(_) => {
+                // Fall back to disk
+                std::fs::read_to_string(path).map_err(|e| format!("Failed to read file: {}", e))?
+            }
+        };
+
+        Ok(Self::apply_line_limit(&content, line, limit))
+    }
+
+    /// Apply line offset and limit to content (line-based, 1-indexed).
+    fn apply_line_limit(content: &str, line: Option<u32>, limit: Option<u32>) -> String {
+        let start_line = line.unwrap_or(1) as usize;
+        let max_lines = limit.map(|l| l as usize).unwrap_or(usize::MAX);
+
+        content
+            .lines()
+            .skip(start_line.saturating_sub(1))
+            .take(max_lines)
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
 }
 
 #[async_trait::async_trait(?Send)]
@@ -88,13 +142,12 @@ impl Client for ClientHandler {
         match notification.update {
             SessionUpdate::AgentMessageChunk(chunk) => {
                 if let ContentBlock::Text(TextContent { text, .. }) = chunk.content {
-                    let _ = self.event_tx.send(AcpEvent::AgentMessageChunk(text)).await;
+                    self.emit(AcpEvent::AgentMessageChunk(text));
                 }
             }
             SessionUpdate::ToolCall(_) => {
-                // ToolCall notifications with Diff content are informational only.
-                // The actual file write comes through write_text_file RPC since we
-                // advertise filesystem capabilities.
+                // ToolCall notifications are informational only.
+                // The actual file operations come through read/write_text_file RPCs.
             }
             _ => {
                 // Ignore other updates (tool call updates, thoughts, etc.)
@@ -107,13 +160,9 @@ impl Client for ClientHandler {
         &self,
         request: ReadTextFileRequest,
     ) -> agent_client_protocol::Result<ReadTextFileResponse> {
-        // Read from disk for now - we'll route through editor buffer later
-        match std::fs::read_to_string(&request.path) {
+        match self.read_file_content(&request.path, request.line, request.limit) {
             Ok(content) => Ok(ReadTextFileResponse::new(content)),
-            Err(e) => Err(agent_client_protocol::Error::new(
-                -32000,
-                format!("Failed to read file: {}", e),
-            )),
+            Err(e) => Err(agent_client_protocol::Error::new(-32000, e)),
         }
     }
 
@@ -121,111 +170,102 @@ impl Client for ClientHandler {
         &self,
         request: WriteTextFileRequest,
     ) -> agent_client_protocol::Result<WriteTextFileResponse> {
-        // Set pending write flag BEFORE sending event to prevent file watcher race
-        self.pending_write.store(true, Ordering::SeqCst);
-        // Don't actually write - send event for the UI to handle through the diff system
-        let _ = self
-            .event_tx
-            .send(AcpEvent::WriteFile {
-                path: request.path.clone(),
-                content: request.content.clone(),
-            })
-            .await;
+        // Emit WritePending first to block file watcher reloads
+        self.emit(AcpEvent::WritePending);
+        // Then emit the actual write
+        self.emit(AcpEvent::WriteFile {
+            path: request.path.clone(),
+            content: request.content.clone(),
+        });
         Ok(WriteTextFileResponse::new())
     }
 }
 
-/// ACP client state managed as a GPUI entity.
+/// Commands sent to the ACP connection task.
+enum AcpCommand {
+    SendPrompt {
+        text: String,
+        file_path: Option<PathBuf>,
+    },
+    Cancel,
+}
+
+/// ACP client that manages the connection to an agent.
 ///
-/// Uses a channel-based design: commands are sent to a single task that owns
-/// the connection, and events are received from that task.
+/// Implements `EventEmitter<AcpEvent>` - use `cx.subscribe()` to receive events.
 pub struct AcpClient {
     /// Channel to send commands to the connection task.
     command_tx: channel::Sender<AcpCommand>,
-    /// Channel to receive events from the connection task.
-    event_rx: channel::Receiver<AcpEvent>,
-    /// Shared flag indicating a write event is pending.
-    pending_write: Arc<AtomicBool>,
     /// Handle to the connection task (keeps it alive).
     #[allow(dead_code)]
     task: Task<()>,
 }
 
+impl EventEmitter<AcpEvent> for AcpClient {}
+
 impl AcpClient {
     /// Spawn an agent subprocess and establish an ACP connection.
-    pub fn new<V: 'static>(
+    pub fn new(
         agent_command: String,
         cwd: PathBuf,
-        cx: &mut Context<V>,
-    ) -> Entity<Self> {
-        cx.new(|cx: &mut Context<Self>| {
-            let (command_tx, command_rx) = channel::unbounded::<AcpCommand>();
-            let (event_tx, event_rx) = channel::unbounded::<AcpEvent>();
-            let pending_write = Arc::new(AtomicBool::new(false));
+        document_editor: Entity<Editor>,
+        cx: &mut Context<Self>,
+    ) -> Self {
+        let (command_tx, command_rx) = channel::unbounded::<AcpCommand>();
+        let foreground = cx.foreground_executor().clone();
+        let async_app = cx.to_async();
+        let weak_self = cx.weak_entity();
 
-            let pending_write_clone = Arc::clone(&pending_write);
-            let foreground = cx.foreground_executor().clone();
-
-            // Spawn the main connection task
-            let task = cx.spawn(async move |_, _cx| {
-                if let Err(e) = run_connection(
-                    agent_command,
-                    cwd,
-                    command_rx,
-                    event_tx.clone(),
-                    pending_write_clone,
-                    foreground,
-                )
-                .await
-                {
-                    let _ = event_tx.send(AcpEvent::Error(e.to_string())).await;
-                }
-            });
-
-            Self {
-                command_tx,
-                event_rx,
-                pending_write,
-                task,
+        // Spawn the main connection task
+        let task = cx.spawn(async move |_, _cx| {
+            if let Err(e) = run_connection(
+                agent_command,
+                cwd,
+                document_editor,
+                async_app.clone(),
+                weak_self.clone(),
+                command_rx,
+                foreground,
+            )
+            .await
+            {
+                // Emit error event
+                emit_event(&async_app, &weak_self, AcpEvent::Error(e.to_string()));
             }
-        })
+        });
+
+        Self { command_tx, task }
     }
 
     /// Send a prompt to the agent.
-    pub fn send_prompt(&self, text: String, file_path: Option<PathBuf>, _cx: &mut Context<Self>) {
+    pub fn send_prompt(&self, text: String, file_path: Option<PathBuf>) {
         let _ = self
             .command_tx
             .try_send(AcpCommand::SendPrompt { text, file_path });
     }
 
     /// Cancel the current prompt.
-    pub fn cancel(&self, _cx: &mut Context<Self>) {
+    pub fn cancel(&self) {
         let _ = self.command_tx.try_send(AcpCommand::Cancel);
-    }
-
-    /// Try to receive the next event, non-blocking.
-    pub fn try_recv(&self) -> Option<AcpEvent> {
-        self.event_rx.try_recv().ok()
-    }
-
-    /// Check if a write is pending.
-    pub fn is_write_pending(&self) -> bool {
-        self.pending_write.load(Ordering::SeqCst)
-    }
-
-    /// Clear the pending write flag.
-    pub fn clear_pending_write(&self) {
-        self.pending_write.store(false, Ordering::SeqCst);
     }
 }
 
-/// The main connection task that owns the ACP connection and processes commands.
+/// Helper to emit an event from async context.
+fn emit_event(async_app: &AsyncApp, acp_client: &WeakEntity<AcpClient>, event: AcpEvent) {
+    if let Some(client) = acp_client.upgrade() {
+        let _ = async_app.clone().update_entity(&client, |_, cx| {
+            cx.emit(event);
+        });
+    }
+}
+
 async fn run_connection(
     agent_command: String,
     cwd: PathBuf,
+    document_editor: Entity<Editor>,
+    async_app: AsyncApp,
+    acp_client: WeakEntity<AcpClient>,
     command_rx: channel::Receiver<AcpCommand>,
-    event_tx: channel::Sender<AcpEvent>,
-    pending_write: Arc<AtomicBool>,
     foreground: gpui::ForegroundExecutor,
 ) -> anyhow::Result<()> {
     // Spawn the agent subprocess
@@ -240,8 +280,9 @@ async fn run_connection(
     let stdout = child.stdout.take().expect("stdout should be available");
 
     let handler = ClientHandler {
-        event_tx: event_tx.clone(),
-        pending_write,
+        async_app: async_app.clone(),
+        document_editor,
+        acp_client: acp_client.clone(),
     };
 
     // Create the ACP connection
@@ -282,7 +323,7 @@ async fn run_connection(
     };
 
     // Signal that we're ready
-    let _ = event_tx.send(AcpEvent::Ready).await;
+    emit_event(&async_app, &acp_client, AcpEvent::Ready);
 
     // Process commands
     while let Ok(cmd) = command_rx.recv().await {
@@ -306,10 +347,10 @@ async fn run_connection(
 
                 match conn.prompt(request).await {
                     Ok(_) => {
-                        let _ = event_tx.send(AcpEvent::ResponseComplete).await;
+                        emit_event(&async_app, &acp_client, AcpEvent::ResponseComplete);
                     }
                     Err(e) => {
-                        let _ = event_tx.send(AcpEvent::Error(e.to_string())).await;
+                        emit_event(&async_app, &acp_client, AcpEvent::Error(e.to_string()));
                     }
                 }
             }

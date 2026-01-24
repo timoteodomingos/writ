@@ -4,11 +4,10 @@
 //! an optional chat panel (right) for agent responses.
 
 use gpui::{
-    App, Context, Entity, FocusHandle, Focusable, IntoElement, Rems, Render, Timer, Window,
+    App, Context, Entity, FocusHandle, Focusable, IntoElement, Rems, Render, Subscription, Window,
     actions, div, prelude::*, px, rgb,
 };
 use std::path::PathBuf;
-use std::time::Duration;
 
 use crate::acp::{AcpClient, AcpEvent};
 use crate::diff::DiffState;
@@ -30,6 +29,9 @@ pub struct AgentView {
     focus_handle: FocusHandle,
     /// Optional ACP client for communicating with an agent.
     acp_client: Option<Entity<AcpClient>>,
+    /// Subscription to ACP client events.
+    #[allow(dead_code)]
+    acp_subscription: Option<Subscription>,
     /// Whether we're currently waiting for an agent response.
     awaiting_response: bool,
 }
@@ -75,113 +77,75 @@ impl AgentView {
             chat_panel_visible: false,
             focus_handle,
             acp_client: None,
+            acp_subscription: None,
             awaiting_response: false,
         }
     }
 
     /// Connect to an agent using the given command.
     pub fn connect_agent(&mut self, agent_command: String, cwd: PathBuf, cx: &mut Context<Self>) {
-        // Create the ACP client as an entity
-        let client = AcpClient::new(agent_command, cwd, cx);
+        // Create the ACP client, passing the document editor for direct buffer access
+        let document_editor = self.document_editor.clone();
+        let client = cx.new(|cx| AcpClient::new(agent_command, cwd, document_editor, cx));
+
+        // Subscribe to client events
+        let subscription = cx.subscribe(&client, |this, _client, event, cx| {
+            this.handle_acp_event(event, cx);
+        });
+
         self.acp_client = Some(client);
-
-        // Start polling for events
-        self.start_event_polling(cx);
+        self.acp_subscription = Some(subscription);
     }
 
-    /// Start polling for ACP events.
-    fn start_event_polling(&mut self, cx: &mut Context<Self>) {
-        cx.spawn(async move |this, cx| {
-            loop {
-                // Poll every 16ms (~60fps)
-                Timer::after(Duration::from_millis(16)).await;
-
-                let should_continue = cx
-                    .update(|cx| {
-                        this.update(cx, |view, cx| {
-                            view.poll_acp_events(cx);
-                            view.acp_client.is_some()
-                        })
-                        .unwrap_or(false)
-                    })
-                    .unwrap_or(false);
-
-                if !should_continue {
-                    break;
-                }
+    /// Handle an event from the ACP client.
+    fn handle_acp_event(&mut self, event: &AcpEvent, cx: &mut Context<Self>) {
+        match event {
+            AcpEvent::Ready => {
+                // Agent connected, update chat with welcome message
+                self.chat_editor.update(cx, |editor, cx| {
+                    editor.set_text("*Agent connected. Type a message below.*\n\n", cx);
+                });
             }
-        })
-        .detach();
-    }
-
-    /// Poll for and handle ACP events.
-    fn poll_acp_events(&mut self, cx: &mut Context<Self>) {
-        let Some(client) = &self.acp_client else {
-            return;
-        };
-
-        // If a write is pending from the ACP client, block file watcher reloads
-        let is_write_pending = client.read(cx).is_write_pending();
-        if is_write_pending {
-            self.document_editor.update(cx, |editor, _cx| {
-                editor.set_pending_agent_write(true);
-            });
-        }
-
-        // Collect all available events first to avoid borrow issues
-        let events: Vec<_> = std::iter::from_fn(|| client.read(cx).try_recv()).collect();
-
-        // Process collected events
-        for event in events {
-            match event {
-                AcpEvent::Ready => {
-                    // Agent connected, update chat with welcome message
+            AcpEvent::AgentMessageChunk(text) => {
+                // Start streaming mode on first chunk
+                if !self.awaiting_response {
+                    self.awaiting_response = true;
                     self.chat_editor.update(cx, |editor, cx| {
-                        editor.set_text("*Agent connected. Type a message below.*\n\n", cx);
+                        editor.begin_streaming(cx);
                     });
                 }
-                AcpEvent::AgentMessageChunk(text) => {
-                    // Start streaming mode on first chunk
-                    if !self.awaiting_response {
-                        self.awaiting_response = true;
-                        self.chat_editor.update(cx, |editor, cx| {
-                            editor.begin_streaming(cx);
-                        });
+                // Append the chunk
+                self.chat_editor.update(cx, |editor, cx| {
+                    editor.append(text, cx);
+                });
+            }
+            AcpEvent::ResponseComplete => {
+                self.awaiting_response = false;
+                self.chat_editor.update(cx, |editor, cx| {
+                    editor.end_streaming(cx);
+                    // Ensure consistent spacing after response
+                    let ends_n = editor.ends_with("\n");
+                    let ends_nn = editor.ends_with("\n\n");
+                    if !ends_n {
+                        editor.append("\n\n", cx);
+                    } else if !ends_nn {
+                        editor.append("\n", cx);
                     }
-                    // Append the chunk
-                    self.chat_editor.update(cx, |editor, cx| {
-                        editor.append(&text, cx);
-                    });
-                }
-                AcpEvent::ResponseComplete => {
-                    self.awaiting_response = false;
-                    self.chat_editor.update(cx, |editor, cx| {
-                        editor.end_streaming(cx);
-                        // Ensure consistent spacing after response
-                        let ends_n = editor.ends_with("\n");
-                        let ends_nn = editor.ends_with("\n\n");
-                        if !ends_n {
-                            editor.append("\n\n", cx);
-                        } else if !ends_nn {
-                            editor.append("\n", cx);
-                        }
-                    });
-                    // Save the document so the file on disk matches what the agent wrote
-                    self.document_editor.update(cx, |editor, cx| {
-                        editor.save(cx);
-                    });
-                }
-                AcpEvent::WriteFile { path, content } => {
-                    self.apply_agent_content_change(&path, &content, cx);
-                    if let Some(client) = &self.acp_client {
-                        client.read(cx).clear_pending_write();
-                    }
-                }
-                AcpEvent::Error(msg) => {
-                    self.chat_editor.update(cx, |editor, cx| {
-                        editor.append(&format!("\n\n**Error:** {}\n\n", msg), cx);
-                    });
-                }
+                });
+            }
+            AcpEvent::WritePending => {
+                // Block file watcher reloads until WriteFile is processed
+                self.document_editor.update(cx, |editor, _cx| {
+                    editor.set_pending_agent_write(true);
+                });
+            }
+            AcpEvent::WriteFile { path, content } => {
+                self.apply_agent_content_change(path, content, cx);
+            }
+            AcpEvent::Error(msg) => {
+                self.chat_editor.update(cx, |editor, cx| {
+                    editor.append(&format!("\n\n**Error:** {}\n\n", msg), cx);
+                });
             }
         }
     }
@@ -243,7 +207,7 @@ impl AgentView {
 
         // If we're still waiting for a response, cancel it first
         if self.awaiting_response {
-            client.update(cx, |c, cx| c.cancel(cx));
+            client.read(cx).cancel();
             self.chat_editor.update(cx, |editor, cx| {
                 editor.end_streaming(cx);
                 editor.append("\n\n*Cancelled*\n\n", cx);
@@ -267,9 +231,7 @@ impl AgentView {
         self.awaiting_response = true;
 
         // Send to the agent with file context
-        client.update(cx, |c, cx| {
-            c.send_prompt(prompt, file_path, cx);
-        });
+        client.read(cx).send_prompt(prompt, file_path);
     }
 
     /// Get a reference to the document editor.
