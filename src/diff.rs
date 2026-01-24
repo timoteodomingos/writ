@@ -11,13 +11,6 @@ use crate::buffer::RenderSnapshot;
 use imara_diff::{Algorithm, Diff, InternedInput};
 use std::ops::Range;
 
-/// Status of a diff hunk.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum HunkStatus {
-    /// Hunk is pending review.
-    Pending,
-}
-
 /// A word-level change within a line.
 #[derive(Debug, Clone)]
 pub struct InlineChange {
@@ -25,8 +18,9 @@ pub struct InlineChange {
     pub range: Range<usize>,
 }
 
-/// Per-line inline changes: (line_offset_in_hunk, changes).
-type LineInlineChanges = Vec<(usize, Vec<InlineChange>)>;
+/// Per-line inline changes, indexed by line offset within hunk.
+/// Empty vec means no word-level changes for that line.
+type LineInlineChanges = Vec<Vec<InlineChange>>;
 
 /// A single diff hunk representing a contiguous change.
 #[derive(Debug, Clone)]
@@ -35,8 +29,6 @@ pub struct DiffHunk {
     pub old_lines: Range<usize>,
     /// Line range in the current buffer (additions).
     pub new_lines: Range<usize>,
-    /// Current status of this hunk.
-    pub status: HunkStatus,
     /// Word-level deletions within old lines, indexed by line offset within hunk.
     pub old_inline_changes: LineInlineChanges,
     /// Word-level additions within new lines, indexed by line offset within hunk.
@@ -65,7 +57,7 @@ impl DiffState {
 
     /// Check if there are any pending hunks.
     pub fn has_pending_hunks(&self) -> bool {
-        self.hunks.iter().any(|h| h.status == HunkStatus::Pending)
+        !self.hunks.is_empty()
     }
 
     /// Accept a hunk by index. Since changes are already applied, just remove it.
@@ -110,16 +102,14 @@ impl DiffState {
     /// Returns None if the line is not part of any hunk.
     pub fn hunk_at_line(&self, new_line: usize) -> Option<usize> {
         for (idx, hunk) in self.hunks.iter().enumerate() {
-            if hunk.status == HunkStatus::Pending {
-                // Check if line is in the new_lines range (additions)
-                if hunk.new_lines.contains(&new_line) {
-                    return Some(idx);
-                }
-                // Also check if cursor is at the start of a pure deletion
-                // (ghost lines appear before new_lines.start)
-                if hunk.new_lines.is_empty() && hunk.new_lines.start == new_line {
-                    return Some(idx);
-                }
+            // Check if line is in the new_lines range (additions)
+            if hunk.new_lines.contains(&new_line) {
+                return Some(idx);
+            }
+            // Also check if cursor is at the start of a pure deletion
+            // (ghost lines appear before new_lines.start)
+            if hunk.new_lines.is_empty() && hunk.new_lines.start == new_line {
+                return Some(idx);
             }
         }
         None
@@ -168,10 +158,7 @@ impl DiffState {
     /// Returns the range of old lines to render as ghosts.
     pub fn ghost_lines_before(&self, new_line: usize) -> Option<Range<usize>> {
         for hunk in &self.hunks {
-            if hunk.status == HunkStatus::Pending
-                && hunk.new_lines.start == new_line
-                && !hunk.old_lines.is_empty()
-            {
+            if hunk.new_lines.start == new_line && !hunk.old_lines.is_empty() {
                 return Some(hunk.old_lines.clone());
             }
         }
@@ -180,21 +167,19 @@ impl DiffState {
 
     /// Check if a line in the new buffer is an addition (part of a hunk's new_lines).
     pub fn is_addition(&self, new_line: usize) -> bool {
-        self.hunks
-            .iter()
-            .any(|h| h.status == HunkStatus::Pending && h.new_lines.contains(&new_line))
+        self.hunks.iter().any(|h| h.new_lines.contains(&new_line))
     }
 
     /// Get inline changes for an old line (ghost line) if any.
     /// Returns byte ranges within the line that were deleted.
     pub fn old_inline_changes(&self, old_line: usize) -> Option<&[InlineChange]> {
         for hunk in &self.hunks {
-            if hunk.status == HunkStatus::Pending && hunk.old_lines.contains(&old_line) {
+            if hunk.old_lines.contains(&old_line) {
                 let line_offset = old_line - hunk.old_lines.start;
-                for (offset, changes) in &hunk.old_inline_changes {
-                    if *offset == line_offset {
-                        return Some(changes);
-                    }
+                if let Some(changes) = hunk.old_inline_changes.get(line_offset)
+                    && !changes.is_empty()
+                {
+                    return Some(changes);
                 }
             }
         }
@@ -205,12 +190,12 @@ impl DiffState {
     /// Returns byte ranges within the line that were added.
     pub fn new_inline_changes(&self, new_line: usize) -> Option<&[InlineChange]> {
         for hunk in &self.hunks {
-            if hunk.status == HunkStatus::Pending && hunk.new_lines.contains(&new_line) {
+            if hunk.new_lines.contains(&new_line) {
                 let line_offset = new_line - hunk.new_lines.start;
-                for (offset, changes) in &hunk.new_inline_changes {
-                    if *offset == line_offset {
-                        return Some(changes);
-                    }
+                if let Some(changes) = hunk.new_inline_changes.get(line_offset)
+                    && !changes.is_empty()
+                {
+                    return Some(changes);
                 }
             }
         }
@@ -259,7 +244,6 @@ fn compute_line_hunks(old_text: &str, new_text: &str) -> Vec<DiffHunk> {
             DiffHunk {
                 old_lines: old_range,
                 new_lines: new_range,
-                status: HunkStatus::Pending,
                 old_inline_changes: old_inline,
                 new_inline_changes: new_inline,
             }
@@ -358,14 +342,18 @@ fn tokenize_with_positions(text: &str) -> Vec<(&str, Range<usize>)> {
     tokens
 }
 
-/// Convert absolute byte ranges to per-line (line_offset, Vec<InlineChange>).
+/// Convert absolute byte ranges to per-line Vec<Vec<InlineChange>>.
+/// Returns a dense vec indexed by line offset within the hunk.
 fn ranges_to_per_line_changes(
     full_text: &str,
     lines: &[&str],
     ranges: &[Range<usize>],
-) -> Vec<(usize, Vec<InlineChange>)> {
+) -> Vec<Vec<InlineChange>> {
+    // Initialize with empty vecs for each line
+    let mut per_line: Vec<Vec<InlineChange>> = vec![vec![]; lines.len()];
+
     if ranges.is_empty() {
-        return vec![];
+        return per_line;
     }
 
     // Build line start offsets
@@ -377,8 +365,6 @@ fn ranges_to_per_line_changes(
     }
 
     // Group ranges by line
-    let mut per_line: Vec<(usize, Vec<InlineChange>)> = vec![];
-
     for range in ranges {
         // Find which line this range belongs to
         for (line_idx, window) in line_starts.windows(2).enumerate() {
@@ -389,19 +375,9 @@ fn ranges_to_per_line_changes(
                 let relative_range =
                     (range.start - line_start)..(range.end - line_start).min(lines[line_idx].len());
 
-                // Find or create entry for this line
-                if let Some((_, changes)) = per_line.iter_mut().find(|(idx, _)| *idx == line_idx) {
-                    changes.push(InlineChange {
-                        range: relative_range,
-                    });
-                } else {
-                    per_line.push((
-                        line_idx,
-                        vec![InlineChange {
-                            range: relative_range,
-                        }],
-                    ));
-                }
+                per_line[line_idx].push(InlineChange {
+                    range: relative_range,
+                });
                 break;
             }
         }

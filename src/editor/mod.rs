@@ -3211,10 +3211,19 @@ impl Editor {
         let extend = keystroke.modifiers.shift;
 
         match keystroke.key.as_str() {
-            // Diff accept/reject keybindings - must come before unguarded backspace/enter
-            "backspace"
-                if (keystroke.modifiers.control || keystroke.modifiers.platform)
-                    && self.diff_state.is_some() =>
+            // Diff accept: Ctrl+Y (current hunk) or Ctrl+Shift+Y (all hunks)
+            "y" if (keystroke.modifiers.control || keystroke.modifiers.platform)
+                && self.diff_state.is_some() =>
+            {
+                if keystroke.modifiers.shift {
+                    self.accept_all_hunks(cx);
+                } else {
+                    self.accept_current_hunk(cx);
+                }
+            }
+            // Diff reject: Ctrl+N (current hunk) or Ctrl+Shift+N (all hunks)
+            "n" if (keystroke.modifiers.control || keystroke.modifiers.platform)
+                && self.diff_state.is_some() =>
             {
                 if keystroke.modifiers.shift {
                     self.reject_all_hunks(cx);
@@ -3257,17 +3266,6 @@ impl Editor {
                 };
                 self.move_cursor(new_cursor, extend);
                 self.scroll_to_cursor_pending = true;
-            }
-            // Diff accept keybinding - must come before unguarded enter
-            "enter"
-                if (keystroke.modifiers.control || keystroke.modifiers.platform)
-                    && self.diff_state.is_some() =>
-            {
-                if keystroke.modifiers.shift {
-                    self.accept_all_hunks(cx);
-                } else {
-                    self.accept_current_hunk(cx);
-                }
             }
             "enter" => {
                 if keystroke.modifiers.shift && keystroke.modifiers.alt {
