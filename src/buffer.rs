@@ -339,7 +339,7 @@ impl BufferContent {
             if is_ordered {
                 let mut item_number = 1;
                 for i in 0..node.child_count() {
-                    if let Some(child) = node.child(i as u32)
+                    if let Some(child) = node.child(i as usize)
                         && child.kind() == "list_item"
                         && let Some((marker_range, current_number, is_parenthesis)) =
                             self.extract_ordered_marker(&child)
@@ -354,7 +354,7 @@ impl BufferContent {
         }
 
         for i in 0..node.child_count() {
-            if let Some(child) = node.child(i as u32) {
+            if let Some(child) = node.child(i as usize) {
                 self.collect_list_corrections(&child, corrections);
             }
         }
@@ -362,11 +362,11 @@ impl BufferContent {
 
     fn is_ordered_list(&self, list_node: &tree_sitter::Node) -> bool {
         for i in 0..list_node.child_count() {
-            if let Some(child) = list_node.child(i as u32)
+            if let Some(child) = list_node.child(i as usize)
                 && child.kind() == "list_item"
             {
                 for j in 0..child.child_count() {
-                    if let Some(marker) = child.child(j as u32) {
+                    if let Some(marker) = child.child(j as usize) {
                         return marker.kind().starts_with("list_marker_decimal")
                             || marker.kind() == "list_marker_dot"
                             || marker.kind() == "list_marker_parenthesis";
@@ -383,7 +383,7 @@ impl BufferContent {
         list_item: &tree_sitter::Node,
     ) -> Option<(Range<usize>, usize, bool)> {
         for i in 0..list_item.child_count() {
-            if let Some(marker) = list_item.child(i as u32)
+            if let Some(marker) = list_item.child(i as usize)
                 && (marker.kind().starts_with("list_marker_decimal")
                     || marker.kind() == "list_marker_dot"
                     || marker.kind() == "list_marker_parenthesis")

@@ -720,7 +720,7 @@ impl EditorState {
         }
         let child_count = node.child_count();
         for i in (0..child_count).rev() {
-            if let Some(child) = node.child(i as u32)
+            if let Some(child) = node.child(i as usize)
                 && let Some(found) = self.find_last_list_item(child)
             {
                 return Some(found);
